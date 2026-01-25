@@ -1,0 +1,109 @@
+services:
+  # Local LLM runtime (kept internal; accessed by rag-ingest and rag-chat only)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    volumes:
+      - ollama:/root/.ollama
+    environment:
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-15m}
+    healthcheck:
+      test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:11434/api/tags >/dev/null 2>&1 || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  # Vector DB (private backend; NOT exposed externally)
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
+    volumes:
+      - qdrant:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:6333/readyz >/dev/null 2>&1 || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  # Ingestion API (the ONLY remote write entrypoint)
+  # - validate/redact -> chunk -> embed -> upsert to Qdrant
+  # - optional payload encryption envelope (see README)
+  rag-ingest:
+    build:
+      context: ./rag-ingest
+    container_name: rag-ingest
+    restart: unless-stopped
+    volumes:
+      - rag_ingest_data:/data
+    environment:
+      - INGEST_SHARED_SECRET=${INGEST_SHARED_SECRET}
+      - INGEST_REQUIRE_ENCRYPTION=${INGEST_REQUIRE_ENCRYPTION:-0}
+      - INGEST_NONCE_DB=/data/nonces.db
+      - INGEST_MAX_SKEW_S=${INGEST_MAX_SKEW_S:-300}
+      - QDRANT_URL=http://qdrant:6333
+      - OLLAMA_URL=http://ollama:11434
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-project_docs}
+      - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
+      - INGEST_CHUNK_SIZE=${INGEST_CHUNK_SIZE:-1000}
+      - INGEST_CHUNK_OVERLAP=${INGEST_CHUNK_OVERLAP:-120}
+      - INGEST_UPSERT_BATCH_SIZE=${INGEST_UPSERT_BATCH_SIZE:-64}
+    ports:
+      - "127.0.0.1:9000:9000"
+    depends_on: [qdrant, ollama]
+    healthcheck:
+      test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:9000/health >/dev/null 2>&1 || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  # Chat API (expose this, not Ollama)
+  rag-chat:
+    build:
+      context: ./rag-chat
+    container_name: rag-chat
+    restart: unless-stopped
+    environment:
+      - OLLAMA_URL=http://ollama:11434
+      - CHAT_MODEL=${CHAT_MODEL:-llama3.1:8b}
+      - CHAT_SYSTEM_PROMPT=${CHAT_SYSTEM_PROMPT:-You are a helpful assistant.}
+      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-project_docs}
+      - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
+      - RAG_ENABLED=${RAG_ENABLED:-1}
+      - RAG_TOP_K=${RAG_TOP_K:-5}
+      - RAG_MAX_CONTEXT_CHARS=${RAG_MAX_CONTEXT_CHARS:-4000}
+    ports:
+      - "127.0.0.1:9100:9100"
+    depends_on: [ollama]
+    healthcheck:
+      test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:9100/health >/dev/null 2>&1 || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  # Cloudflare Tunnel (publish ONLY rag-ingest + rag-chat hostnames in Cloudflare UI)
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cloudflared
+    restart: unless-stopped
+    depends_on: [rag-ingest, rag-chat]
+    environment:
+      - TUNNEL_TOKEN=${CF_TUNNEL_TOKEN}
+    command: tunnel --no-autoupdate run
+    networks: [internal]
+
+networks:
+  internal:
+    name: rag-internal
+    driver: bridge
+
+volumes:
+  ollama:
+  qdrant:
+  rag_ingest_data:

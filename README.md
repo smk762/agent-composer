@@ -1,0 +1,274 @@
+# Ollama + Qdrant (RAG) behind Cloudflare Zero Trust — with Ingestion + Chat APIs
+
+This repo is a minimal, secure-by-default scaffold for:
+- **Ollama** (local LLM runtime; never directly exposed)
+- **Qdrant** (vector DB; never directly exposed)
+- **`rag-ingest` (FastAPI)**: authenticated ingestion endpoint (HMAC + optional payload encryption)
+- **`rag-chat` (FastAPI)**: chat gateway in front of Ollama (so you never expose Ollama directly)
+- **`cloudflared`**: Cloudflare Tunnel to publish only the APIs you choose
+- **Cloudflare Access**: authN/authZ in front of those hostnames (SSO/MFA for humans; service tokens for machines)
+
+> “Bare arms” note: yes, that was a U.S. Constitution joke — we’re going **minimal** rather than “bear arms”.
+
+## What this stack does (today)
+- **Network posture**:
+  - Qdrant and Ollama are on an internal Docker network only.
+  - APIs bind to `127.0.0.1` on the host, so they’re not reachable from your LAN.
+  - `cloudflared` is the only component intended to accept inbound traffic (via Cloudflare’s edge).
+- **`rag-chat`**:
+  - Proxies `POST /chat` to Ollama `POST /api/chat`.
+  - Injects a default system prompt if you didn’t provide one.
+  - Optional RAG: embeds the last user message, searches Qdrant, and injects retrieved context as an additional system message.
+- **`rag-ingest`**:
+  - Requires a shared secret.
+  - Verifies an HMAC signature over the request body + timestamp + nonce.
+  - Persists nonces (SQLite) and rejects replays within the timestamp window.
+  - Optionally requires an encrypted envelope (Fernet) derived from the same shared secret.
+  - Implements “chunk → embed (Ollama) → upsert (Qdrant)” into `QDRANT_COLLECTION`.
+
+## Design goals
+- Keep **Qdrant entirely unexposed externally**
+- Keep **Ollama entirely unexposed externally**
+- Expose only:
+  - `rag-ingest` (for indexing; **service-token protected** with Cloudflare Access)
+  - `rag-chat` (for humans/agents; **SSO/MFA** or service-token protected with Cloudflare Access)
+
+## Repo layout
+```
+.
+├─ docker-compose.yml
+├─ env.example
+├─ rag-ingest/
+│  ├─ Dockerfile
+│  ├─ requirements.txt
+│  └─ app/main.py
+└─ rag-chat/
+   ├─ Dockerfile
+   ├─ requirements.txt
+   └─ app/main.py
+```
+
+## Prereqs
+- Docker Engine + Docker Compose v2 (`docker compose`)
+- A Cloudflare account with Zero Trust enabled
+- A host firewall/security group that does **not** expose your Docker ports publicly
+
+## Configuration
+
+### `.env`
+Copy the example and fill in values:
+
+```bash
+cp env.example .env
+```
+
+Required:
+- `CF_TUNNEL_TOKEN`: Cloudflared tunnel token (from Cloudflare Zero Trust)
+- `INGEST_SHARED_SECRET`: shared secret used for ingestion HMAC (and for optional envelope encryption)
+
+Optional:
+- `INGEST_REQUIRE_ENCRYPTION`: set to `1` to require encrypted envelopes for ingestion
+- `CHAT_MODEL`: default Ollama model for chat (example: `llama3.1:8b`)
+- `CHAT_SYSTEM_PROMPT`: default system prompt
+- `QDRANT_COLLECTION`: default collection name (future use by ingestion pipeline)
+- `OLLAMA_KEEP_ALIVE`: Ollama keep-alive setting (example: `15m`)
+
+## Quick start
+
+1) Start the stack:
+
+```bash
+docker compose up -d --build
+docker logs -f cloudflared
+```
+
+2) Pull a model (once):
+
+```bash
+docker exec -it ollama ollama pull llama3.1:8b
+```
+
+Optional: pick better defaults for your machine (host-side helper):
+
+```bash
+python3 scripts/recommend_model.py
+```
+
+3) Local health checks (on the host):
+
+```bash
+curl -s http://127.0.0.1:9000/health
+curl -s http://127.0.0.1:9100/health
+```
+
+## Cloudflare Zero Trust setup
+
+### 1) Create a Tunnel
+In Cloudflare Zero Trust:
+- Networks → Tunnels → Create
+- Choose Docker
+- Copy the **Tunnel Token** into `.env` as `CF_TUNNEL_TOKEN`
+
+### 2) Add Public Hostnames (routes) in the Tunnel
+In the Tunnel configuration, add ONLY:
+- `your-chat-hostname.example.com` → `http://rag-chat:9100`
+- `your-ingest-hostname.example.com` → `http://rag-ingest:9000`
+
+Do **not** add hostnames for Qdrant or Ollama.
+
+### 3) Add Cloudflare Access apps / policies
+Create Access apps for the two hostnames:
+
+**`rag-chat` (humans)**
+- Policy: SSO + MFA (your account(s))
+- Optional: device posture checks
+
+**`rag-ingest` (machines)**
+- Policy: **Service Token only**
+- Create a Service Token per client (laptop/CI/agent)
+- Rotate tokens as needed
+
+## APIs
+
+### `rag-chat`
+- `GET /health`
+- `POST /chat` → forwards to Ollama `/api/chat`
+
+Example request body:
+
+```json
+{
+  "messages": [
+    {"role": "user", "content": "Hello!"}
+  ]
+}
+```
+
+### `rag-ingest`
+- `GET /health`
+- `POST /ingest` → verifies signature + replay-protects nonce, optionally decrypts, then chunks → embeds → upserts into Qdrant
+
+#### Request signing (required)
+`rag-ingest` requires these headers:
+- `X-Timestamp`: unix epoch seconds
+- `X-Nonce`: random nonce (unique per request)
+- `X-Signature`: hex HMAC-SHA256 over: `sha256(body)` plus timestamp + nonce
+
+Signature logic (matches `rag-ingest/app/main.py`):
+- `key = sha256(INGEST_SHARED_SECRET)`
+- `msg = "{ts}.{nonce}.{sha256(body)}"` (as bytes, with literal dots; `sha256(body)` is hex)
+- `signature = hmac_sha256(key, msg).hexdigest()`
+
+#### Python example client (sign + send)
+This is the easiest way to generate the exact signature format:
+
+```python
+import hashlib, hmac, json, os, secrets, time
+import requests
+
+INGEST_SHARED_SECRET = os.environ["INGEST_SHARED_SECRET"]
+INGEST_URL = os.environ.get("INGEST_URL", "http://127.0.0.1:9000/ingest")
+
+def hmac_key(secret: str) -> bytes:
+    return hashlib.sha256(secret.encode("utf-8")).digest()
+
+def sign_body(ts: str, nonce: str, body_bytes: bytes) -> str:
+    body_hash = hashlib.sha256(body_bytes).hexdigest().encode("ascii")
+    msg = ts.encode("ascii") + b"." + nonce.encode("ascii") + b"." + body_hash
+    return hmac.new(hmac_key(INGEST_SHARED_SECRET), msg, hashlib.sha256).hexdigest()
+
+payload = {
+    "docs": [{"id": "doc-1", "text": "hello world", "meta": {"source": "demo"}}],
+    "source": "demo",
+    "tags": ["example"],
+}
+
+body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+ts = str(int(time.time()))
+nonce = secrets.token_hex(16)
+sig = sign_body(ts, nonce, body)
+
+r = requests.post(
+    INGEST_URL,
+    data=body,
+    headers={
+        "Content-Type": "application/json",
+        "X-Timestamp": ts,
+        "X-Nonce": nonce,
+        "X-Signature": sig,
+    },
+    timeout=30,
+)
+print(r.status_code, r.text)
+```
+
+#### Optional encrypted envelope (Fernet)
+If you set `INGEST_REQUIRE_ENCRYPTION=1`, the request body must be:
+
+```json
+{"token":"..."}
+```
+
+Where `token` is a Fernet token produced using a key derived from `INGEST_SHARED_SECRET`:
+- `fernet_key = base64.urlsafe_b64encode(sha256(INGEST_SHARED_SECRET))`
+
+Python example for envelope encryption:
+
+```python
+import base64, hashlib, json, os
+from cryptography.fernet import Fernet
+
+secret = os.environ["INGEST_SHARED_SECRET"]
+fernet_key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode("utf-8")).digest())
+f = Fernet(fernet_key)
+
+inner = {"docs": [{"id": "doc-1", "text": "hello"}]}
+token = f.encrypt(json.dumps(inner).encode("utf-8")).decode("utf-8")
+outer = {"token": token}
+print(json.dumps(outer))
+```
+
+## Model recommendation script
+If you’re not sure which Ollama model to run on your host, use:
+
+```bash
+python3 scripts/recommend_model.py
+```
+
+What it does:
+- **CPU/RAM**: reads CPU cores and total RAM (Linux: `/proc/meminfo`)
+- **GPU (optional)**: if `nvidia-smi` exists, reads NVIDIA GPU name + VRAM
+- Prints suggested defaults:
+  - `CHAT_MODEL=...`
+  - `EMBED_MODEL=...`
+  - plus matching `ollama pull ...` commands
+
+How to apply:
+- Add/override in your `.env`:
+  - `CHAT_MODEL=...`
+  - `EMBED_MODEL=...`
+- Pull the models (from the host, or via the container):
+
+```bash
+docker exec -it ollama ollama pull <CHAT_MODEL>
+docker exec -it ollama ollama pull <EMBED_MODEL>
+```
+
+## Extending for “exact answers” (SQL)
+For questions like totals/averages/counts, do not rely on embeddings. Instead:
+- use SQL to compute exact values (SQLite/Postgres/etc.)
+- use the LLM only to explain/format results
+
+This avoids “LLM made up a number” failure modes.
+
+## Obvious missing pieces (recommended next upgrades)
+- **Rate limiting / abuse control**: add per-client rate limits (Cloudflare + app-level).
+- **Better chunking + parsing**: handle PDFs/HTML/markdown, sentence-aware chunking, dedupe, and content-type specific extractors.
+- **Metadata filters / multi-tenant**: per-tenant collections or payload filters; enforce tenant separation server-side.
+- **Backups**: document how to back up/restore the Docker volumes (`qdrant`, `ollama`, `rag_ingest_data`).
+- **Secret management**: consider Docker secrets / an external secret manager instead of `.env` on disk.
+
+## Blindspots / gotchas
+- Binding ports to `0.0.0.0` on the host exposes services to LAN and can bypass Access. This compose file binds host ports to `127.0.0.1` intentionally.
+- Never embed secrets / tokens / keys.
+- Treat retrieved content as untrusted reference text (prompt injection is real).
