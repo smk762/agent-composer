@@ -88,14 +88,18 @@ def recommend_chat_model(r: Resources) -> str:
             return "llama3.1:70b"
         if vram >= 12:
             return "llama3.1:8b"
-        if vram >= 8:
+        # nvidia-smi reports in MB; 8GB cards often show ~7.8GB
+        if vram >= 7.5:
+            # If you have enough RAM to spill, let 8B be an option; otherwise favor 3B for speed.
+            if r.ram_gb >= 48:
+                return "llama3.1:8b"
             return "llama3.2:3b"
         return "llama3.2:1b"
 
     # CPU/RAM-only
-    if r.ram_gb >= 48:
+    if r.ram_gb >= 64 and r.cpu_cores >= 12:
         return "llama3.1:8b"
-    if r.ram_gb >= 24:
+    if r.ram_gb >= 32 and r.cpu_cores >= 8:
         return "llama3.2:3b"
     return "llama3.2:1b"
 
@@ -121,15 +125,15 @@ def main() -> None:
     else:
         print("  GPU:  (none detected via nvidia-smi)")
 
-    print("\nSuggested Ollama models:")
+    print("\nSuggested models:")
     print(f"  CHAT_MODEL={chat}")
     print(f"  EMBED_MODEL={embed}")
 
-    print("\nPull commands:")
-    print(f"  ollama pull {chat}")
-    print(f"  ollama pull {embed}")
+    print("\nPull via docker compose:")
+    print(f"  docker compose exec -it ollama ollama pull {chat}")
+    print(f"  docker compose exec -it ollama ollama pull {embed}")
 
-    print("\nSuggested .env overrides:")
+    print("\nAdd to .env:")
     print(f"  CHAT_MODEL={chat}")
     print(f"  EMBED_MODEL={embed}")
 
