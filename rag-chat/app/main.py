@@ -174,15 +174,20 @@ def chat_ui():
                   display: flex;
                   align-items: flex-start;
                   justify-content: center;
-                  padding: 48px 16px 64px;
+                  padding: 0px;
                 }}
                 .card {{
-                  width: min(900px, 100%);
+                  width: min(1100px, 100%);
+                  height: 95vh;
                   background: linear-gradient(180deg, var(--card-2), var(--card));
                   border: 1px solid var(--border);
                   border-radius: 16px;
                   box-shadow: 0 20px 60px rgba(0,0,0,0.35);
-                  padding: 28px;
+                  padding: 20px;
+                  display: flex;
+                  flex-direction: column;
+                  gap: 10px;
+                  margin-top: 10px;
                 }}
                 h1 {{
                   margin-top: 0;
@@ -211,7 +216,7 @@ def chat_ui():
                   box-sizing: border-box;
                 }}
                 textarea {{
-                  min-height: 170px;
+                  min-height: 100px;
                   resize: vertical;
                 }}
                 select {{
@@ -234,14 +239,59 @@ def chat_ui():
                 }}
                 .row {{ margin-bottom: 16px; }}
                 .note {{ color: var(--muted); font-size: 13px; }}
-                pre {{
-                  white-space: pre-wrap;
-                  word-break: break-word;
-                  padding: 14px;
-                  background: #0b1221;
+                .input-wrap {{ position: relative; }}
+                .wait-overlay {{
+                  position: absolute;
+                  inset: 0;
+                  display: none;
+                  align-items: center;
+                  justify-content: center;
+                  background: rgba(0,0,0,0.45);
+                  border-radius: 10px;
+                  gap: 8px;
+                  font-weight: 600;
+                }}
+                .wait-overlay .spinner {{
+                  width: 18px;
+                  height: 18px;
+                  border: 3px solid rgba(255,255,255,0.2);
+                  border-top-color: rgba(56,189,248,0.9);
+                  border-radius: 50%;
+                  animation: spin 0.9s linear infinite;
+                }}
+                @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+                .chat-log {{
                   border: 1px solid var(--border);
                   border-radius: 12px;
-                  min-height: 80px;
+                  padding: 12px;
+                  background: #0b1221;
+                  min-height: 360px;
+                  flex: 1;
+                  overflow-y: auto;
+                  display: flex;
+                  flex-direction: column;
+                  gap: 10px;
+                }}
+                .msg-row {{
+                  display: flex;
+                  flex-direction: column;
+                  gap: 4px;
+                }}
+                .bubble {{
+                  padding: 12px 14px;
+                  border-radius: 12px;
+                  white-space: pre-wrap;
+                  word-break: break-word;
+                }}
+                .bubble.user {{
+                  background: rgba(99,102,241,0.15);
+                  border: 1px solid rgba(99,102,241,0.4);
+                  align-self: flex-end;
+                }}
+                .bubble.assistant {{
+                  background: rgba(56,189,248,0.12);
+                  border: 1px solid rgba(56,189,248,0.35);
+                  align-self: flex-start;
                 }}
               </style>
             </head>
@@ -249,28 +299,45 @@ def chat_ui():
               <div class="card">
                 <h1>rag-chat</h1>
                 <p class="sub">Lightweight UI for testing the chat gateway. RAG context is applied automatically when enabled.</p>
-                <div class="row">
-                  <label for="msg">Message</label>
-                  <textarea id="msg" placeholder="Ask something..."></textarea>
+                <div id="log" class="chat-log"></div>
+                <div class="row input-wrap" style="margin-top:auto; margin-bottom: 0px;">
+                  <textarea id="msg" placeholder="Ask anything... (Enter to send, Shift+Enter for newline)"></textarea>
+                  <div id="wait" class="wait-overlay">
+                    <div class="spinner"></div>
+                    <span id="wait-text">Waiting for reply…</span>
+                  </div>
                 </div>
-                <div class="row" id="model-row">
-                  <label for="model">Model</label>
-                  <select id="model" style="display:none;"></select>
-                  <div id="model-note" class="note"></div>
+                <div class="row input-wrap" style="margin; align-items:center; margin: 0px;">
+                  <div class="note" id="status"></div>
                 </div>
-                <button id="send">Send</button>
-                <div class="row" style="margin-top:18px;">
-                  <h3 style="margin:0 0 8px;">Response</h3>
-                  <pre id="out">—</pre>
+                <div class="row" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+                  <div style="display:flex; align-items:center; gap:8px;">
+                    <span class="note" style="min-width:42px;">Model</span>
+                    <select id="model" style="display:none;"></select>
+                    <div id="model-note" class="note"></div>
+                  </div>
+                  <div style="flex: 1;"></div>
+                  <div style="display:flex; gap:10px; align-items:center;">
+                    <button id="reset" type="button" style="background:#1f2937; color:var(--text); box-shadow:none;">Clear chat</button>
+                    <button id="send">Send</button>
+                  </div>
                 </div>
               </div>
               <script>
                 const sendBtn = document.getElementById("send");
+                const resetBtn = document.getElementById("reset");
                 const msgEl = document.getElementById("msg");
                 const modelEl = document.getElementById("model");
                 const modelNote = document.getElementById("model-note");
-                const outEl = document.getElementById("out");
+                const statusEl = document.getElementById("status");
+                const logEl = document.getElementById("log");
+                const waitEl = document.getElementById("wait");
+                const waitTextEl = document.getElementById("wait-text");
                 let modelList = [];
+                let history = [];
+                let sending = false;
+                let waitTimer = null;
+                let waitStart = null;
 
                 async function loadModels() {{
                   modelNote.textContent = "Loading models...";
@@ -301,17 +368,66 @@ def chat_ui():
                   }}
                 }}
 
+                function renderHistory() {{
+                  if (!history.length) {{
+                    logEl.textContent = "";
+                    return;
+                  }}
+                  logEl.innerHTML = "";
+                  history.forEach((m) => {{
+                    const row = document.createElement("div");
+                    row.className = "msg-row";
+                    const bubble = document.createElement("div");
+                    bubble.className = "bubble " + (m.role === "assistant" ? "assistant" : "user");
+                    bubble.textContent = m.content;
+                    row.appendChild(bubble);
+                    logEl.appendChild(row);
+                  }});
+                  logEl.scrollTop = logEl.scrollHeight;
+                }}
+
+                function resetConversation() {{
+                  history = [];
+                  msgEl.value = "";
+                  statusEl.textContent = "Conversation cleared.";
+                  renderHistory();
+                }}
+
+                function setSending(on) {{
+                  sending = on;
+                  msgEl.disabled = on;
+                  modelEl.disabled = on;
+                  sendBtn.disabled = on;
+                  resetBtn.disabled = on;
+                  waitEl.style.display = on ? "flex" : "none";
+                  if (on) {{
+                    waitStart = Date.now();
+                    waitTextEl.textContent = "Waiting for reply… 0s";
+                    waitTimer = setInterval(() => {{
+                      const secs = Math.floor((Date.now() - waitStart) / 1000);
+                      waitTextEl.textContent = `Waiting for reply… ${{secs}}s`;
+                    }}, 1000);
+                  }} else {{
+                    if (waitTimer) {{
+                      clearInterval(waitTimer);
+                      waitTimer = null;
+                    }}
+                    waitStart = null;
+                  }}
+                }}
+
                 async function send() {{
+                  if (sending) return;
                   const content = msgEl.value.trim();
                   const model = modelList.length === 1 ? modelList[0] : modelEl.value.trim();
                   if (!content) {{
-                    outEl.textContent = "Please enter a message.";
+                    statusEl.textContent = "Please enter a message.";
                     return;
                   }}
-                  outEl.textContent = "Sending...";
-                  const payload = {{
-                    messages: [{{ role: "user", content }}],
-                  }};
+                  setSending(true);
+                  // Build message list with accumulated history + current user turn
+                  const messages = [...history, {{ role: "user", content }}];
+                  const payload = {{ messages }};
                   if (model) payload.model = model;
                   try {{
                     const r = await fetch("/chat", {{
@@ -323,25 +439,34 @@ def chat_ui():
                     try {{
                       const data = JSON.parse(txt);
                       if (data.content !== undefined) {{
-                        outEl.textContent = data.content;
+                        // Save assistant reply to history
+                        history = [...messages, {{ role: "assistant", content: data.content }}];
+                        renderHistory();
+                        msgEl.value = "";
+                        msgEl.focus();
+                        statusEl.textContent = "";
                       }} else {{
-                        outEl.textContent = JSON.stringify(data, null, 2);
+                        statusEl.textContent = "Non-chat response received.";
                       }}
                     }} catch (e) {{
-                      outEl.textContent = txt;
+                      statusEl.textContent = "Parse error.";
                     }}
                   }} catch (e) {{
-                    outEl.textContent = "Error: " + e;
+                    statusEl.textContent = "Send failed.";
                   }}
+                  setSending(false);
                 }}
 
                 sendBtn.addEventListener("click", send);
                 msgEl.addEventListener("keydown", (e) => {{
-                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {{
+                  if (e.key === "Enter" && !e.shiftKey) {{
+                    e.preventDefault();
                     send();
                   }}
                 }});
+                resetBtn.addEventListener("click", resetConversation);
                 loadModels();
+                renderHistory();
               </script>
             </body>
             </html>
