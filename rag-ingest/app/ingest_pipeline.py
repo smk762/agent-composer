@@ -1,4 +1,5 @@
 import hashlib
+import uuid
 import json
 import os
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -96,17 +97,11 @@ async def ensure_collection(client: AsyncQdrantClient, vector_size: int) -> None
 
 
 def _point_id(source: Optional[str], doc_id: Optional[str], chunk_index: int, chunk_text: str) -> str:
-    s = source or ""
-    d = doc_id or ""
-    h = hashlib.sha256()
-    h.update(s.encode("utf-8"))
-    h.update(b"|")
-    h.update(d.encode("utf-8"))
-    h.update(b"|")
-    h.update(str(chunk_index).encode("ascii"))
-    h.update(b"|")
-    h.update(hashlib.sha256(chunk_text.encode("utf-8")).digest())
-    return h.hexdigest()
+    """
+    Generate a deterministic UUID for the point ID (Qdrant accepts int or UUID).
+    """
+    base = f"{source or ''}|{doc_id or ''}|{chunk_index}|{hashlib.sha256(chunk_text.encode('utf-8')).hexdigest()}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, base))
 
 
 async def ingest_docs(

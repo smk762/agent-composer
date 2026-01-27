@@ -51,11 +51,21 @@ services:
       - INGEST_CHUNK_SIZE=${INGEST_CHUNK_SIZE:-1000}
       - INGEST_CHUNK_OVERLAP=${INGEST_CHUNK_OVERLAP:-120}
       - INGEST_UPSERT_BATCH_SIZE=${INGEST_UPSERT_BATCH_SIZE:-64}
+      - APP_RELOAD=${APP_RELOAD:-1}
+    command: >
+      sh -c '
+        APP_PORT="$${APP_PORT:-9050}";
+        ARGS="--host 0.0.0.0 --port $${APP_PORT}";
+        if [ "$${APP_RELOAD:-1}" = "1" ]; then
+          ARGS="$${ARGS} --reload --reload-dir /app/app";
+        fi;
+        exec uvicorn app.main:app $${ARGS}
+      '
     ports:
-      - "127.0.0.1:9000:9000"
+      - "${RAG_INGEST_BIND_IP:-127.0.0.1}:${RAG_INGEST_PORT:-9050}:9050"
     depends_on: [qdrant, ollama]
     healthcheck:
-      test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:9000/health >/dev/null 2>&1 || exit 1"]
+      test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:9050/health >/dev/null 2>&1 || exit 1"]
       interval: 20s
       timeout: 5s
       retries: 10
@@ -69,7 +79,7 @@ services:
     restart: unless-stopped
     environment:
       - OLLAMA_URL=http://ollama:11434
-      - CHAT_MODEL=${CHAT_MODEL:-llama3.1:8b}
+      - CHAT_MODEL=${CHAT_MODEL:-llama3.2:3b}
       - CHAT_SYSTEM_PROMPT=${CHAT_SYSTEM_PROMPT:-You are a helpful assistant.}
       - QDRANT_URL=http://qdrant:6333
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-project_docs}
@@ -77,11 +87,21 @@ services:
       - RAG_ENABLED=${RAG_ENABLED:-1}
       - RAG_TOP_K=${RAG_TOP_K:-5}
       - RAG_MAX_CONTEXT_CHARS=${RAG_MAX_CONTEXT_CHARS:-4000}
+      - APP_RELOAD=${APP_RELOAD:-1}
+    command: >
+      sh -c '
+        APP_PORT="$${APP_PORT:-9150}";
+        ARGS="--host 0.0.0.0 --port $${APP_PORT}";
+        if [ "$${APP_RELOAD:-1}" = "1" ]; then
+          ARGS="$${ARGS} --reload --reload-dir /app/app";
+        fi;
+        exec uvicorn app.main:app $${ARGS}
+      '
     ports:
-      - "127.0.0.1:9100:9100"
+      - "${RAG_CHAT_BIND_IP:-127.0.0.1}:${RAG_CHAT_PORT:-9150}:9150"
     depends_on: [ollama]
     healthcheck:
-      test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:9100/health >/dev/null 2>&1 || exit 1"]
+      test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:9150/health >/dev/null 2>&1 || exit 1"]
       interval: 20s
       timeout: 5s
       retries: 10

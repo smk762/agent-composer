@@ -50,7 +50,7 @@ This repo is a minimal, secure-by-default scaffold for:
 
 ## Prereqs
 - Docker Engine + Docker Compose v2 (`docker compose`)
-- A Cloudflare account with Zero Trust enabled
+- A Cloudflare account with Zero Trust enabled (only needed if you plan to expose the APIs over the internet)
 - A host firewall/security group that does **not** expose your Docker ports publicly
 
 ## Configuration
@@ -68,7 +68,7 @@ Required:
 
 Optional:
 - `INGEST_REQUIRE_ENCRYPTION`: set to `1` to require encrypted envelopes for ingestion
-- `CHAT_MODEL`: default Ollama model for chat (example: `llama3.1:8b`)
+- `CHAT_MODEL`: default Ollama model for chat (example: `llama3.2:3b`)
 - `CHAT_SYSTEM_PROMPT`: default system prompt
 - `QDRANT_COLLECTION`: default collection name (future use by ingestion pipeline)
 - `OLLAMA_KEEP_ALIVE`: Ollama keep-alive setting (example: `15m`)
@@ -85,7 +85,7 @@ docker logs -f cloudflared
 2) Pull a model (once):
 
 ```bash
-docker exec -it ollama ollama pull llama3.1:8b
+docker exec -it ollama ollama pull llama3.2:3b
 ```
 
 Optional: pick better defaults for your machine (host-side helper):
@@ -97,9 +97,34 @@ python3 scripts/recommend_model.py
 3) Local health checks (on the host):
 
 ```bash
-curl -s http://127.0.0.1:9000/health
-curl -s http://127.0.0.1:9100/health
+curl -s http://127.0.0.1:9050/health
+curl -s http://127.0.0.1:9150/health
 ```
+
+### LAN-only / no Cloudflare (dev)
+- Defaults stay bound to `127.0.0.1` (safe for single-host dev).
+- Ports are now parametric; set bind IP/port via env vars instead of adding extra `ports` entries (avoids double-binding the defaults):
+
+```
+services:
+  rag-ingest:
+    environment:
+      - RAG_INGEST_BIND_IP=192.168.1.50
+      - RAG_INGEST_PORT=9050
+  rag-chat:
+    environment:
+      - RAG_CHAT_BIND_IP=192.168.1.50
+      - RAG_CHAT_PORT=9150
+  cloudflared:
+    profiles: ["cloud"]  # starts only when you opt into the profile
+```
+
+- Hot reload is the default (`APP_RELOAD=1`) for local/LAN. Set `APP_RELOAD=0` when you run with the `cloud` profile / prod to disable `uvicorn --reload`.
+
+- Bring up the stack without Cloudflare: `docker compose up -d --build` (cloudflared is skipped because it’s on the `cloud` profile).
+- If/when you want Cloudflare, opt in: `docker compose --profile cloud up -d --build`.
+- Test from another LAN host (replace `<LAN_IP>` with your machine): `curl http://<LAN_IP>:9150/health`
+- Keep `INGEST_SHARED_SECRET` strong and prefer `INGEST_REQUIRE_ENCRYPTION=1` if you allow LAN access. Use host firewalls to restrict which LAN clients can reach `9050/9150`.
 
 ## Cloudflare Zero Trust setup
 
@@ -111,8 +136,8 @@ In Cloudflare Zero Trust:
 
 ### 2) Add Public Hostnames (routes) in the Tunnel
 In the Tunnel configuration, add ONLY:
-- `your-chat-hostname.example.com` → `http://rag-chat:9100`
-- `your-ingest-hostname.example.com` → `http://rag-ingest:9000`
+- `your-chat-hostname.example.com` → `http://rag-chat:9150`
+- `your-ingest-hostname.example.com` → `http://rag-ingest:9050`
 
 Do **not** add hostnames for Qdrant or Ollama.
 
@@ -133,6 +158,19 @@ Create Access apps for the two hostnames:
 ### `rag-chat`
 - `GET /health`
 - `POST /chat` → forwards to Ollama `/api/chat`
+- UI: `GET /ui/chat` (and `/`) for a minimal in-browser chat form
+
+Example curl (local default port 9150):
+
+```bash
+curl -s http://127.0.0.1:9150/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [
+      {"role": "user", "content": "Hello, can you summarize what this API does?"}
+    ]
+  }'
+```
 
 Example request body:
 
@@ -147,6 +185,29 @@ Example request body:
 ### `rag-ingest`
 - `GET /health`
 - `POST /ingest` → verifies signature + replay-protects nonce, optionally decrypts, then chunks → embeds → upserts into Qdrant
+- UI: `GET /ui/ingest` for a minimal in-browser form that signs requests client-side (enter your shared secret locally; keep access limited). Works only when `INGEST_REQUIRE_ENCRYPTION=0`; for encrypted envelopes you must call the API with your own client.
+
+Example curl (local default port 9050 — replace headers with a real signature):
+
+```bash
+TS=$(date +%s)
+NONCE=$(openssl rand -hex 16)
+BODY='{"docs":[{"id":"doc-1","text":"hello world","meta":{"source":"demo"}}],"source":"demo","tags":["example"]}'
+# Replace SIG with an HMAC computed exactly as described below
+SIG="replace-with-hex-hmac"
+
+curl -s http://127.0.0.1:9050/ingest \
+  -H "Content-Type: application/json" \
+  -H "X-Timestamp: ${TS}" \
+  -H "X-Nonce: ${NONCE}" \
+  -H "X-Signature: ${SIG}" \
+  -d "${BODY}"
+```
+
+### Endpoint smoke test script
+- From repo root: `python3 scripts/test_endpoints.py`
+- Overrides: set `CHAT_URL` and/or `INGEST_URL` (defaults: `http://127.0.0.1:9150` and `http://127.0.0.1:9050`)
+- Checks `rag-chat` health, a simple `/chat` call, and `rag-ingest` health; exits non-zero on failure.
 
 #### Request signing (required)
 `rag-ingest` requires these headers:
@@ -167,7 +228,7 @@ import hashlib, hmac, json, os, secrets, time
 import requests
 
 INGEST_SHARED_SECRET = os.environ["INGEST_SHARED_SECRET"]
-INGEST_URL = os.environ.get("INGEST_URL", "http://127.0.0.1:9000/ingest")
+INGEST_URL = os.environ.get("INGEST_URL", "http://127.0.0.1:9050/ingest")
 
 def hmac_key(secret: str) -> bytes:
     return hashlib.sha256(secret.encode("utf-8")).digest()
