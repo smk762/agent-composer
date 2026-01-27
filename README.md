@@ -156,7 +156,8 @@ Create Access apps for the two hostnames:
 ## Simple UI
 
 ### `rag-chat`
-<img width="983" height="722" alt="image" src="https://github.com/user-attachments/assets/2e2263ca-5311-4afd-8453-a5d1afaeaea7" />
+<img width="1165" height="1367" alt="image" src="https://github.com/user-attachments/assets/b35185ae-1ce9-4914-84cd-19c70a4f9b4c" />
+
 
 Basic chat interface to query the agent and view responses.
 
