@@ -153,6 +153,18 @@ Create Access apps for the two hostnames:
 - Create a Service Token per client (laptop/CI/agent)
 - Rotate tokens as needed
 
+## Simple UI
+
+### `rag-chat`
+<img width="983" height="722" alt="image" src="https://github.com/user-attachments/assets/2e2263ca-5311-4afd-8453-a5d1afaeaea7" />
+
+Basic chat interface to query the agent and view responses.
+
+### `rag-ingest`
+<img width="1053" height="955" alt="image" src="https://github.com/user-attachments/assets/a23376ea-a3b9-49ed-9d11-fb832fea87d0" />
+
+Simple form to submit chunks for embedding and upserting to qdrant.
+
 ## APIs
 
 ### `rag-chat`
