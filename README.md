@@ -168,16 +168,23 @@ Simple form to submit chunks for embedding and upserting to qdrant.
 
 ## APIs
 
+See `docs/integration-guide.md` for external service/agent integration (LAN or Cloudflare Access), auth headers, and ready-to-copy client snippets.
+
 ### `rag-chat`
 - `GET /health`
 - `POST /chat` → forwards to Ollama `/api/chat`
 - UI: `GET /ui/chat` (and `/`) for a minimal in-browser chat form
+- API keys: `GET /ui/api-keys` to create/list/revoke keys (use `Authorization: Bearer <key>` for requests)
+- History UI: `GET /ui/history` to browse/open conversations
 
 Example curl (local default port 9150):
 
 ```bash
+# with API key (recommended; set one at /ui/api-keys)
+API_KEY="paste-api-key-here"
 curl -s http://127.0.0.1:9150/chat \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${API_KEY}" \
   -d '{
     "messages": [
       {"role": "user", "content": "Hello, can you summarize what this API does?"}

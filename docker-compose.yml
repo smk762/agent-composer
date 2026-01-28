@@ -77,6 +77,8 @@ services:
       context: ./rag-chat
     container_name: rag-chat
     restart: unless-stopped
+    volumes:
+      - rag_chat_data:/data
     environment:
       - OLLAMA_URL=http://ollama:11434
       - CHAT_MODEL=${CHAT_MODEL:-llama3.2:3b}
@@ -87,6 +89,10 @@ services:
       - RAG_ENABLED=${RAG_ENABLED:-1}
       - RAG_TOP_K=${RAG_TOP_K:-5}
       - RAG_MAX_CONTEXT_CHARS=${RAG_MAX_CONTEXT_CHARS:-4000}
+      - CHAT_DB_URL=${CHAT_DB_URL:-sqlite:////data/chat.db}
+      - CHAT_HISTORY_MAX_MSGS=${CHAT_HISTORY_MAX_MSGS:-100}
+      - DEV_AUTH_BYPASS=${DEV_AUTH_BYPASS:-0}
+      - DEV_DEFAULT_USER=${DEV_DEFAULT_USER:-dev@example.com}
       - APP_RELOAD=${APP_RELOAD:-1}
     command: >
       sh -c '
@@ -127,3 +133,4 @@ volumes:
   ollama:
   qdrant:
   rag_ingest_data:
+  rag_chat_data:

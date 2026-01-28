@@ -3,3 +3,5 @@ uvicorn[standard]==0.34.0
 pydantic==2.10.4
 httpx==0.28.1
 qdrant-client==1.12.1
+sqlalchemy==2.0.36
+aiosqlite==0.20.0
