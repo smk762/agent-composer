@@ -494,6 +494,98 @@ def _is_chat_model(name: str) -> bool:
     return not ("embed" in n or "embedding" in n)
 
 
+def _uniq_keep_order(items: List[str]) -> List[str]:
+    out: List[str] = []
+    seen = set()
+    for it in items:
+        if it in seen:
+            continue
+        seen.add(it)
+        out.append(it)
+    return out
+
+
+def _model_candidates(requested: str) -> List[str]:
+    """
+    Return a small set of likely-correct model strings for Ollama.
+
+    We intentionally handle the common mismatch where /api/tags may show ":latest"
+    while /api/chat may accept the base name (or vice versa).
+    """
+    m = (requested or "").strip()
+    if not m:
+        return []
+
+    if ":" in m:
+        base, tag = m.rsplit(":", 1)
+        base = base.strip()
+        tag = tag.strip()
+        if tag == "latest" and base:
+            # Prefer base first; some setups accept base but not the explicit ":latest".
+            return _uniq_keep_order([base, m])
+        if base:
+            return _uniq_keep_order([m, base])
+        return [m]
+
+    # No explicit tag: try as-is first, then ":latest".
+    return _uniq_keep_order([m, f"{m}:latest"])
+
+
+async def _ollama_tag_names() -> List[str]:
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.get(f"{OLLAMA_URL}/api/tags")
+    except Exception as e:
+        raise HTTPException(502, f"Ollama unreachable: {e}")
+    if r.status_code != 200:
+        raise HTTPException(r.status_code, r.text)
+    data = r.json() or {}
+    names: List[str] = []
+    for m in data.get("models") or []:
+        name = m.get("name")
+        if isinstance(name, str) and name.strip():
+            names.append(name.strip())
+    return names
+
+
+async def _resolve_model(requested: str) -> str:
+    """
+    Resolve a requested model to something likely installed/usable.
+    If we can't verify tags, fall back to the requested model (or CHAT_MODEL).
+    """
+    req = (requested or "").strip() or CHAT_MODEL
+    try:
+        available = [m for m in await _ollama_tag_names() if _is_chat_model(m)]
+    except HTTPException:
+        # Keep behavior resilient: don't hard-fail chat just because /api/tags is flaky.
+        return req
+
+    if not available:
+        return req
+
+    # Exact match first.
+    if req in available:
+        return req
+
+    # Try candidate variants (foo <-> foo:latest).
+    for cand in _model_candidates(req):
+        if cand in available:
+            return cand
+
+    # Try "base name" matching: requested "foo" -> any "foo:*" (prefer latest).
+    base = req.rsplit(":", 1)[0] if ":" in req else req
+    if base:
+        latest = f"{base}:latest"
+        if latest in available:
+            return latest
+        for m in available:
+            if m.startswith(base + ":"):
+                return m
+
+    # Nothing matched; return as-is (Ollama will error, but message will be accurate).
+    return req
+
+
 def _get_header(request: Request, name: str) -> Optional[str]:
     return request.headers.get(name) or request.headers.get(name.lower())
 
@@ -522,19 +614,7 @@ async def require_user(
 
 @app.get("/models")
 async def list_models():
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(f"{OLLAMA_URL}/api/tags")
-    except Exception as e:
-        raise HTTPException(502, f"Ollama unreachable: {e}")
-    if r.status_code != 200:
-        raise HTTPException(r.status_code, r.text)
-    data = r.json() or {}
-    models = []
-    for m in data.get("models") or []:
-        name = m.get("name")
-        if isinstance(name, str) and name.strip():
-            models.append(name.strip())
+    models = await _ollama_tag_names()
 
     # Drop obvious non-chat models (embeddings); always keep CHAT_MODEL as fallback.
     models = [m for m in models if _is_chat_model(m)]
@@ -1367,18 +1447,20 @@ async def chat(
     auth: AuthContext = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
-    model = req.model or CHAT_MODEL
-
     # Resolve or create conversation
     if req.conversation_id:
         conv = await _conversation_for_user(db, req.conversation_id, auth.user_id)
-        if not conv.model:
-            conv.model = model
+        requested_model = conv.model or req.model or CHAT_MODEL
     else:
-        conv = Conversation(user_id=auth.user_id, model=model)
+        requested_model = req.model or CHAT_MODEL
+        conv = Conversation(user_id=auth.user_id, model=None)
         db.add(conv)
         await db.commit()
         await db.refresh(conv)
+
+    model = await _resolve_model(requested_model)
+    if not conv.model:
+        conv.model = model
 
     msgs = req.messages
     last_user = last_user_message(msgs)
@@ -1398,14 +1480,32 @@ async def chat(
         "stream": False,
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=120) as client:
-            r = await client.post(f"{OLLAMA_URL}/api/chat", json=payload)
-    except Exception as e:
-        raise HTTPException(502, f"Ollama unreachable: {e}")
+    async def _ollama_chat(model_name: str) -> httpx.Response:
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                return await client.post(f"{OLLAMA_URL}/api/chat", json={**payload, "model": model_name})
+        except Exception as e:
+            raise HTTPException(502, f"Ollama unreachable: {e}")
+
+    # Be forgiving: if the resolved model still doesn't work, try a couple of variants.
+    tried: List[str] = []
+    r: Optional[httpx.Response] = None
+    for cand in _uniq_keep_order([model] + _model_candidates(model) + _model_candidates(requested_model)):
+        tried.append(cand)
+        r = await _ollama_chat(cand)
+        if r.status_code == 200:
+            model = cand
+            break
+        # Only retry on "model not found" style failures; otherwise bubble up.
+        if r.status_code not in (400, 404):
+            break
+        body = (r.text or "").lower()
+        if "model" in body and ("not found" in body or "unknown" in body):
+            continue
+        break
 
     if r.status_code != 200:
-        raise HTTPException(r.status_code, r.text)
+        raise HTTPException(r.status_code, (r.text or "") + (f"\nTried models: {tried}" if tried else ""))
 
     data = r.json()
     content = (data.get("message") or {}).get("content", "")

@@ -11,6 +11,7 @@ This document shows how to call `rag-chat` and `rag-ingest` from another host (l
   - URL: `${CHAT_URL:-http://127.0.0.1:9150}`
   - Auth: API key from `/ui/api-keys` → header `Authorization: Bearer <key>`
   - Health: `GET /health`
+  - Model names: `/models` returns tag-qualified names (often `:latest`). `/chat` accepts either `foo` or `foo:latest` and will try to resolve/normalize.
 - **`rag-ingest`**
   - URL: `${INGEST_URL:-http://127.0.0.1:9050}`
   - Auth: HMAC headers (`X-Timestamp`, `X-Nonce`, `X-Signature`) using `INGEST_SHARED_SECRET`
