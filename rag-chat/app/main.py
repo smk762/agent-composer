@@ -1,14 +1,16 @@
 import hashlib
+import json
 import os
 import secrets
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 from textwrap import dedent
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 from uuid import uuid4
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from qdrant_client import AsyncQdrantClient
 from sqlalchemy import Column, DateTime, Integer, String, Text, delete, func, select
@@ -30,6 +32,9 @@ RAG_MAX_CONTEXT_CHARS = int(os.getenv("RAG_MAX_CONTEXT_CHARS", "4000"))
 DEV_AUTH_BYPASS = os.getenv("DEV_AUTH_BYPASS", "0") == "1"
 DEV_DEFAULT_USER = os.getenv("DEV_DEFAULT_USER", "dev@example.com")
 CHAT_HISTORY_MAX_MSGS = int(os.getenv("CHAT_HISTORY_MAX_MSGS", "100"))
+
+_UTC = timezone.utc
+
 
 def _normalize_db_url(url: str) -> str:
     # Ensure sqlite uses aiosqlite driver for async.
@@ -57,7 +62,9 @@ class Message(Base):
     id = Column(String, primary_key=True, default=lambda: str(uuid4()))
     conversation_id = Column(String, index=True, nullable=False)
     role = Column(String, nullable=False)
-    content = Column(Text, nullable=False)
+    content = Column(Text, nullable=True)  # Now nullable for tool messages
+    tool_calls = Column(Text, nullable=True)  # JSON string for tool_calls array
+    tool_call_id = Column(String, nullable=True)  # For tool role messages
     seq = Column(Integer, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
@@ -256,9 +263,29 @@ def render_page(title: str, body_html: str, extra_css: str = "") -> HTMLResponse
     )
 
 
+class ToolCallFunction(BaseModel):
+    name: str
+    arguments: str  # JSON string
+
+class ToolCall(BaseModel):
+    id: str
+    type: Literal["function"] = "function"
+    function: ToolCallFunction
+
 class Msg(BaseModel):
-    role: Literal["system", "user", "assistant"] = Field(...)
-    content: str = Field(...)
+    role: Literal["system", "user", "assistant", "tool"] = Field(...)
+    content: Optional[str] = Field(None)  # Optional for tool calls
+    tool_calls: Optional[List[ToolCall]] = Field(None)  # For assistant messages with tool calls
+    tool_call_id: Optional[str] = Field(None)  # For tool role messages
+
+class FunctionDef(BaseModel):
+    name: str
+    description: str
+    parameters: Dict[str, Any]
+
+class ToolDef(BaseModel):
+    type: Literal["function"] = "function"
+    function: FunctionDef
 
 class ApiKeyCreate(BaseModel):
     name: Optional[str] = Field(None, description="Friendly label for the key")
@@ -293,11 +320,32 @@ class ChatRequest(BaseModel):
     messages: List[Msg]
     model: Optional[str] = None
     conversation_id: Optional[str] = None
+    tools: Optional[List[ToolDef]] = None
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    stream: Optional[bool] = False  # Enable streaming responses
+
+class MessageOut(BaseModel):
+    role: str
+    content: Optional[str] = None
+    tool_calls: Optional[List[ToolCall]] = None
+
+class ChoiceOut(BaseModel):
+    message: MessageOut
+    finish_reason: Optional[str] = None
+
+class UsageOut(BaseModel):
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
 
 class ChatResponse(BaseModel):
+    id: str  # Unique response ID (OpenAI-compatible)
+    created: int  # Unix timestamp (OpenAI-compatible)
     model: str
-    content: str
-    conversation_id: str
+    choices: List[ChoiceOut]
+    usage: Optional[UsageOut] = None
+    conversation_id: Optional[str] = None  # Keep for backwards compatibility
 
 class AuthContext(BaseModel):
     user_id: str
@@ -337,7 +385,7 @@ async def _api_key_from_token(db: AsyncSession, token: str) -> Optional[ApiKey]:
     res = await db.execute(stmt)
     obj = res.scalar_one_or_none()
     if obj:
-        obj.last_used_at = datetime.utcnow()
+        obj.last_used_at = datetime.now(tz=_UTC)
         await db.commit()
     return obj
 
@@ -400,9 +448,54 @@ async def ollama_embed(text: str) -> list[float]:
 
 def last_user_message(msgs: List[Msg]) -> Optional[str]:
     for m in reversed(msgs or []):
-        if m.role == "user" and m.content.strip():
+        if m.role == "user" and m.content and m.content.strip():
             return m.content.strip()
     return None
+
+
+def _msg_to_ollama_format(msg: Msg) -> Dict[str, Any]:
+    """Convert our Msg format to Ollama's expected format."""
+    result: Dict[str, Any] = {"role": msg.role}
+    
+    if msg.content is not None:
+        result["content"] = msg.content
+    
+    # Add tool_calls if present (for assistant messages)
+    if msg.tool_calls:
+        result["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": tc.type,
+                "function": {
+                    "name": tc.function.name,
+                    # Ollama expects arguments as a dict, but OpenAI format
+                    # stores them as a JSON string -- deserialize for Ollama.
+                    "arguments": json.loads(tc.function.arguments)
+                    if isinstance(tc.function.arguments, str)
+                    else tc.function.arguments
+                }
+            }
+            for tc in msg.tool_calls
+        ]
+    
+    # Add tool_call_id if present (for tool messages)
+    if msg.tool_call_id:
+        result["tool_call_id"] = msg.tool_call_id
+    
+    return result
+
+
+def _tool_to_ollama_format(tool: ToolDef) -> Dict[str, Any]:
+    """Convert our ToolDef format to Ollama's expected format."""
+    return {
+        "type": tool.type,
+        "function": {
+            "name": tool.function.name,
+            "description": tool.function.description,
+            "parameters": tool.function.parameters
+        }
+    }
+
 
 
 async def rag_context_for(msgs: List[Msg]) -> Optional[str]:
@@ -973,7 +1066,7 @@ async def revoke_api_key(
         raise HTTPException(404, "Not found")
     if rec.revoked_at:
         return {"ok": True, "revoked": True}
-    rec.revoked_at = datetime.utcnow()
+    rec.revoked_at = datetime.now(tz=_UTC)
     await db.commit()
     return {"ok": True, "revoked": True}
 
@@ -1017,9 +1110,28 @@ async def get_conversation(
 ):
     conv = await _conversation_for_user(db, conversation_id, auth.user_id)
     msgs = await _conversation_messages(db, conversation_id)
+    
+    # Convert database messages to Msg objects with tool support
+    msg_list = []
+    for m in msgs:
+        tool_calls = None
+        if m.tool_calls:
+            try:
+                tool_calls_data = json.loads(m.tool_calls)
+                tool_calls = [ToolCall(**tc) for tc in tool_calls_data]
+            except (json.JSONDecodeError, ValueError):
+                pass  # Skip invalid tool_calls
+        
+        msg_list.append(Msg(
+            role=m.role,
+            content=m.content,
+            tool_calls=tool_calls,
+            tool_call_id=m.tool_call_id
+        ))
+    
     return ConversationDetail(
         **_conv_out(conv).model_dump(),
-        messages=[Msg(role=m.role, content=m.content) for m in msgs],
+        messages=msg_list,
     )
 
 
@@ -1441,13 +1553,136 @@ def chat_ui():
     )
 
 
-@app.post("/chat", response_model=ChatResponse)
+@app.post("/chat")
 async def chat(
     req: ChatRequest,
     auth: AuthContext = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
-    # Resolve or create conversation
+    """Chat endpoint with tool calling and streaming support."""
+    
+    # STREAMING PATH
+    if req.stream:
+        from app.streaming import stream_ollama_chat, StreamError
+
+        async def stream_gen():
+            # Setup conversation
+            if req.conversation_id:
+                conv = await _conversation_for_user(db, req.conversation_id, auth.user_id)
+                requested_model = conv.model or req.model or CHAT_MODEL
+            else:
+                requested_model = req.model or CHAT_MODEL
+                conv = Conversation(user_id=auth.user_id, model=None)
+                db.add(conv)
+                await db.commit()
+                await db.refresh(conv)
+
+            model = await _resolve_model(requested_model)
+            if not conv.model:
+                conv.model = model
+
+            # Validate model with fallback candidates (like non-streaming path)
+            tried: List[str] = []
+            for cand in _uniq_keep_order([model] + _model_candidates(model) + _model_candidates(requested_model)):
+                tried.append(cand)
+                try:
+                    async with httpx.AsyncClient(timeout=10) as probe:
+                        pr = await probe.post(f"{OLLAMA_URL}/api/show", json={"name": cand})
+                    if pr.status_code == 200:
+                        model = cand
+                        break
+                except Exception:
+                    pass
+            else:
+                yield f'data: {json.dumps({"error": f"Model not found. Tried: {tried}"})}\n\n'
+                yield 'data: [DONE]\n\n'
+                return
+
+            msgs = req.messages
+            last_user_msg = last_user_message(msgs)
+            if not last_user_msg:
+                yield f'data: {json.dumps({"error": "User message required"})}\n\n'
+                yield 'data: [DONE]\n\n'
+                return
+
+            if not msgs or msgs[0].role != "system":
+                msgs = [Msg(role="system", content=SYSTEM_PROMPT)] + msgs
+            ctx = await rag_context_for(msgs)
+            if ctx:
+                msgs = [msgs[0], Msg(role="system", content=ctx)] + msgs[1:]
+
+            payload = {"model": model, "messages": [_msg_to_ollama_format(m) for m in msgs], "stream": True}
+            if req.temperature is not None:
+                payload["options"] = payload.get("options", {})
+                payload["options"]["temperature"] = req.temperature
+            if req.max_tokens is not None:
+                payload["options"] = payload.get("options", {})
+                payload["options"]["num_predict"] = req.max_tokens
+            if req.tools:
+                payload["tools"] = [_tool_to_ollama_format(t) for t in req.tools]
+
+            # Stream from Ollama -- accumulate directly from structured chunks
+            # instead of re-parsing the SSE strings we just serialized.
+            acc_content = ""
+            acc_tools = None
+            try:
+                async for chunk in stream_ollama_chat(OLLAMA_URL, payload, model, conv.id):
+                    # Serialize chunk to SSE and yield to client
+                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+
+                    # Accumulate from the structured object (no re-parse needed)
+                    if chunk.choices:
+                        delta = chunk.choices[0].delta
+                        if delta.content:
+                            acc_content += delta.content
+                        if delta.tool_calls:
+                            acc_tools = delta.tool_calls
+            except StreamError as e:
+                yield f'data: {json.dumps({"error": str(e)})}\n\n'
+
+            yield 'data: [DONE]\n\n'
+
+            # Persist conversation to database
+            try:
+                next_seq = await _next_seq(db, conv.id)
+                db.add_all([
+                    Message(
+                        conversation_id=conv.id, role="user",
+                        content=last_user_msg, seq=next_seq,
+                    ),
+                    Message(
+                        conversation_id=conv.id, role="assistant",
+                        content=acc_content or None,
+                        tool_calls=json.dumps(acc_tools) if acc_tools else None,
+                        seq=next_seq + 1,
+                    ),
+                ])
+                if not conv.title:
+                    conv.title = _derive_title(last_user_msg)
+                tail_res = await db.execute(
+                    select(Message)
+                    .where(Message.conversation_id == conv.id)
+                    .order_by(Message.seq.desc())
+                    .limit(6)
+                )
+                conv.summary = _derive_summary(list(reversed(tail_res.scalars().all())))
+                conv.updated_at = datetime.now(tz=_UTC)
+                await db.commit()
+                await _prune_messages(db, conv.id)
+            except Exception as e:
+                print(f"Stream persist error: {e}")
+
+        return StreamingResponse(
+            stream_gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+    
+    # NON-STREAMING PATH
     if req.conversation_id:
         conv = await _conversation_for_user(db, req.conversation_id, auth.user_id)
         requested_model = conv.model or req.model or CHAT_MODEL
@@ -1463,22 +1698,25 @@ async def chat(
         conv.model = model
 
     msgs = req.messages
-    last_user = last_user_message(msgs)
-    if not last_user:
+    last_user_msg = last_user_message(msgs)
+    if not last_user_msg:
         raise HTTPException(400, "User message required")
 
     if not msgs or msgs[0].role != "system":
         msgs = [Msg(role="system", content=SYSTEM_PROMPT)] + msgs
-
     ctx = await rag_context_for(msgs)
     if ctx:
         msgs = [msgs[0], Msg(role="system", content=ctx)] + msgs[1:]
 
-    payload = {
-        "model": model,
-        "messages": [m.model_dump() for m in msgs],
-        "stream": False,
-    }
+    payload = {"model": model, "messages": [_msg_to_ollama_format(m) for m in msgs], "stream": False}
+    if req.temperature is not None:
+        payload["options"] = payload.get("options", {})
+        payload["options"]["temperature"] = req.temperature
+    if req.max_tokens is not None:
+        payload["options"] = payload.get("options", {})
+        payload["options"]["num_predict"] = req.max_tokens
+    if req.tools:
+        payload["tools"] = [_tool_to_ollama_format(t) for t in req.tools]
 
     async def _ollama_chat(model_name: str) -> httpx.Response:
         try:
@@ -1487,7 +1725,6 @@ async def chat(
         except Exception as e:
             raise HTTPException(502, f"Ollama unreachable: {e}")
 
-    # Be forgiving: if the resolved model still doesn't work, try a couple of variants.
     tried: List[str] = []
     r: Optional[httpx.Response] = None
     for cand in _uniq_keep_order([model] + _model_candidates(model) + _model_candidates(requested_model)):
@@ -1496,7 +1733,6 @@ async def chat(
         if r.status_code == 200:
             model = cand
             break
-        # Only retry on "model not found" style failures; otherwise bubble up.
         if r.status_code not in (400, 404):
             break
         body = (r.text or "").lower()
@@ -1508,30 +1744,57 @@ async def chat(
         raise HTTPException(r.status_code, (r.text or "") + (f"\nTried models: {tried}" if tried else ""))
 
     data = r.json()
-    content = (data.get("message") or {}).get("content", "")
-
-    # Persist user + assistant turns
+    ollama_msg = data.get("message", {})
+    content = ollama_msg.get("content")
+    tool_calls_raw = ollama_msg.get("tool_calls")
+    
+    tool_calls = None
+    if tool_calls_raw:
+        tool_calls = []
+        for tc in tool_calls_raw:
+            func = tc.get("function", {})
+            # Ollama returns arguments as a dict; OpenAI format requires a JSON string.
+            raw_args = func.get("arguments", {})
+            args_str = json.dumps(raw_args) if isinstance(raw_args, dict) else str(raw_args)
+            tool_calls.append(ToolCall(
+                id=tc.get("id", f"call_{secrets.token_hex(12)}"),
+                type="function",
+                function=ToolCallFunction(name=func.get("name", ""), arguments=args_str)
+            ))
+    
     next_seq = await _next_seq(db, conv.id)
-    user_msg = Message(conversation_id=conv.id, role="user", content=last_user, seq=next_seq)
-    assistant_msg = Message(
-        conversation_id=conv.id,
-        role="assistant",
-        content=content,
-        seq=next_seq + 1,
-    )
-    db.add_all([user_msg, assistant_msg])
+    db.add_all([
+        Message(conversation_id=conv.id, role="user", content=last_user_msg, seq=next_seq),
+        Message(conversation_id=conv.id, role="assistant", content=content,
+               tool_calls=json.dumps([tc.model_dump() for tc in tool_calls]) if tool_calls else None, seq=next_seq + 1)
+    ])
+    
     if not conv.title:
-        conv.title = _derive_title(last_user)
-    tail_res = await db.execute(
-        select(Message)
-        .where(Message.conversation_id == conv.id)
-        .order_by(Message.seq.desc())
-        .limit(6)
-    )
-    tail_msgs = list(reversed(tail_res.scalars().all()))
-    conv.summary = _derive_summary(tail_msgs)
-    conv.updated_at = datetime.utcnow()
+        conv.title = _derive_title(last_user_msg)
+    tail_res = await db.execute(select(Message).where(Message.conversation_id == conv.id).order_by(Message.seq.desc()).limit(6))
+    conv.summary = _derive_summary(list(reversed(tail_res.scalars().all())))
+    conv.updated_at = datetime.now(tz=_UTC)
     await db.commit()
     await _prune_messages(db, conv.id)
+    
+    usage = None
+    if "prompt_eval_count" in data or "eval_count" in data:
+        usage = UsageOut(
+            prompt_tokens=data.get("prompt_eval_count", 0),
+            completion_tokens=data.get("eval_count", 0),
+            total_tokens=data.get("prompt_eval_count", 0) + data.get("eval_count", 0)
+        )
 
-    return ChatResponse(model=model, content=content, conversation_id=conv.id)
+    finish_reason = "tool_calls" if tool_calls else "stop"
+
+    return ChatResponse(
+        id=f"chatcmpl-{secrets.token_hex(12)}",
+        created=int(time.time()),
+        model=model,
+        choices=[ChoiceOut(
+            message=MessageOut(role="assistant", content=content, tool_calls=tool_calls),
+            finish_reason=finish_reason,
+        )],
+        usage=usage,
+        conversation_id=conv.id,
+    )

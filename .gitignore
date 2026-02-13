@@ -24,3 +24,4 @@ venv/
 # Qdrant / Ollama / app data (containers manage these)
 **/storage/
 docker-compose.override.yml
+tmp/
