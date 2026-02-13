@@ -85,10 +85,8 @@ engine = create_async_engine(CHAT_DB_URL, future=True)
 SessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 
-@app.on_event("startup")
-async def _init_db():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+# Schema creation and migrations are handled by Alembic.
+# Run `alembic upgrade head` before starting the application.
 
 # ----- Shared HTML helpers -----
 
