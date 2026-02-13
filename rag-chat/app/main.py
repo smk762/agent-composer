@@ -1507,24 +1507,39 @@ def chat_ui():
                     const txt = await r.text();
                     try {{
                       const data = JSON.parse(txt);
-                      if (data.content !== undefined) {{
-                        // Save assistant reply to history
-                        history = [...messages, {{ role: "assistant", content: data.content }}];
+                      console.debug("[chat] response:", data);
+                      // Extract content from OpenAI-compatible format
+                      let reply = null;
+                      if (data.choices && data.choices.length > 0) {{
+                        const msg = data.choices[0].message || {{}};
+                        reply = msg.content || null;
+                      }} else if (data.content !== undefined) {{
+                        // Legacy format fallback
+                        reply = data.content;
+                      }}
+                      if (reply !== null) {{
+                        history = [...messages, {{ role: "assistant", content: reply }}];
                         if (data.conversation_id) {{
                           currentConversationId = data.conversation_id;
                         }}
                         renderHistory();
                         msgEl.value = "";
                         msgEl.focus();
-                        statusEl.textContent = currentConversationId ? `Conversation: ${{currentConversationId}}` : "";
+                        const finishReason = (data.choices && data.choices[0]) ? data.choices[0].finish_reason : null;
+                        const usage = data.usage ? ` | ${{data.usage.total_tokens}} tokens` : "";
+                        statusEl.textContent = (currentConversationId ? `Conversation: ${{currentConversationId}}` : "") + usage;
+                        console.debug("[chat] finish_reason:", finishReason, "usage:", data.usage);
                       }} else {{
-                        statusEl.textContent = "Non-chat response received.";
+                        console.warn("[chat] No content in response:", data);
+                        statusEl.textContent = "Non-chat response received. Check console for details.";
                       }}
                     }} catch (e) {{
-                      statusEl.textContent = "Parse error.";
+                      console.error("[chat] JSON parse error:", e, "raw:", txt);
+                      statusEl.textContent = "Parse error. Check console (F12) for details.";
                     }}
                   }} catch (e) {{
-                    statusEl.textContent = "Send failed.";
+                    console.error("[chat] Send error:", e);
+                    statusEl.textContent = "Send failed: " + e.message;
                   }}
                   setSending(false);
                 }}
