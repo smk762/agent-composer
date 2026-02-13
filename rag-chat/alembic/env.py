@@ -2,11 +2,16 @@
 
 import asyncio
 import os
+import sys
 from logging.config import fileConfig
 
-from alembic import context
-from sqlalchemy import pool
-from sqlalchemy.ext.asyncio import create_async_engine
+# Ensure the project root (/app) is on sys.path so that `app.main` is
+# importable regardless of how alembic is invoked.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from alembic import context  # noqa: E402
+from sqlalchemy import pool  # noqa: E402
+from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
 
 # Import Base so autogenerate can introspect the models.
 from app.main import Base  # noqa: E402

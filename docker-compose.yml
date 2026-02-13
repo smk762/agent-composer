@@ -96,6 +96,7 @@ services:
       - APP_RELOAD=${APP_RELOAD:-1}
     command: >
       sh -c '
+        alembic upgrade head &&
         APP_PORT="$${APP_PORT:-9150}";
         ARGS="--host 0.0.0.0 --port $${APP_PORT}";
         if [ "$${APP_RELOAD:-1}" = "1" ]; then
