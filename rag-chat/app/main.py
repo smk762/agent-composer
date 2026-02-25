@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import os
 import secrets
 import time
@@ -19,6 +20,13 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 app = FastAPI(title="RAG Chat API")
 
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=LOG_LEVEL, format="%(asctime)s %(levelname)-5s [%(name)s] %(message)s")
+log = logging.getLogger("rag-chat")
+# Silence noisy third-party loggers
+for _quiet in ("aiosqlite", "sqlalchemy.engine", "httpcore", "httpx", "hpack"):
+    logging.getLogger(_quiet).setLevel(logging.WARNING)
+
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 CHAT_MODEL = os.getenv("CHAT_MODEL", "llama3.2:3b")
 SYSTEM_PROMPT = os.getenv("CHAT_SYSTEM_PROMPT", "You are a helpful assistant.")
@@ -32,6 +40,7 @@ RAG_MAX_CONTEXT_CHARS = int(os.getenv("RAG_MAX_CONTEXT_CHARS", "4000"))
 DEV_AUTH_BYPASS = os.getenv("DEV_AUTH_BYPASS", "0") == "1"
 DEV_DEFAULT_USER = os.getenv("DEV_DEFAULT_USER", "dev@example.com")
 CHAT_HISTORY_MAX_MSGS = int(os.getenv("CHAT_HISTORY_MAX_MSGS", "100"))
+OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "300"))
 
 _UTC = timezone.utc
 
@@ -43,6 +52,9 @@ def _normalize_db_url(url: str) -> str:
     return url
 
 CHAT_DB_URL = _normalize_db_url(os.getenv("CHAT_DB_URL", "sqlite+aiosqlite:///./chat.db"))
+
+log.info("config: ollama=%s model=%s rag=%s qdrant=%s log_level=%s dev_auth_bypass=%s timeout=%ds",
+         OLLAMA_URL, CHAT_MODEL, RAG_ENABLED, QDRANT_URL, LOG_LEVEL, DEV_AUTH_BYPASS, OLLAMA_TIMEOUT)
 
 Base = declarative_base()
 
@@ -433,7 +445,7 @@ async def _prune_messages(db: AsyncSession, conversation_id: str):
 
 async def ollama_embed(text: str) -> list[float]:
     payload = {"model": EMBED_MODEL, "prompt": text}
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
         r = await client.post(f"{OLLAMA_URL}/api/embeddings", json=payload)
     if r.status_code != 200:
         raise HTTPException(r.status_code, r.text)
@@ -519,8 +531,9 @@ async def rag_context_for(msgs: List[Msg]) -> Optional[str]:
             with_payload=True,
         )
         await qc.close()
-    except Exception:
-        # Don't hard-fail chat if retrieval is misconfigured; just skip context.
+        log.debug("rag: %d hits from qdrant for query %r", len(hits or []), query[:80])
+    except Exception as e:
+        log.warning("rag: qdrant search failed, skipping context: %s", e)
         return None
 
     parts: List[str] = []
@@ -648,7 +661,7 @@ async def _resolve_model(requested: str) -> str:
     try:
         available = [m for m in await _ollama_tag_names() if _is_chat_model(m)]
     except HTTPException:
-        # Keep behavior resilient: don't hard-fail chat just because /api/tags is flaky.
+        log.warning("resolve_model: /api/tags unreachable, falling back to %r", req)
         return req
 
     if not available:
@@ -1493,52 +1506,117 @@ def chat_ui():
                     return;
                   }}
                   setSending(true);
-                  // Build message list with accumulated history + current user turn
                   const messages = [...history, {{ role: "user", content }}];
-                  const payload = {{ messages }};
+                  const payload = {{ messages, stream: true }};
                   if (currentConversationId) payload.conversation_id = currentConversationId;
                   if (model) payload.model = model;
+
+                  // Add user bubble immediately
+                  history = [...history, {{ role: "user", content }}];
+                  renderHistory();
+                  msgEl.value = "";
+
+                  // Create a live assistant bubble for streaming tokens
+                  const row = document.createElement("div");
+                  row.className = "msg-row";
+                  const bubble = document.createElement("div");
+                  bubble.className = "bubble assistant";
+                  bubble.textContent = "";
+                  row.appendChild(bubble);
+                  logEl.appendChild(row);
+
+                  let accContent = "";
+                  let convId = currentConversationId;
+                  let chunkCount = 0;
+
                   try {{
                     const r = await fetch("/chat", {{
                       method: "POST",
                       headers: Object.assign({{ "Content-Type": "application/json" }}, authHeaders()),
                       body: JSON.stringify(payload),
                     }});
-                    const txt = await r.text();
-                    try {{
-                      const data = JSON.parse(txt);
-                      console.debug("[chat] response:", data);
-                      // Extract content from OpenAI-compatible format
-                      let reply = null;
-                      if (data.choices && data.choices.length > 0) {{
-                        const msg = data.choices[0].message || {{}};
-                        reply = msg.content || null;
-                      }} else if (data.content !== undefined) {{
-                        // Legacy format fallback
-                        reply = data.content;
-                      }}
-                      if (reply !== null) {{
-                        history = [...messages, {{ role: "assistant", content: reply }}];
-                        if (data.conversation_id) {{
-                          currentConversationId = data.conversation_id;
+
+                    if (!r.ok) {{
+                      const errText = await r.text();
+                      console.error("[chat] HTTP error:", r.status, errText);
+                      bubble.textContent = `Error: ${{r.status}} — ${{errText.substring(0, 200)}}`;
+                      bubble.style.color = "#f87171";
+                      statusEl.textContent = `Request failed (${{r.status}}).`;
+                      setSending(false);
+                      return;
+                    }}
+
+                    const reader = r.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = "";
+
+                    while (true) {{
+                      const {{ done, value }} = await reader.read();
+                      if (done) break;
+                      buffer += decoder.decode(value, {{ stream: true }});
+
+                      // Process complete SSE lines
+                      const lines = buffer.split("\\n");
+                      buffer = lines.pop();  // keep incomplete line in buffer
+
+                      for (const line of lines) {{
+                        const trimmed = line.trim();
+                        if (!trimmed || !trimmed.startsWith("data: ")) continue;
+                        const payload_str = trimmed.slice(6);
+                        if (payload_str === "[DONE]") {{
+                          console.debug("[chat] stream done, chunks:", chunkCount);
+                          continue;
                         }}
-                        renderHistory();
-                        msgEl.value = "";
-                        msgEl.focus();
-                        const finishReason = (data.choices && data.choices[0]) ? data.choices[0].finish_reason : null;
-                        const usage = data.usage ? ` | ${{data.usage.total_tokens}} tokens` : "";
-                        statusEl.textContent = (currentConversationId ? `Conversation: ${{currentConversationId}}` : "") + usage;
-                        console.debug("[chat] finish_reason:", finishReason, "usage:", data.usage);
-                      }} else {{
-                        console.warn("[chat] No content in response:", data);
-                        statusEl.textContent = "Non-chat response received. Check console for details.";
+                        try {{
+                          const chunk = JSON.parse(payload_str);
+                          chunkCount++;
+
+                          // Extract conversation_id from first chunk
+                          if (chunk.conversation_id && !convId) {{
+                            convId = chunk.conversation_id;
+                            currentConversationId = convId;
+                          }}
+
+                          // Extract delta content
+                          if (chunk.choices && chunk.choices.length > 0) {{
+                            const delta = chunk.choices[0].delta || {{}};
+                            if (delta.content) {{
+                              accContent += delta.content;
+                              bubble.textContent = accContent;
+                              logEl.scrollTop = logEl.scrollHeight;
+                            }}
+                            // Update wait text with token count
+                            if (chunkCount % 5 === 0) {{
+                              const secs = Math.floor((Date.now() - waitStart) / 1000);
+                              waitTextEl.textContent = `Streaming… ${{accContent.length}} chars, ${{secs}}s`;
+                            }}
+                          }}
+
+                          if (chunk.error) {{
+                            console.error("[chat] stream error:", chunk.error);
+                            bubble.textContent += "\\n[Error: " + chunk.error + "]";
+                            bubble.style.color = "#f87171";
+                          }}
+                        }} catch (e) {{
+                          console.warn("[chat] chunk parse error:", e, "raw:", payload_str);
+                        }}
                       }}
-                    }} catch (e) {{
-                      console.error("[chat] JSON parse error:", e, "raw:", txt);
-                      statusEl.textContent = "Parse error. Check console (F12) for details.";
+                    }}
+
+                    // Finalize: update history with accumulated content
+                    if (accContent) {{
+                      history = [...history, {{ role: "assistant", content: accContent }}];
+                      renderHistory();
+                      msgEl.focus();
+                      statusEl.textContent = (convId ? `Conversation: ${{convId}}` : "") + ` | ${{accContent.length}} chars`;
+                    }} else {{
+                      console.warn("[chat] No content accumulated from stream");
+                      statusEl.textContent = "No response content received.";
                     }}
                   }} catch (e) {{
-                    console.error("[chat] Send error:", e);
+                    console.error("[chat] Stream error:", e);
+                    bubble.textContent = "Connection error: " + e.message;
+                    bubble.style.color = "#f87171";
                     statusEl.textContent = "Send failed: " + e.message;
                   }}
                   setSending(false);
@@ -1573,7 +1651,10 @@ async def chat(
     db: AsyncSession = Depends(get_db),
 ):
     """Chat endpoint with tool calling and streaming support."""
-    
+    msg_count = len(req.messages)
+    log.info("chat: user=%s stream=%s model=%r msgs=%d conv=%s",
+             auth.user_id, req.stream, req.model, msg_count, req.conversation_id or "new")
+
     # STREAMING PATH
     if req.stream:
         from app.streaming import stream_ollama_chat, StreamError
@@ -1636,14 +1717,16 @@ async def chat(
 
             # Stream from Ollama -- accumulate directly from structured chunks
             # instead of re-parsing the SSE strings we just serialized.
+            log.info("chat: streaming from ollama, model=%s, conv=%s", model, conv.id)
+            t0 = time.monotonic()
             acc_content = ""
             acc_tools = None
+            chunk_count = 0
             try:
                 async for chunk in stream_ollama_chat(OLLAMA_URL, payload, model, conv.id):
-                    # Serialize chunk to SSE and yield to client
                     yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+                    chunk_count += 1
 
-                    # Accumulate from the structured object (no re-parse needed)
                     if chunk.choices:
                         delta = chunk.choices[0].delta
                         if delta.content:
@@ -1651,8 +1734,13 @@ async def chat(
                         if delta.tool_calls:
                             acc_tools = delta.tool_calls
             except StreamError as e:
+                log.error("chat: stream error after %.1fs (%d chunks): %s",
+                          time.monotonic() - t0, chunk_count, e)
                 yield f'data: {json.dumps({"error": str(e)})}\n\n'
 
+            stream_elapsed = time.monotonic() - t0
+            log.info("chat: stream complete in %.1fs, %d chunks, %d chars, tool_calls=%s",
+                      stream_elapsed, chunk_count, len(acc_content), bool(acc_tools))
             yield 'data: [DONE]\n\n'
 
             # Persist conversation to database
@@ -1683,7 +1771,7 @@ async def chat(
                 await db.commit()
                 await _prune_messages(db, conv.id)
             except Exception as e:
-                print(f"Stream persist error: {e}")
+                log.error("chat: stream persist error: %s", e, exc_info=True)
 
         return StreamingResponse(
             stream_gen(),
@@ -1733,11 +1821,14 @@ async def chat(
 
     async def _ollama_chat(model_name: str) -> httpx.Response:
         try:
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
                 return await client.post(f"{OLLAMA_URL}/api/chat", json={**payload, "model": model_name})
         except Exception as e:
+            log.error("chat: ollama unreachable for model %r: %s", model_name, e)
             raise HTTPException(502, f"Ollama unreachable: {e}")
 
+    log.info("chat: resolved model=%r, calling ollama (non-stream)", model)
+    t0 = time.monotonic()
     tried: List[str] = []
     r: Optional[httpx.Response] = None
     for cand in _uniq_keep_order([model] + _model_candidates(model) + _model_candidates(requested_model)):
@@ -1746,17 +1837,25 @@ async def chat(
         if r.status_code == 200:
             model = cand
             break
+        log.warning("chat: model %r returned %d, trying next candidate", cand, r.status_code)
         if r.status_code not in (400, 404):
             break
         body = (r.text or "").lower()
         if "model" in body and ("not found" in body or "unknown" in body):
             continue
         break
+    elapsed = time.monotonic() - t0
 
     if r.status_code != 200:
+        log.error("chat: ollama failed after %.1fs, status=%d tried=%s body=%s",
+                  elapsed, r.status_code, tried, (r.text or "")[:500])
         raise HTTPException(r.status_code, (r.text or "") + (f"\nTried models: {tried}" if tried else ""))
 
     data = r.json()
+    prompt_tok = data.get("prompt_eval_count", 0)
+    compl_tok = data.get("eval_count", 0)
+    log.info("chat: ollama responded in %.1fs, model=%s, prompt_tokens=%d, completion_tokens=%d, tool_calls=%s",
+             elapsed, model, prompt_tok, compl_tok, bool(data.get("message", {}).get("tool_calls")))
     ollama_msg = data.get("message", {})
     content = ollama_msg.get("content")
     tool_calls_raw = ollama_msg.get("tool_calls")

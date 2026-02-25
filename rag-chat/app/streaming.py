@@ -8,12 +8,18 @@ the overhead of double serialize/deserialize for accumulation.
 """
 
 import json
+import logging
+import os
 import secrets
 import time
 from typing import AsyncIterator, Any, Dict, List, Optional
 
 import httpx
 from pydantic import BaseModel
+
+log = logging.getLogger("rag-chat.stream")
+
+OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "300"))
 
 
 class StreamDelta(BaseModel):
@@ -64,12 +70,13 @@ async def stream_ollama_chat(
 
     owns_client = client is None
     if owns_client:
-        client = httpx.AsyncClient(timeout=120)
+        client = httpx.AsyncClient(timeout=OLLAMA_TIMEOUT)
 
     try:
         async with client.stream("POST", f"{url}/api/chat", json=payload) as response:
             if response.status_code != 200:
                 error_body = (await response.aread()).decode("utf-8", errors="replace")
+                log.error("ollama stream error %d: %s", response.status_code, error_body[:500])
                 raise StreamError(
                     f"Ollama returned {response.status_code}: {error_body}"
                 )

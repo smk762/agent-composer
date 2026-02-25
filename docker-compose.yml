@@ -93,6 +93,8 @@ services:
       - CHAT_HISTORY_MAX_MSGS=${CHAT_HISTORY_MAX_MSGS:-100}
       - DEV_AUTH_BYPASS=${DEV_AUTH_BYPASS:-0}
       - DEV_DEFAULT_USER=${DEV_DEFAULT_USER:-dev@example.com}
+      - LOG_LEVEL=${LOG_LEVEL:-DEBUG}
+      - OLLAMA_TIMEOUT=${OLLAMA_TIMEOUT:-300}
       - APP_RELOAD=${APP_RELOAD:-1}
     command: >
       sh -c '
