@@ -9,7 +9,6 @@ the overhead of double serialize/deserialize for accumulation.
 
 import json
 import logging
-import os
 import secrets
 import time
 from typing import AsyncIterator, Any, Dict, List, Optional
@@ -17,9 +16,9 @@ from typing import AsyncIterator, Any, Dict, List, Optional
 import httpx
 from pydantic import BaseModel
 
-log = logging.getLogger("rag-chat.stream")
+from app.config import OLLAMA_TIMEOUT
 
-OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "300"))
+log = logging.getLogger("rag-chat.stream")
 
 
 class StreamDelta(BaseModel):
