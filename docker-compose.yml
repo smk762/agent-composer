@@ -77,6 +77,9 @@ services:
       context: ./rag-chat
     container_name: rag-chat
     restart: unless-stopped
+    volumes:
+      - rag_chat_data:/data
+      - rag_chat_media:/data/media
     environment:
       - OLLAMA_URL=http://ollama:11434
       - CHAT_MODEL=${CHAT_MODEL:-llama3.2:3b}
@@ -87,9 +90,19 @@ services:
       - RAG_ENABLED=${RAG_ENABLED:-1}
       - RAG_TOP_K=${RAG_TOP_K:-5}
       - RAG_MAX_CONTEXT_CHARS=${RAG_MAX_CONTEXT_CHARS:-4000}
+      - CHAT_DB_URL=${CHAT_DB_URL:-sqlite:////data/chat.db}
+      - CHAT_HISTORY_MAX_MSGS=${CHAT_HISTORY_MAX_MSGS:-100}
+      - DEV_AUTH_BYPASS=${DEV_AUTH_BYPASS:-0}
+      - DEV_DEFAULT_USER=${DEV_DEFAULT_USER:-dev@example.com}
+      - LOG_LEVEL=${LOG_LEVEL:-DEBUG}
+      - OLLAMA_TIMEOUT=${OLLAMA_TIMEOUT:-300}
+      - MEDIA_DIR=/data/media
+      - PROVIDER_ENCRYPTION_KEY=${PROVIDER_ENCRYPTION_KEY:-}
+      - COMFYUI_URL=http://comfyui:8188
       - APP_RELOAD=${APP_RELOAD:-1}
     command: >
       sh -c '
+        alembic upgrade head &&
         APP_PORT="$${APP_PORT:-9150}";
         ARGS="--host 0.0.0.0 --port $${APP_PORT}";
         if [ "$${APP_RELOAD:-1}" = "1" ]; then
@@ -105,6 +118,28 @@ services:
       interval: 20s
       timeout: 5s
       retries: 10
+    networks: [internal]
+
+  # ComfyUI — local image/video generation (optional; enable with: docker compose --profile local-gen up)
+  comfyui:
+    image: comfyanonymous/comfyui:latest
+    container_name: comfyui
+    restart: unless-stopped
+    profiles: [local-gen]
+    volumes:
+      - comfyui_data:/comfyui
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:8188/system_stats >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
     networks: [internal]
 
   # Cloudflare Tunnel (publish ONLY rag-ingest + rag-chat hostnames in Cloudflare UI)
@@ -127,3 +162,6 @@ volumes:
   ollama:
   qdrant:
   rag_ingest_data:
+  rag_chat_data:
+  rag_chat_media:
+  comfyui_data:
