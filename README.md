@@ -1,14 +1,18 @@
 # Ollama + Qdrant (RAG) behind Cloudflare Zero Trust — with Ingestion + Chat APIs
 
-This repo is a minimal, secure-by-default scaffold for:
-- **Ollama** (local LLM runtime; never directly exposed)
-- **Qdrant** (vector DB; never directly exposed)
-- **`rag-ingest` (FastAPI)**: authenticated ingestion endpoint (HMAC + optional payload encryption)
-- **`rag-chat` (FastAPI)**: chat gateway in front of Ollama (so you never expose Ollama directly)
-- **`cloudflared`**: Cloudflare Tunnel to publish only the APIs you choose
-- **Cloudflare Access**: authN/authZ in front of those hostnames (SSO/MFA for humans; service tokens for machines)
+Run a private AI stack that feels production-grade on day one: chat with your local LLM, ingest knowledge into vector search, and publish only hardened API edges through Cloudflare Zero Trust.
 
-> “Bare arms” note: yes, that was a U.S. Constitution joke — we’re going **minimal** rather than “bear arms”.
+## What this does
+- Runs **Ollama + Qdrant** in an internal-only Docker network (not publicly exposed).
+- Provides **`rag-chat`** (FastAPI) as your chat/API gateway, with optional retrieval from Qdrant.
+- Provides **`rag-ingest`** (FastAPI) to sign, verify, and safely ingest docs into your vector index.
+- Uses **`cloudflared` + Cloudflare Access** so humans use SSO/MFA and machines use service tokens.
+
+## Why this is awesome
+- **Secure by default**: your LLM and vector DB stay private; only intentional endpoints are exposed.
+- **Fast to ship**: one Compose stack gets you chat, ingestion, retrieval, and auth-ready routing.
+- **Practical for real teams**: replay protection, request signing, optional encryption, and easy API integration.
+- **Flexible deployment path**: run localhost-only for dev, LAN for trusted setups, or internet-facing behind Zero Trust.
 
 ## What this stack does (today)
 - **Network posture**:
