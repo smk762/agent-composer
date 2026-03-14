@@ -13,9 +13,12 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from app.ingest_pipeline import ingest_docs
+from app.metrics import MetricsMiddleware, metrics_router
 from app.nonce_store import NonceStore, NonceStoreConfig
 
 app = FastAPI(title="RAG Ingestion API")
+app.add_middleware(MetricsMiddleware)
+app.include_router(metrics_router)
 
 SHARED_SECRET = os.environ.get("INGEST_SHARED_SECRET", "")
 REQUIRE_ENCRYPTION = os.environ.get("INGEST_REQUIRE_ENCRYPTION", "0") == "1"

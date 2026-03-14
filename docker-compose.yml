@@ -62,7 +62,7 @@ services:
         exec uvicorn app.main:app $${ARGS}
       '
     ports:
-      - "${RAG_INGEST_BIND_IP:-127.0.0.1}:${RAG_INGEST_PORT:-9050}:9050"
+      - "${RAG_INGEST_BIND_IP:-0.0.0.0}:${RAG_INGEST_PORT:-9050}:9050"
     depends_on: [qdrant, ollama]
     healthcheck:
       test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:9050/health >/dev/null 2>&1 || exit 1"]
@@ -111,7 +111,7 @@ services:
         exec uvicorn app.main:app $${ARGS}
       '
     ports:
-      - "${RAG_CHAT_BIND_IP:-127.0.0.1}:${RAG_CHAT_PORT:-9150}:9150"
+      - "${RAG_CHAT_BIND_IP:-0.0.0.0}:${RAG_CHAT_PORT:-9150}:9150"
     depends_on: [ollama]
     healthcheck:
       test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:9150/health >/dev/null 2>&1 || exit 1"]
