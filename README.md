@@ -1,18 +1,23 @@
-# Ollama + Qdrant (RAG) behind Cloudflare Zero Trust — with Ingestion + Chat APIs
+# Ollama + External Qdrant (RAG) behind Cloudflare Zero Trust — with Ingestion + Chat APIs
 
-This repo is a minimal, secure-by-default scaffold for:
-- **Ollama** (local LLM runtime; never directly exposed)
-- **Qdrant** (vector DB; never directly exposed)
-- **`rag-ingest` (FastAPI)**: authenticated ingestion endpoint (HMAC + optional payload encryption)
-- **`rag-chat` (FastAPI)**: chat gateway in front of Ollama (so you never expose Ollama directly)
-- **`cloudflared`**: Cloudflare Tunnel to publish only the APIs you choose
-- **Cloudflare Access**: authN/authZ in front of those hostnames (SSO/MFA for humans; service tokens for machines)
+Run a private AI stack that feels production-grade on day one: chat with your local LLM, ingest knowledge into vector search, and publish only hardened API edges through Cloudflare Zero Trust.
 
-> “Bare arms” note: yes, that was a U.S. Constitution joke — we’re going **minimal** rather than “bear arms”.
+## What this does
+- Runs **Ollama** locally and connects to an **external Qdrant** endpoint.
+- Provides **`rag-chat`** (FastAPI) as your chat/API gateway, with optional retrieval from Qdrant.
+- Provides **`rag-ingest`** (FastAPI) to sign, verify, and safely ingest docs into your vector index.
+- Uses **`cloudflared` + Cloudflare Access** so humans use SSO/MFA and machines use service tokens.
+
+## Why this is awesome
+- **Secure by default**: your LLM and vector DB stay private; only intentional endpoints are exposed.
+- **Fast to ship**: one Compose stack gets you chat, ingestion, retrieval, and auth-ready routing.
+- **Practical for real teams**: replay protection, request signing, optional encryption, and easy API integration.
+- **Flexible deployment path**: run localhost-only for dev, LAN for trusted setups, or internet-facing behind Zero Trust.
 
 ## What this stack does (today)
 - **Network posture**:
-  - Qdrant and Ollama are on an internal Docker network only.
+  - Ollama stays on an internal Docker network only.
+  - Qdrant is expected to be reachable via `QDRANT_URL`.
   - APIs bind to `127.0.0.1` on the host, so they’re not reachable from your LAN.
   - `cloudflared` is the only component intended to accept inbound traffic (via Cloudflare’s edge).
 - **`rag-chat`**:
@@ -27,7 +32,7 @@ This repo is a minimal, secure-by-default scaffold for:
   - Implements “chunk → embed (Ollama) → upsert (Qdrant)” into `QDRANT_COLLECTION`.
 
 ## Design goals
-- Keep **Qdrant entirely unexposed externally**
+- Keep **Qdrant protected** (private/LAN-only or behind trusted network controls)
 - Keep **Ollama entirely unexposed externally**
 - Expose only:
   - `rag-ingest` (for indexing; **service-token protected** with Cloudflare Access)
@@ -65,6 +70,7 @@ cp env.example .env
 Required:
 - `CF_TUNNEL_TOKEN`: Cloudflared tunnel token (from Cloudflare Zero Trust)
 - `INGEST_SHARED_SECRET`: shared secret used for ingestion HMAC (and for optional envelope encryption)
+- `QDRANT_URL`: external Qdrant HTTP endpoint (example: `http://192.168.1.128:6333`)
 
 Optional:
 - `INGEST_REQUIRE_ENCRYPTION`: set to `1` to require encrypted envelopes for ingestion
@@ -72,6 +78,18 @@ Optional:
 - `CHAT_SYSTEM_PROMPT`: default system prompt
 - `QDRANT_COLLECTION`: default collection name (future use by ingestion pipeline)
 - `OLLAMA_KEEP_ALIVE`: Ollama keep-alive setting (example: `15m`)
+- `CHAT_DB_URL` / `DATABASE_URL`: chat database DSN. `postgresql://...` is accepted and automatically normalized to async SQLAlchemy driver usage.
+  - On startup, `rag-chat` auto-creates the Postgres database if it does not exist, then runs Alembic migrations.
+- `INGEST_NONCE_STORE`: `sqlite` (default) or `redis` for replay-protection nonce claims.
+- `INGEST_REDIS_URL`: Redis URL used when `INGEST_NONCE_STORE=redis`.
+- `MEDIA_BACKEND`: `local` (default) or `minio` for generated media storage.
+- `MEDIA_S3_*`: MinIO/S3 settings used when `MEDIA_BACKEND=minio`.
+
+Single-user homelab QA profile (quality-first):
+- `CHAT_MODEL=Qwen2.5:7b`
+- `EMBED_MODEL=mxbai-embed-large`
+- Rationale: stronger code-review/reasoning and better retrieval fidelity are usually worth the extra latency in a one-user QA setup.
+- If latency/memory pressure is too high, fall back to lighter defaults (e.g., `llama3.2:3b` + `nomic-embed-text`).
 
 ## Quick start
 
@@ -81,6 +99,14 @@ Optional:
 docker compose up -d --build
 docker logs -f cloudflared
 ```
+
+### External Qdrant migration checklist
+- Confirm Qdrant API is reachable from this host/container network: `curl -s http://<QDRANT_HOST>:6333/readyz`
+- Keep `QDRANT_COLLECTION` unchanged if you want existing retrieval behavior.
+- Keep `EMBED_MODEL` unchanged (or same vector dimension), otherwise upserts/search can fail due to collection vector-size mismatch.
+- Ensure your external Qdrant has persistent storage configured (snapshot/volume policy handled in `test_dbs`).
+- Ensure host firewall rules allow this app host to reach `6333` (and `6334` only if you later use gRPC clients).
+- Confirm both `rag-chat` and `rag-ingest` use the same `QDRANT_URL` + `QDRANT_COLLECTION`.
 
 2) Pull a model (once):
 
@@ -126,6 +152,12 @@ services:
 - Test from another LAN host (replace `<LAN_IP>` with your machine): `curl http://<LAN_IP>:9150/health`
 - Keep `INGEST_SHARED_SECRET` strong and prefer `INGEST_REQUIRE_ENCRYPTION=1` if you allow LAN access. Use host firewalls to restrict which LAN clients can reach `9050/9150`.
 
+#### Optional: expose Ollama on LAN for a trusted service
+- Default behavior keeps `ollama` internal-only. If an external LAN service must speak the native Ollama API, use the overlay file: `docker compose -f docker-compose.yml -f docker-compose.lan-ollama.yml up -d`
+- Set `OLLAMA_BIND_IP=<LAN_IP>` and optionally `OLLAMA_PORT=11434` in `.env` so Ollama only binds to your LAN interface, not all host interfaces.
+- Existing internal container access is unchanged: other services in this stack should keep using `http://ollama:11434`.
+- Restrict source IPs with the host firewall; Docker Compose does not provide source-IP allowlists for published ports.
+
 ## Cloudflare Zero Trust setup
 
 ### 1) Create a Tunnel
@@ -168,16 +200,23 @@ Simple form to submit chunks for embedding and upserting to qdrant.
 
 ## APIs
 
+See `docs/integration-guide.md` for external service/agent integration (LAN or Cloudflare Access), auth headers, and ready-to-copy client snippets.
+
 ### `rag-chat`
 - `GET /health`
 - `POST /chat` → forwards to Ollama `/api/chat`
 - UI: `GET /ui/chat` (and `/`) for a minimal in-browser chat form
+- API keys: `GET /ui/api-keys` to create/list/revoke keys (use `Authorization: Bearer <key>` for requests)
+- History UI: `GET /ui/history` to browse/open conversations
 
 Example curl (local default port 9150):
 
 ```bash
+# with API key (recommended; set one at /ui/api-keys)
+API_KEY="paste-api-key-here"
 curl -s http://127.0.0.1:9150/chat \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${API_KEY}" \
   -d '{
     "messages": [
       {"role": "user", "content": "Hello, can you summarize what this API does?"}
@@ -339,7 +378,7 @@ This avoids “LLM made up a number” failure modes.
 - **Rate limiting / abuse control**: add per-client rate limits (Cloudflare + app-level).
 - **Better chunking + parsing**: handle PDFs/HTML/markdown, sentence-aware chunking, dedupe, and content-type specific extractors.
 - **Metadata filters / multi-tenant**: per-tenant collections or payload filters; enforce tenant separation server-side.
-- **Backups**: document how to back up/restore the Docker volumes (`qdrant`, `ollama`, `rag_ingest_data`).
+- **Backups**: document how to back up/restore `ollama`, `rag_ingest_data`, and your external Qdrant storage/snapshots.
 - **Secret management**: consider Docker secrets / an external secret manager instead of `.env` on disk.
 
 ## Blindspots / gotchas

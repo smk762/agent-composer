@@ -4,26 +4,14 @@ services:
     image: ollama/ollama:latest
     container_name: ollama
     restart: unless-stopped
+    ports:
+      - "${OLLAMA_BIND_IP:-127.0.0.1}:${OLLAMA_PORT:-11434}:11434"
     volumes:
       - ollama:/root/.ollama
     environment:
       - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-15m}
     healthcheck:
       test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:11434/api/tags >/dev/null 2>&1 || exit 1"]
-      interval: 20s
-      timeout: 5s
-      retries: 10
-    networks: [internal]
-
-  # Vector DB (private backend; NOT exposed externally)
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: qdrant
-    restart: unless-stopped
-    volumes:
-      - qdrant:/qdrant/storage
-    healthcheck:
-      test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:6333/readyz >/dev/null 2>&1 || exit 1"]
       interval: 20s
       timeout: 5s
       retries: 10
@@ -43,27 +31,25 @@ services:
       - INGEST_SHARED_SECRET=${INGEST_SHARED_SECRET}
       - INGEST_REQUIRE_ENCRYPTION=${INGEST_REQUIRE_ENCRYPTION:-0}
       - INGEST_NONCE_DB=/data/nonces.db
+      - INGEST_NONCE_STORE=${INGEST_NONCE_STORE:-sqlite}
+      - INGEST_REDIS_URL=${INGEST_REDIS_URL:-}
+      - INGEST_NONCE_KEY_PREFIX=${INGEST_NONCE_KEY_PREFIX:-ingest:nonce:}
       - INGEST_MAX_SKEW_S=${INGEST_MAX_SKEW_S:-300}
-      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_URL=${QDRANT_URL:?Set QDRANT_URL to the external Qdrant endpoint, e.g. http://192.168.1.128:6333}
       - OLLAMA_URL=http://ollama:11434
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-project_docs}
       - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
       - INGEST_CHUNK_SIZE=${INGEST_CHUNK_SIZE:-1000}
       - INGEST_CHUNK_OVERLAP=${INGEST_CHUNK_OVERLAP:-120}
       - INGEST_UPSERT_BATCH_SIZE=${INGEST_UPSERT_BATCH_SIZE:-64}
+      - OOM_WAIT_MAX_SECONDS=${OOM_WAIT_MAX_SECONDS:-180}
+      - OOM_WAIT_INTERVAL_SECONDS=${OOM_WAIT_INTERVAL_SECONDS:-5}
+      - INGEST_WORKER_CONCURRENCY=${INGEST_WORKER_CONCURRENCY:-1}
       - APP_RELOAD=${APP_RELOAD:-1}
-    command: >
-      sh -c '
-        APP_PORT="$${APP_PORT:-9050}";
-        ARGS="--host 0.0.0.0 --port $${APP_PORT}";
-        if [ "$${APP_RELOAD:-1}" = "1" ]; then
-          ARGS="$${ARGS} --reload --reload-dir /app/app";
-        fi;
-        exec uvicorn app.main:app $${ARGS}
-      '
+    command: /app/init.sh
     ports:
-      - "${RAG_INGEST_BIND_IP:-127.0.0.1}:${RAG_INGEST_PORT:-9050}:9050"
-    depends_on: [qdrant, ollama]
+      - "${RAG_INGEST_BIND_IP:-0.0.0.0}:${RAG_INGEST_PORT:-9050}:9050"
+    depends_on: [ollama]
     healthcheck:
       test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:9050/health >/dev/null 2>&1 || exit 1"]
       interval: 20s
@@ -77,28 +63,44 @@ services:
       context: ./rag-chat
     container_name: rag-chat
     restart: unless-stopped
+    volumes:
+      - rag_chat_data:/data
+      - rag_chat_media:/data/media
     environment:
       - OLLAMA_URL=http://ollama:11434
       - CHAT_MODEL=${CHAT_MODEL:-llama3.2:3b}
       - CHAT_SYSTEM_PROMPT=${CHAT_SYSTEM_PROMPT:-You are a helpful assistant.}
-      - QDRANT_URL=http://qdrant:6333
+      - QDRANT_URL=${QDRANT_URL:?Set QDRANT_URL to the external Qdrant endpoint, e.g. http://192.168.1.128:6333}
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-project_docs}
       - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
       - RAG_ENABLED=${RAG_ENABLED:-1}
       - RAG_TOP_K=${RAG_TOP_K:-5}
       - RAG_MAX_CONTEXT_CHARS=${RAG_MAX_CONTEXT_CHARS:-4000}
+      - CHAT_DB_URL=${CHAT_DB_URL:-sqlite:////data/chat.db}
+      - DATABASE_URL=${DATABASE_URL:-}
+      - CHAT_HISTORY_MAX_MSGS=${CHAT_HISTORY_MAX_MSGS:-100}
+      - DEV_AUTH_BYPASS=${DEV_AUTH_BYPASS:-0}
+      - DEV_DEFAULT_USER=${DEV_DEFAULT_USER:-dev@example.com}
+      - LOG_LEVEL=${LOG_LEVEL:-DEBUG}
+      - OLLAMA_TIMEOUT=${OLLAMA_TIMEOUT:-300}
+      - MEDIA_DIR=/data/media
+      - MEDIA_BACKEND=${MEDIA_BACKEND:-local}
+      - MEDIA_S3_ENDPOINT_URL=${MEDIA_S3_ENDPOINT_URL:-}
+      - MEDIA_S3_BUCKET=${MEDIA_S3_BUCKET:-}
+      - MEDIA_S3_REGION=${MEDIA_S3_REGION:-us-east-1}
+      - MEDIA_S3_ACCESS_KEY_ID=${MEDIA_S3_ACCESS_KEY_ID:-}
+      - MEDIA_S3_SECRET_ACCESS_KEY=${MEDIA_S3_SECRET_ACCESS_KEY:-}
+      - MEDIA_S3_USE_SSL=${MEDIA_S3_USE_SSL:-0}
+      - MEDIA_S3_PREFIX=${MEDIA_S3_PREFIX:-rag-chat-media}
+      - PROVIDER_ENCRYPTION_KEY=${PROVIDER_ENCRYPTION_KEY:-}
+      - COMFYUI_URL=${COMFYUI_URL:-http://comfyui:8188}
+      - OOM_WAIT_MAX_SECONDS=${OOM_WAIT_MAX_SECONDS:-180}
+      - OOM_WAIT_INTERVAL_SECONDS=${OOM_WAIT_INTERVAL_SECONDS:-5}
+      - INFERENCE_WORKER_CONCURRENCY=${INFERENCE_WORKER_CONCURRENCY:-1}
       - APP_RELOAD=${APP_RELOAD:-1}
-    command: >
-      sh -c '
-        APP_PORT="$${APP_PORT:-9150}";
-        ARGS="--host 0.0.0.0 --port $${APP_PORT}";
-        if [ "$${APP_RELOAD:-1}" = "1" ]; then
-          ARGS="$${ARGS} --reload --reload-dir /app/app";
-        fi;
-        exec uvicorn app.main:app $${ARGS}
-      '
+    command: /app/init.sh
     ports:
-      - "${RAG_CHAT_BIND_IP:-127.0.0.1}:${RAG_CHAT_PORT:-9150}:9150"
+      - "${RAG_CHAT_BIND_IP:-0.0.0.0}:${RAG_CHAT_PORT:-9150}:9150"
     depends_on: [ollama]
     healthcheck:
       test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:9150/health >/dev/null 2>&1 || exit 1"]
@@ -112,6 +114,7 @@ services:
     image: cloudflare/cloudflared:latest
     container_name: cloudflared
     restart: unless-stopped
+    profiles: [cloud]
     depends_on: [rag-ingest, rag-chat]
     environment:
       - TUNNEL_TOKEN=${CF_TUNNEL_TOKEN}
@@ -125,5 +128,6 @@ networks:
 
 volumes:
   ollama:
-  qdrant:
   rag_ingest_data:
+  rag_chat_data:
+  rag_chat_media:
