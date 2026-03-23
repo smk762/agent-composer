@@ -9,8 +9,15 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import require_user
-from app.config import UTC
+from app.config import (
+    INFERENCE_WORKER_CONCURRENCY,
+    OOM_WAIT_INTERVAL_SECONDS,
+    OOM_WAIT_MAX_SECONDS,
+    UTC,
+)
 from app.db import get_db
+from app.inference_retry import InferenceWorkers, RetryableOomError, run_with_oom_wait
+from app.metrics import observe_gpu_oom
 from app.models.orm import Generation, MediaAsset
 from app.models.schemas import (
     AuthContext, GenerationResponse, ImageGenerateRequest,
@@ -23,6 +30,8 @@ from app.storage import media_store
 log = logging.getLogger("rag-chat.generation")
 
 router = APIRouter(prefix="/api")
+_RETRYABLE_OOM_JOB_ERROR = "retryable: CUDA out of memory after waiting for capacity"
+_inference_workers = InferenceWorkers(INFERENCE_WORKER_CONCURRENCY)
 
 
 def _asset_out(a: MediaAsset) -> MediaAssetOut:
@@ -31,6 +40,17 @@ def _asset_out(a: MediaAsset) -> MediaAssetOut:
         filename=a.filename, url=f"/api/media/{a.id}",
         width=a.width, height=a.height,
         duration_seconds=a.duration_seconds, created_at=a.created_at,
+    )
+
+
+async def _run_inference_with_oom_retry(operation, *, metric_operation: str):
+    return await _inference_workers.run(
+        lambda: run_with_oom_wait(
+            operation,
+            on_oom=lambda: observe_gpu_oom(operation=metric_operation),
+            interval_s=OOM_WAIT_INTERVAL_SECONDS,
+            max_wait_s=OOM_WAIT_MAX_SECONDS,
+        )
     )
 
 
@@ -56,13 +76,16 @@ async def generate_image(
 
     try:
         provider = await ProviderRegistry.get_image_provider(db, auth.user_id, req.provider)
-        result = await provider.generate_image(
-            req.prompt,
-            negative_prompt=req.negative_prompt,
-            model=req.model,
-            size=req.size,
-            n=req.n,
-            style=req.style,
+        result = await _run_inference_with_oom_retry(
+            lambda: provider.generate_image(
+                req.prompt,
+                negative_prompt=req.negative_prompt,
+                model=req.model,
+                size=req.size,
+                n=req.n,
+                style=req.style,
+            ),
+            metric_operation="image_generate",
         )
     except LookupError as e:
         gen.status = "failed"
@@ -70,6 +93,12 @@ async def generate_image(
         gen.completed_at = datetime.now(tz=UTC)
         await db.commit()
         raise HTTPException(400, str(e))
+    except RetryableOomError as e:
+        gen.status = "failed"
+        gen.error_message = _RETRYABLE_OOM_JOB_ERROR
+        gen.completed_at = datetime.now(tz=UTC)
+        await db.commit()
+        raise HTTPException(503, str(e))
     except Exception as e:
         gen.status = "failed"
         gen.error_message = str(e)
@@ -141,13 +170,22 @@ async def edit_image(
         prov = await ProviderRegistry.get_provider(db, auth.user_id, Capability.IMAGE_EDIT, provider)
         from app.providers.base import ImageProvider
         assert isinstance(prov, ImageProvider)
-        result = await prov.edit_image(prompt, image_bytes, mask=mask_bytes, model=model, size=size)
+        result = await _run_inference_with_oom_retry(
+            lambda: prov.edit_image(prompt, image_bytes, mask=mask_bytes, model=model, size=size),
+            metric_operation="image_edit",
+        )
     except LookupError as e:
         gen.status = "failed"
         gen.error_message = str(e)
         gen.completed_at = datetime.now(tz=UTC)
         await db.commit()
         raise HTTPException(400, str(e))
+    except RetryableOomError as e:
+        gen.status = "failed"
+        gen.error_message = _RETRYABLE_OOM_JOB_ERROR
+        gen.completed_at = datetime.now(tz=UTC)
+        await db.commit()
+        raise HTTPException(503, str(e))
     except Exception as e:
         gen.status = "failed"
         gen.error_message = str(e)
@@ -217,9 +255,12 @@ async def generate_video(
 
     try:
         prov = await ProviderRegistry.get_video_provider(db, auth.user_id, provider)
-        result = await prov.generate_video(
-            prompt, image=image_bytes, model=model,
-            duration=duration, aspect_ratio=aspect_ratio,
+        result = await _run_inference_with_oom_retry(
+            lambda: prov.generate_video(
+                prompt, image=image_bytes, model=model,
+                duration=duration, aspect_ratio=aspect_ratio,
+            ),
+            metric_operation="video_generate",
         )
     except LookupError as e:
         gen.status = "failed"
@@ -227,6 +268,12 @@ async def generate_video(
         gen.completed_at = datetime.now(tz=UTC)
         await db.commit()
         raise HTTPException(400, str(e))
+    except RetryableOomError as e:
+        gen.status = "failed"
+        gen.error_message = _RETRYABLE_OOM_JOB_ERROR
+        gen.completed_at = datetime.now(tz=UTC)
+        await db.commit()
+        raise HTTPException(503, str(e))
     except Exception as e:
         gen.status = "failed"
         gen.error_message = str(e)

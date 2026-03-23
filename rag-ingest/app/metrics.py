@@ -30,6 +30,12 @@ REQ_LATENCY = Histogram(
     buckets=_HTTP_BUCKETS,
 )
 
+GPU_OOM_COUNT = Counter(
+    "gpu_oom_events_total",
+    "GPU out-of-memory events during embedding/inference",
+    ["operation"],
+)
+
 
 def _normalize_path(path: str) -> str:
     path = _UUID_RE.sub("{id}", path)
@@ -41,6 +47,10 @@ def observe_request(*, method: str, path: str, status_code: int, duration_s: flo
     norm_path = _normalize_path(path)
     REQ_COUNT.labels(method=method, path=norm_path, status_code=str(status_code)).inc()
     REQ_LATENCY.labels(method=method, path=norm_path).observe(duration_s)
+
+
+def observe_gpu_oom(*, operation: str) -> None:
+    GPU_OOM_COUNT.labels(operation=operation).inc()
 
 
 class MetricsMiddleware(BaseHTTPMiddleware):

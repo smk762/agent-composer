@@ -32,7 +32,7 @@ def upgrade() -> None:
             sa.Column("provider_name", sa.String(), nullable=False, index=True),
             sa.Column("encrypted_api_key", sa.Text(), nullable=True),
             sa.Column("settings_json", sa.Text(), nullable=True),
-            sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.text("1")),
+            sa.Column("enabled", sa.Boolean(), nullable=False, server_default=sa.true()),
             sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
             sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False),
         )

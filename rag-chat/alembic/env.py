@@ -1,4 +1,4 @@
-"""Alembic environment configuration (async-aware for aiosqlite)."""
+"""Alembic environment configuration (async-aware)."""
 
 import asyncio
 import os
@@ -11,6 +11,7 @@ from alembic import context  # noqa: E402
 from sqlalchemy import pool  # noqa: E402
 from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
 
+from app.config import CHAT_DB_URL  # noqa: E402
 from app.db import Base  # noqa: E402
 import app.models.orm  # noqa: F401, E402 – register all ORM models
 
@@ -22,9 +23,7 @@ target_metadata = Base.metadata
 
 
 def _get_url() -> str:
-    raw = os.getenv("CHAT_DB_URL", config.get_main_option("sqlalchemy.url", ""))
-    if raw.startswith("sqlite:") and "+aiosqlite" not in raw:
-        raw = raw.replace("sqlite:", "sqlite+aiosqlite:", 1)
+    raw = CHAT_DB_URL or config.get_main_option("sqlalchemy.url", "")
     return raw
 
 

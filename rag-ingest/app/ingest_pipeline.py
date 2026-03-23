@@ -8,6 +8,9 @@ import httpx
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http import models as qm
 
+from app.inference_retry import InferenceWorkers, run_with_oom_wait
+from app.metrics import observe_gpu_oom
+
 
 def _env_int(name: str, default: int) -> int:
     try:
@@ -28,6 +31,10 @@ OLLAMA_TIMEOUT_S = _env_int("OLLAMA_TIMEOUT_S", 120)
 EMBED_MAX_CHARS = _env_int("EMBED_MAX_CHARS", 4000)
 EMBED_MIN_CHARS = _env_int("EMBED_MIN_CHARS", 200)
 EMBED_RETRIES = _env_int("EMBED_RETRIES", 6)
+OOM_WAIT_MAX_SECONDS = _env_int("OOM_WAIT_MAX_SECONDS", 180)
+OOM_WAIT_INTERVAL_SECONDS = _env_int("OOM_WAIT_INTERVAL_SECONDS", 5)
+INGEST_WORKER_CONCURRENCY = _env_int("INGEST_WORKER_CONCURRENCY", 1)
+_EMBED_WORKERS = InferenceWorkers(INGEST_WORKER_CONCURRENCY)
 
 
 def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> List[str]:
@@ -99,7 +106,14 @@ async def ollama_embed(text: str, *, model: str = EMBED_MODEL) -> Tuple[List[flo
         last_r: Optional[httpx.Response] = None
         for _ in range(tries):
             payload = {"model": model, "prompt": prompt}
-            r = await client.post(f"{OLLAMA_URL}/api/embeddings", json=payload)
+            r = await _EMBED_WORKERS.run(
+                lambda: run_with_oom_wait(
+                    lambda: client.post(f"{OLLAMA_URL}/api/embeddings", json=payload),
+                    max_wait_s=OOM_WAIT_MAX_SECONDS,
+                    interval_s=OOM_WAIT_INTERVAL_SECONDS,
+                    on_oom=lambda: observe_gpu_oom(operation="ingest_embed"),
+                )
+            )
             last_r = r
             if r.status_code == 200:
                 data = r.json()

@@ -4,6 +4,8 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
+import redis
+
 
 @dataclass(frozen=True)
 class NonceStoreConfig:
@@ -76,4 +78,35 @@ class NonceStore:
         with self._connect() as conn:
             cur = conn.execute("DELETE FROM nonces WHERE created_at < ?", (cutoff,))
             return int(cur.rowcount or 0)
+
+
+@dataclass(frozen=True)
+class RedisNonceStoreConfig:
+    redis_url: str
+    nonce_ttl_s: int
+    key_prefix: str = "ingest:nonce:"
+
+
+class RedisNonceStore:
+    """
+    Redis-backed nonce store for replay protection.
+
+    Uses atomic SET key value NX EX ttl to claim a nonce once.
+    """
+
+    def __init__(self, cfg: RedisNonceStoreConfig):
+        self._cfg = cfg
+        self._r = redis.Redis.from_url(cfg.redis_url)
+
+    def _key(self, nonce: str) -> str:
+        return f"{self._cfg.key_prefix}{nonce}"
+
+    def claim_or_reject(self, nonce: str, ts: int) -> None:
+        ok = self._r.set(self._key(nonce), str(ts), ex=int(self._cfg.nonce_ttl_s), nx=True)
+        if not ok:
+            raise ValueError("Nonce already used")
+
+    def cleanup(self, now: int | None = None) -> int:
+        # Redis handles TTL expiry automatically.
+        return 0
 

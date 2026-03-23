@@ -11,5 +11,7 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY alembic.ini /app/alembic.ini
 COPY alembic /app/alembic
 COPY app /app/app
+COPY init.sh /app/init.sh
+RUN chmod +x /app/init.sh
 
-CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${APP_PORT}"]
+CMD ["/app/init.sh"]

@@ -3,6 +3,7 @@ from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
+from starlette.responses import Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -49,14 +50,17 @@ async def serve_media(
         raise HTTPException(404, "Media asset not found")
 
     path = media_store.resolve_path(asset.file_path)
-    if path is None:
-        raise HTTPException(404, "Media file missing from storage")
+    if path is not None:
+        return FileResponse(
+            path,
+            media_type=asset.mime_type,
+            filename=asset.filename,
+        )
 
-    return FileResponse(
-        path,
-        media_type=asset.mime_type,
-        filename=asset.filename,
-    )
+    blob = await media_store.read_bytes(asset.file_path)
+    if blob is None:
+        raise HTTPException(404, "Media file missing from storage")
+    return Response(content=blob, media_type=asset.mime_type)
 
 
 @router.get("/api/generations/{generation_id}", response_model=GenerationStatusResponse)

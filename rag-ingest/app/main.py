@@ -12,9 +12,15 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
+from app.inference_retry import RetryableOomError
 from app.ingest_pipeline import ingest_docs
 from app.metrics import MetricsMiddleware, metrics_router
-from app.nonce_store import NonceStore, NonceStoreConfig
+from app.nonce_store import (
+    NonceStore,
+    NonceStoreConfig,
+    RedisNonceStore,
+    RedisNonceStoreConfig,
+)
 
 app = FastAPI(title="RAG Ingestion API")
 app.add_middleware(MetricsMiddleware)
@@ -23,18 +29,32 @@ app.include_router(metrics_router)
 SHARED_SECRET = os.environ.get("INGEST_SHARED_SECRET", "")
 REQUIRE_ENCRYPTION = os.environ.get("INGEST_REQUIRE_ENCRYPTION", "0") == "1"
 NONCE_DB_PATH = os.environ.get("INGEST_NONCE_DB", "/data/nonces.db")
+NONCE_STORE_BACKEND = os.environ.get("INGEST_NONCE_STORE", "sqlite").strip().lower()
+INGEST_REDIS_URL = os.environ.get("INGEST_REDIS_URL", "").strip()
+INGEST_NONCE_KEY_PREFIX = os.environ.get("INGEST_NONCE_KEY_PREFIX", "ingest:nonce:")
 MAX_SKEW_S = int(os.environ.get("INGEST_MAX_SKEW_S", "300"))
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
 
 if not SHARED_SECRET:
     raise RuntimeError("INGEST_SHARED_SECRET is required")
 
-_nonce_store = NonceStore(
-    NonceStoreConfig(
-        db_path=NONCE_DB_PATH,
-        nonce_ttl_s=max(600, MAX_SKEW_S + 120),
+if NONCE_STORE_BACKEND == "redis":
+    if not INGEST_REDIS_URL:
+        raise RuntimeError("INGEST_REDIS_URL is required when INGEST_NONCE_STORE=redis")
+    _nonce_store = RedisNonceStore(
+        RedisNonceStoreConfig(
+            redis_url=INGEST_REDIS_URL,
+            nonce_ttl_s=max(600, MAX_SKEW_S + 120),
+            key_prefix=INGEST_NONCE_KEY_PREFIX,
+        )
     )
-)
+else:
+    _nonce_store = NonceStore(
+        NonceStoreConfig(
+            db_path=NONCE_DB_PATH,
+            nonce_ttl_s=max(600, MAX_SKEW_S + 120),
+        )
+    )
 
 def _hmac_key() -> bytes:
     return hashlib.sha256(SHARED_SECRET.encode("utf-8")).digest()
@@ -422,6 +442,8 @@ async def ingest(
     # - upsert into Qdrant
     try:
         result = await ingest_docs(ingest_doc.docs, source=ingest_doc.source, tags=ingest_doc.tags or [])
+    except RetryableOomError as e:
+        raise HTTPException(503, str(e))
     except HTTPException:
         raise
     except Exception as e:
