@@ -45,6 +45,8 @@ MEDIA_S3_PREFIX = os.getenv("MEDIA_S3_PREFIX", "rag-chat-media").strip().strip("
 
 PROVIDER_ENCRYPTION_KEY = os.getenv("PROVIDER_ENCRYPTION_KEY", "")
 
+MODERNBERT_URL = os.getenv("MODERNBERT_URL", "http://modernbert:7998")
+
 UTC = timezone.utc
 
 

@@ -1,3 +1,4 @@
+import json
 from textwrap import dedent
 
 from fastapi import APIRouter
@@ -6,6 +7,105 @@ from fastapi.responses import HTMLResponse
 from app.config import CHAT_MODEL, DEV_AUTH_BYPASS
 
 router = APIRouter()
+
+# Substrings matched against lowercased Ollama model names (order: most specific first).
+CHAT_MODEL_GUIDE_RULES: list[dict[str, str]] = [
+    {
+        "match": "neuraldaredevil",
+        "title": "Uncensored / alignment-stripped",
+        "purpose": "Llama-family weights with safety tuning reduced; useful for comparing refusal vs base instruct, not a default for untrusted prompts.",
+    },
+    {
+        "match": "mistral-nemo",
+        "title": "Mistral Nemo (12B instruct)",
+        "purpose": "Large-context general assistant; relatively light steering vs many peers. Good default for long docs and everyday chat.",
+    },
+    {
+        "match": "olmo2",
+        "title": "OLMo 2 (AI2)",
+        "purpose": "Open training stack (data + weights); instruct-tuned. Strong choice when you care about reproducibility and research transparency.",
+    },
+    {
+        "match": "llama3.1:8b-text",
+        "title": "Llama 3.1 8B — base (text)",
+        "purpose": "Pre–chat-tuned weights: raw continuation, minimal assistant persona. Best for probing model behavior, not polished UX.",
+    },
+    {
+        "match": "llama3.1:8b-instruct",
+        "title": "Llama 3.1 8B — instruct",
+        "purpose": "RLHF-aligned assistant; stable refusals and helpful style. Pairs with the :8b-text model for base vs instruct A/B.",
+    },
+    {
+        "match": "7b-text-v0.2",
+        "title": "Mistral 7B — base (text v0.2)",
+        "purpose": "Pure completion / low wrapper; direct answers, less policy-shaped phrasing. Good transparency baseline for prompts.",
+    },
+    {
+        "match": "mistral:7b-text",
+        "title": "Mistral 7B — base (text)",
+        "purpose": "Base Mistral for continuation-style use; similar role to other :text tags (older v0.1 context may differ).",
+    },
+    {
+        "match": "mistral",
+        "title": "Mistral 7B family",
+        "purpose": "General assistant or base/instruct variant depending on tag; usually coherent with lighter steering than some US lab instruct models.",
+    },
+    {
+        "match": "qwen2.5-coder:32b",
+        "title": "Qwen2.5 Coder 32B",
+        "purpose": "Heavy coding model; needs more VRAM/RAM. Use for hard refactors, large patches, and repo-wide code reasoning.",
+    },
+    {
+        "match": "qwen2.5-coder",
+        "title": "Qwen2.5 Coder",
+        "purpose": "Code-specialized instruct model: implementation, debugging, and API usage. Prefer over general Qwen for programming.",
+    },
+    {
+        "match": "qwen2.5",
+        "title": "Qwen2.5",
+        "purpose": "Strong general instruct model (multilingual). Your :7b tag is instruct-tuned—not a raw base.",
+    },
+    {
+        "match": "qwen2",
+        "title": "Qwen2",
+        "purpose": "Earlier Qwen2 line; good for multilingual and general chat. Match tag (:instruct, :coder, :text) for exact behavior.",
+    },
+    {
+        "match": "llama3.2",
+        "title": "Llama 3.2",
+        "purpose": "Compact Llama 3.2; fast on small GPUs. Better for latency than nuance; 3B can feel noisy for subtle reasoning.",
+    },
+    {
+        "match": "llama3.1",
+        "title": "Llama 3.1",
+        "purpose": "Llama 3.1 family; use :8b-instruct for assistant behavior or :8b-text for base completion.",
+    },
+    {
+        "match": "deepseek-r1",
+        "title": "DeepSeek R1 (distill)",
+        "purpose": "Reasoning-oriented distill; often shows chain-of-thought style. Use when you want explicit deliberation over speed.",
+    },
+    {
+        "match": "gemma2",
+        "title": "Gemma 2",
+        "purpose": "Google instruct line; typically stricter safety and concise answers. Contrast with Mistral/Open-weight baselines.",
+    },
+    {
+        "match": "phi",
+        "title": "Phi",
+        "purpose": "Small, efficient Microsoft models; strong for size, can feel synthetic on open-ended tasks.",
+    },
+    {
+        "match": "codellama",
+        "title": "Code Llama",
+        "purpose": "Meta code-focused model; legacy but still useful for completion and codegen-style prompts.",
+    },
+]
+
+DEFAULT_CHAT_MODEL_GUIDE: dict[str, str] = {
+    "title": "General chat model",
+    "purpose": "Listed in your Ollama runtime; behavior depends on its tag (base, instruct, coder). Try it for your task or pick a specialized model from the cards above.",
+}
 
 
 BASE_CSS = """
@@ -146,6 +246,7 @@ def nav_html() -> str:
         '<a href="/ui/history" style="color:var(--text); text-decoration:none;">History</a>'
         '<a href="/ui/generate" style="color:var(--text); text-decoration:none;">Generate</a>'
         '<a href="/ui/api-keys" style="color:var(--text); text-decoration:none;">API keys</a>'
+        '<a href="/ui/pipeline" style="color:var(--accent); text-decoration:none; font-weight:600;">Pipeline Lab</a>'
         f'<span style="margin-left:auto; color:var(--muted); font-size:13px;">{bypass}</span>'
         "</div>"
     )
@@ -888,6 +989,8 @@ def generate_ui():
 @router.get("/", response_class=HTMLResponse)
 @router.get("/ui/chat", response_class=HTMLResponse)
 def chat_ui():
+    guide_rules_json = json.dumps(CHAT_MODEL_GUIDE_RULES)
+    default_guide_json = json.dumps(DEFAULT_CHAT_MODEL_GUIDE)
     return HTMLResponse(
         dedent(
             f"""
@@ -928,7 +1031,8 @@ def chat_ui():
                   box-shadow: 0 20px 60px rgba(0,0,0,0.35);
                   padding: 20px;
                   margin-top: 50px;
-                  height: 92vh;
+                  margin-bottom: 48px;
+                  min-height: 92vh;
                 }}
                 h1 {{
                   margin-top: 0;
@@ -1038,6 +1142,50 @@ def chat_ui():
                   border: 1px solid rgba(56,189,248,0.35);
                   align-self: flex-start;
                 }}
+                .model-guide {{
+                  margin-top: 24px;
+                  padding-top: 20px;
+                  border-top: 1px solid var(--border);
+                }}
+                .model-guide h2 {{
+                  margin: 0 0 12px;
+                  font-size: 18px;
+                  font-weight: 600;
+                  color: var(--text);
+                }}
+                .model-guide-grid {{
+                  display: grid;
+                  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+                  gap: 12px;
+                }}
+                .model-guide-card {{
+                  background: rgba(15, 23, 42, 0.55);
+                  border: 1px solid var(--border);
+                  border-radius: 12px;
+                  padding: 14px 16px;
+                  display: flex;
+                  flex-direction: column;
+                  gap: 8px;
+                }}
+                .model-guide-card .model-id {{
+                  font-family: ui-monospace, "Cascadia Code", monospace;
+                  font-size: 12px;
+                  color: var(--accent);
+                  word-break: break-all;
+                  line-height: 1.35;
+                }}
+                .model-guide-card h3 {{
+                  margin: 0;
+                  font-size: 15px;
+                  font-weight: 600;
+                  color: var(--text);
+                }}
+                .model-guide-card p {{
+                  margin: 0;
+                  font-size: 13px;
+                  line-height: 1.45;
+                  color: var(--muted);
+                }}
               </style>
             </head>
             <body>
@@ -1060,7 +1208,7 @@ def chat_ui():
                     <span id="wait-text">Waiting for reply\u2026</span>
                   </div>
                 </div>
-                <div class="row input-wrap" style="margin; align-items:center; margin: 0px;">
+                <div class="row input-wrap" style="margin: 0; align-items: center;">
                   <div class="note" id="status"></div>
                 </div>
                 <div class="row" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
@@ -1075,8 +1223,11 @@ def chat_ui():
                     <button id="send">Send</button>
                   </div>
                 </div>
+                <section id="model-guide" class="model-guide" aria-label="Model guide"></section>
               </div>
               <script>
+                const MODEL_GUIDE_RULES = {guide_rules_json};
+                const MODEL_GUIDE_DEFAULT = {default_guide_json};
                 const DEV_BYPASS = {"true" if DEV_AUTH_BYPASS else "false"};
                 const sendBtn = document.getElementById("send");
                 const resetBtn = document.getElementById("reset");
@@ -1114,6 +1265,52 @@ def chat_ui():
 
                 function currentModel() {{
                   return modelList.length === 1 ? modelList[0] : modelEl.value.trim();
+                }}
+
+                function guideForModel(name) {{
+                  const n = (name || "").toLowerCase();
+                  for (const r of MODEL_GUIDE_RULES) {{
+                    const key = (r.match || "").toLowerCase();
+                    if (key && n.includes(key)) {{
+                      return {{ title: r.title, purpose: r.purpose }};
+                    }}
+                  }}
+                  return {{ title: MODEL_GUIDE_DEFAULT.title, purpose: MODEL_GUIDE_DEFAULT.purpose }};
+                }}
+
+                function renderModelGuide() {{
+                  const wrap = document.getElementById("model-guide");
+                  if (!wrap) return;
+                  wrap.innerHTML = "";
+                  if (!modelList.length) return;
+                  const h2 = document.createElement("h2");
+                  h2.textContent = "Available models";
+                  wrap.appendChild(h2);
+                  const sub = document.createElement("p");
+                  sub.className = "note";
+                  sub.style.margin = "0 0 14px";
+                  sub.textContent = "What each installed model is good for (heuristic blurbs; exact behavior depends on prompt and parameters).";
+                  wrap.appendChild(sub);
+                  const grid = document.createElement("div");
+                  grid.className = "model-guide-grid";
+                  const sorted = modelList.slice().sort((a, b) => a.localeCompare(b));
+                  sorted.forEach((m) => {{
+                    const g = guideForModel(m);
+                    const card = document.createElement("article");
+                    card.className = "model-guide-card";
+                    const idEl = document.createElement("div");
+                    idEl.className = "model-id";
+                    idEl.textContent = m;
+                    const h3 = document.createElement("h3");
+                    h3.textContent = g.title;
+                    const p = document.createElement("p");
+                    p.textContent = g.purpose;
+                    card.appendChild(idEl);
+                    card.appendChild(h3);
+                    card.appendChild(p);
+                    grid.appendChild(card);
+                  }});
+                  wrap.appendChild(grid);
                 }}
 
                 function parseQuery() {{
@@ -1173,6 +1370,7 @@ def chat_ui():
                     const current = modelList.find(m => m === "{CHAT_MODEL}");
                     modelEl.value = current || modelList[0];
                   }}
+                  renderModelGuide();
                 }}
 
                 function renderHistory() {{
@@ -1362,3 +1560,460 @@ def chat_ui():
             """
         )
     )
+
+
+@router.get("/ui/pipeline", response_class=HTMLResponse)
+def pipeline_ui():
+    extra_css = """
+    .pl-wrap {
+      width: min(1280px, 100%);
+      background: linear-gradient(180deg, var(--card-2), var(--card));
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.35);
+      padding: 20px 24px;
+      margin-top: 50px;
+      min-height: 92vh;
+    }
+    .pl-sub { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
+    .pl-status-bar {
+      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+      background: rgba(0,0,0,0.25); border: 1px solid var(--border);
+      border-radius: 10px; padding: 8px 12px; margin-bottom: 16px;
+    }
+    .state-chip {
+      padding: 3px 10px; border-radius: 999px; font-size: 12px;
+      font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
+    }
+    .state-chip.unloaded { background: #1f2937; color: var(--muted); }
+    .state-chip.loading  { background: rgba(251,191,36,0.2); color: #fbbf24; }
+    .state-chip.cpu      { background: rgba(99,102,241,0.2); color: #818cf8; }
+    .state-chip.gpu      { background: rgba(52,211,153,0.2); color: #34d399; }
+    .state-chip.error    { background: rgba(239,68,68,0.15); color: #f87171; }
+    .pl-status-meta { color: var(--muted); font-size: 12px; }
+    .pl-btn-sm {
+      padding: 4px 10px; font-size: 12px; font-weight: 600;
+      border-radius: 8px; border: 1px solid var(--border);
+      background: #0b1221; color: var(--text); cursor: pointer;
+      transition: border-color 120ms;
+    }
+    .pl-btn-sm:hover { border-color: var(--accent); }
+    .pl-columns { display: grid; grid-template-columns: 340px 1fr; gap: 20px; }
+    .pl-left { display: flex; flex-direction: column; gap: 14px; }
+    .pl-section {
+      background: rgba(0,0,0,0.2); border: 1px solid var(--border);
+      border-radius: 12px; padding: 14px;
+    }
+    .pl-section label {
+      font-size: 13px; font-weight: 600; display: block; margin-bottom: 6px;
+    }
+    .pl-section textarea, .pl-section input[type=text] {
+      width: 100%; background: #0b1221; border: 1px solid var(--border);
+      border-radius: 8px; color: var(--text); font: inherit; font-size: 13px;
+      padding: 8px 10px; resize: vertical; box-sizing: border-box;
+    }
+    .pl-section textarea:focus, .pl-section input[type=text]:focus {
+      outline: none; border-color: var(--accent);
+    }
+    .turn-row { display: flex; gap: 6px; margin-bottom: 6px; align-items: center; }
+    .turn-row input { flex: 1; }
+    .turn-del {
+      flex-shrink: 0; width: 28px; height: 28px; border-radius: 6px;
+      border: 1px solid var(--border); background: #0b1221;
+      color: var(--muted); font-size: 16px; cursor: pointer; line-height: 1;
+    }
+    .turn-del:hover { color: #f87171; border-color: #f87171; }
+    .pl-link-btn {
+      font-size: 12px; color: var(--accent); background: none; border: none;
+      cursor: pointer; padding: 0; text-decoration: underline;
+    }
+    .run-btn {
+      width: 100%; padding: 11px; font-size: 14px; font-weight: 700;
+      border-radius: 10px; border: none; cursor: pointer;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      color: #0b1020; transition: opacity 120ms, transform 120ms;
+      box-shadow: 0 6px 18px rgba(56,189,248,0.25);
+    }
+    .run-btn:hover { opacity: 0.9; transform: translateY(-1px); }
+    .run-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+    .timing-note { color: var(--muted); font-size: 12px; margin-top: 6px; min-height: 18px; }
+    .pl-right { display: flex; flex-direction: column; gap: 0; }
+    .stage-card {
+      border: 1px solid var(--border); border-radius: 12px;
+      padding: 14px 16px; background: rgba(0,0,0,0.18);
+    }
+    .stage-card.live { border-color: rgba(56,189,248,0.45); }
+    .stage-card.stub { opacity: 0.72; }
+    .stage-connector {
+      display: flex; align-items: center; justify-content: center;
+      color: var(--muted); font-size: 20px; padding: 2px 0;
+    }
+    .stage-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .stage-name { font-weight: 700; font-size: 15px; }
+    .stage-badge {
+      font-size: 11px; font-weight: 700; letter-spacing: 0.05em;
+      padding: 2px 8px; border-radius: 999px; text-transform: uppercase;
+    }
+    .stage-badge.live  { background: rgba(56,189,248,0.18); color: var(--accent); }
+    .stage-badge.stub  { background: #1f2937; color: var(--muted); }
+    .stage-meta { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 3px; }
+    .stage-knows { font-style: italic; margin-bottom: 2px; }
+    .stage-io b { color: var(--text); font-weight: 600; }
+    .stage-output {
+      margin-top: 12px; padding: 10px 12px;
+      background: rgba(56,189,248,0.06); border: 1px solid rgba(56,189,248,0.2);
+      border-radius: 8px;
+    }
+    .stage-output-title {
+      font-size: 11px; font-weight: 700; color: var(--accent);
+      letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 8px;
+    }
+    .token-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+    .token-chip {
+      display: flex; align-items: center; gap: 6px;
+      background: rgba(99,102,241,0.18); border: 1px solid rgba(99,102,241,0.4);
+      border-radius: 8px; padding: 4px 10px; font-size: 13px;
+    }
+    .token-score { color: var(--accent); font-weight: 700; font-size: 12px; }
+    .score-bars { display: flex; flex-direction: column; gap: 4px; }
+    .score-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+    .score-label {
+      width: 120px; text-align: right; color: var(--muted);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .score-bar-bg { flex: 1; height: 6px; background: #1f2937; border-radius: 3px; }
+    .score-bar-fill {
+      height: 100%; border-radius: 3px;
+      background: linear-gradient(90deg, var(--accent-2), var(--accent));
+    }
+    .score-val { width: 42px; color: var(--text); font-variant-numeric: tabular-nums; }
+    .stage-stub-preview {
+      margin-top: 10px; padding: 8px 10px;
+      background: rgba(99,102,241,0.06); border: 1px dashed rgba(99,102,241,0.25);
+      border-radius: 8px; font-size: 12px; color: var(--muted);
+    }
+    .stage-stub-preview b { color: var(--text); }
+    .error-box {
+      padding: 8px 12px; border-radius: 8px; font-size: 13px;
+      background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.4);
+      color: #f87171; margin-top: 8px;
+    }
+    @media (max-width: 900px) { .pl-columns { grid-template-columns: 1fr; } }
+    """
+
+    body = f"""
+    <div class="pl-wrap">
+      <div style="display:flex; align-items:baseline; gap:12px; margin-bottom:4px;">
+        <h1 style="margin:0; font-size:22px;">Pipeline Lab</h1>
+        <span style="color:var(--muted); font-size:13px;">ModernBERT classifier &middot; stage 1 of 4</span>
+      </div>
+      <p class="pl-sub">
+        Scout and refine the classifier step. Stages 2&ndash;4 are stubs showing the intended contract.
+        Each model knows exactly what it needs &mdash; no more.
+      </p>
+
+      <div class="pl-status-bar">
+        <span id="stateChip" class="state-chip unloaded">unloaded</span>
+        <span id="statusMeta" class="pl-status-meta">&mdash;</span>
+        <span style="margin-left:auto; display:flex; gap:6px;">
+          <button class="pl-btn-sm" onclick="mbLoad()">Load</button>
+          <button class="pl-btn-sm" onclick="mbEvict()">Evict to CPU</button>
+          <button class="pl-btn-sm" onclick="mbUnload()">Unload</button>
+        </span>
+      </div>
+
+      <div class="pl-columns">
+
+        <div class="pl-left">
+
+          <div class="pl-section">
+            <label>Label set</label>
+            <textarea id="labelsInput" rows="5"
+              placeholder="curious, defensive, playful, sad, angry, flirtatious, neutral, ..."></textarea>
+            <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
+              <button class="pl-btn-sm" onclick="updateLabels()">Update labels</button>
+              <span id="labelsStatus" style="color:var(--muted); font-size:12px;"></span>
+            </div>
+            <div style="color:var(--muted); font-size:11px; margin-top:6px;">
+              Comma or newline separated. Re-embeds immediately if model is resident.
+            </div>
+          </div>
+
+          <div class="pl-section">
+            <label>Context turns <span style="font-weight:400; color:var(--muted);">(oldest first, up to 5 used)</span></label>
+            <div id="turnsList"></div>
+            <button class="pl-link-btn" onclick="addTurn()" style="margin-top:4px;">+ add turn</button>
+          </div>
+
+          <div class="pl-section">
+            <label>User message</label>
+            <textarea id="msgInput" rows="4" placeholder="what the user just sent&hellip;"></textarea>
+            <button class="run-btn" id="runBtn" onclick="runClassify()" style="margin-top:10px;">
+              Run ModernBERT &#8594;
+            </button>
+            <div class="timing-note" id="timingNote"></div>
+          </div>
+
+        </div>
+
+        <div class="pl-right">
+
+          <div class="stage-card live">
+            <div class="stage-header">
+              <span class="stage-name">1 &middot; ModernBERT</span>
+              <span class="stage-badge live">LIVE &middot; 149M params</span>
+            </div>
+            <div class="stage-meta">
+              <div class="stage-knows">Knows: user message + 5 turns of context. Not who the character is.</div>
+              <div class="stage-io"><b>Gets:</b> raw text &mdash; message + 5 turns context</div>
+              <div class="stage-io"><b>Produces:</b> 5&ndash;10 classifier tokens (ranked labels + scores)</div>
+            </div>
+            <div id="stage1Output" style="display:none;" class="stage-output">
+              <div class="stage-output-title">Output &mdash; classifier tokens</div>
+              <div id="tokenChips" class="token-chips"></div>
+              <div id="scoreBars" class="score-bars"></div>
+            </div>
+            <div id="stage1Error" style="display:none;" class="error-box"></div>
+          </div>
+
+          <div class="stage-connector">&#8595;</div>
+
+          <div class="stage-card stub">
+            <div class="stage-header">
+              <span class="stage-name">2 &middot; 4B Overlay</span>
+              <span class="stage-badge stub">STUB &middot; external</span>
+            </div>
+            <div class="stage-meta">
+              <div class="stage-knows">Knows: character config + current state. Not full session history.</div>
+              <div class="stage-io"><b>Gets:</b> character config + state + classifier tokens + turn context</div>
+              <div class="stage-io"><b>Produces:</b> style tuner &mdash; 80&ndash;120 token voice directive</div>
+            </div>
+            <div id="stage2Preview" class="stage-stub-preview" style="display:none;">
+              <b>Would receive classifier tokens:</b>
+              <span id="stage2Tokens"></span>
+            </div>
+          </div>
+
+          <div class="stage-connector">&#8595;</div>
+
+          <div class="stage-card stub">
+            <div class="stage-header">
+              <span class="stage-name">3 &middot; Brain</span>
+              <span class="stage-badge stub">STUB &middot; large &middot; once/turn</span>
+            </div>
+            <div class="stage-meta">
+              <div class="stage-knows">Knows: everything &mdash; character, state, history, memory, promises, events, classifier read, voice directive. Does not write in the character&apos;s voice.</div>
+              <div class="stage-io"><b>Gets:</b> full context + style tuner + classifier tokens + history</div>
+              <div class="stage-io"><b>Produces:</b> think block + response skeleton</div>
+            </div>
+          </div>
+
+          <div class="stage-connector">&#8595;</div>
+
+          <div class="stage-card stub">
+            <div class="stage-header">
+              <span class="stage-name">4 &middot; Prose Model</span>
+              <span class="stage-badge stub">STUB &middot; medium &middot; streams</span>
+            </div>
+            <div class="stage-meta">
+              <div class="stage-knows">Knows: how to write in the character&apos;s voice + what to write from the skeleton. Does not reason over the relationship arc.</div>
+              <div class="stage-io"><b>Gets:</b> style tuner + skeleton + recent history</div>
+              <div class="stage-io"><b>Produces:</b> character&apos;s streamed response</div>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const DEV_BYPASS = {"true" if DEV_AUTH_BYPASS else "false"};
+
+      function apiHeaders() {{
+        const h = {{"Content-Type": "application/json"}};
+        if (!DEV_BYPASS) {{
+          const k = (localStorage.getItem("rag_api_key") || "").trim();
+          if (k) h["Authorization"] = "Bearer " + k;
+        }}
+        return h;
+      }}
+
+      async function loadStatus() {{
+        try {{
+          const r = await fetch("/api/pipeline/status", {{headers: apiHeaders()}});
+          if (!r.ok) {{ setChip("error", "service error"); return; }}
+          const d = await r.json();
+          setChip(d.state, d.model_id, d.last_used, d.device);
+          if (!document.getElementById("labelsInput").value.trim()) loadLabels();
+        }} catch(e) {{
+          setChip("error", "unreachable");
+        }}
+      }}
+
+      function setChip(state, modelId, lastUsed, device) {{
+        const chip = document.getElementById("stateChip");
+        chip.className = "state-chip " + (state || "unloaded");
+        chip.textContent = state || "unloaded";
+        const meta = document.getElementById("statusMeta");
+        const parts = [];
+        if (modelId) parts.push(modelId);
+        if (device && device !== "none") parts.push(device);
+        if (lastUsed) {{
+          const secs = Math.round((Date.now() / 1000) - lastUsed);
+          parts.push("last used " + (secs < 60 ? secs + "s ago" : Math.round(secs / 60) + "m ago"));
+        }}
+        meta.textContent = parts.join(" · ") || "—";
+      }}
+
+      async function mbAction(path) {{
+        setChip("loading");
+        try {{
+          const r = await fetch(path, {{method: "POST", headers: apiHeaders()}});
+          const d = await r.json();
+          setChip(d.state, null, null, d.device);
+        }} catch(e) {{ setChip("error"); }}
+        setTimeout(loadStatus, 1000);
+      }}
+
+      const mbLoad   = () => mbAction("/api/pipeline/load");
+      const mbEvict  = () => mbAction("/api/pipeline/evict");
+      const mbUnload = () => mbAction("/api/pipeline/unload");
+
+      async function loadLabels() {{
+        try {{
+          const r = await fetch("/api/pipeline/labels", {{headers: apiHeaders()}});
+          if (!r.ok) return;
+          const d = await r.json();
+          if (d.labels && d.labels.length) {{
+            document.getElementById("labelsInput").value = d.labels.join(", ");
+          }}
+        }} catch(_) {{}}
+      }}
+
+      async function updateLabels() {{
+        const raw = document.getElementById("labelsInput").value;
+        const labels = raw.split(/[,\\n]+/).map(s => s.trim()).filter(Boolean);
+        if (!labels.length) return;
+        const el = document.getElementById("labelsStatus");
+        el.textContent = "updating…";
+        try {{
+          const r = await fetch("/api/pipeline/labels", {{
+            method: "PUT",
+            headers: apiHeaders(),
+            body: JSON.stringify({{labels}}),
+          }});
+          if (r.ok) {{
+            const d = await r.json();
+            const emb = d.embeddings_ready ? " · embeddings ready" : " · will embed on next classify";
+            el.textContent = labels.length + " labels" + emb;
+          }} else {{
+            el.textContent = "error " + r.status;
+          }}
+        }} catch(e) {{ el.textContent = "unreachable"; }}
+      }}
+
+      function addTurn(val) {{
+        const list = document.getElementById("turnsList");
+        const n = list.children.length + 1;
+        const row = document.createElement("div");
+        row.className = "turn-row";
+        const safe = (val || "").replace(/"/g, "&quot;");
+        row.innerHTML =
+          '<input type="text" placeholder="turn ' + n + '" value="' + safe + '" />' +
+          '<button class="turn-del" onclick="this.parentElement.remove()" title="remove">×</button>';
+        list.appendChild(row);
+      }}
+
+      function getContext() {{
+        return Array.from(document.querySelectorAll("#turnsList .turn-row input"))
+          .map(i => i.value.trim()).filter(Boolean);
+      }}
+
+      async function runClassify() {{
+        const text = document.getElementById("msgInput").value.trim();
+        if (!text) {{ document.getElementById("msgInput").focus(); return; }}
+
+        const btn = document.getElementById("runBtn");
+        btn.disabled = true;
+        btn.textContent = "Running…";
+        document.getElementById("stage1Output").style.display = "none";
+        document.getElementById("stage1Error").style.display = "none";
+        document.getElementById("stage2Preview").style.display = "none";
+        document.getElementById("timingNote").textContent = "";
+
+        const t0 = Date.now();
+        try {{
+          const r = await fetch("/api/pipeline/classify", {{
+            method: "POST",
+            headers: apiHeaders(),
+            body: JSON.stringify({{text, context: getContext()}}),
+          }});
+          const elapsed = Date.now() - t0;
+
+          if (!r.ok) {{
+            const msg = await r.text();
+            showError(msg);
+            document.getElementById("timingNote").textContent = elapsed + "ms (error)";
+            return;
+          }}
+
+          const d = await r.json();
+          renderStage1(d);
+          document.getElementById("timingNote").textContent =
+            elapsed + "ms · task: " + d.task + " · model state: " + d.model_state;
+
+          if (d.labels && d.labels.length) showStage2Preview(d.labels, d.scores);
+          loadStatus();
+        }} catch(e) {{
+          showError(e.toString());
+        }} finally {{
+          btn.disabled = false;
+          btn.textContent = "Run ModernBERT →";
+        }}
+      }}
+
+      function showError(msg) {{
+        const el = document.getElementById("stage1Error");
+        el.style.display = "block";
+        el.textContent = msg;
+      }}
+
+      function renderStage1(d) {{
+        document.getElementById("stage1Output").style.display = "block";
+
+        document.getElementById("tokenChips").innerHTML = d.labels.map((lbl, i) =>
+          '<span class="token-chip">' + esc(lbl) +
+          '<span class="token-score">' + d.scores[i].toFixed(3) + '</span></span>'
+        ).join("");
+
+        const raw = d.raw || {{}};
+        const sorted = Object.entries(raw).sort((a, b) => b[1] - a[1]);
+        document.getElementById("scoreBars").innerHTML = sorted.map(([lbl, score]) => {{
+          const pct = Math.max(0, Math.min(100, score * 100)).toFixed(1);
+          return '<div class="score-row">' +
+            '<span class="score-label" title="' + esc(lbl) + '">' + esc(lbl) + '</span>' +
+            '<div class="score-bar-bg"><div class="score-bar-fill" style="width:' + pct + '%"></div></div>' +
+            '<span class="score-val">' + score.toFixed(3) + '</span></div>';
+        }}).join("");
+      }}
+
+      function showStage2Preview(labels, scores) {{
+        document.getElementById("stage2Preview").style.display = "block";
+        document.getElementById("stage2Tokens").innerHTML = " " + labels.map((lbl, i) =>
+          '<span style="background:rgba(99,102,241,0.15);border:1px solid rgba(99,102,241,0.35);' +
+          'border-radius:6px;padding:2px 7px;font-size:12px;margin:0 2px;">' +
+          esc(lbl) + ' <span style="color:var(--accent);">' + scores[i].toFixed(2) + '</span></span>'
+        ).join("");
+      }}
+
+      function esc(s) {{
+        return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+      }}
+
+      loadStatus();
+      loadLabels();
+      setInterval(loadStatus, 12000);
+    </script>
+    """
+
+    return render_page("Pipeline Lab", body, extra_css)
