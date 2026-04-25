@@ -51,6 +51,8 @@ async def model_status():
         labels=classifier.labels,
         task=manager.task,
         error=manager.error,
+        gpu_capable=manager.effective_device() == "cuda",
+        configured_device=manager._target_device,
     )
 
 

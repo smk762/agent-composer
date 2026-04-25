@@ -46,3 +46,5 @@ class ModelStatus(BaseModel):
     labels: List[str]
     task: str
     error: Optional[str]
+    gpu_capable: bool = False
+    configured_device: str = "auto"

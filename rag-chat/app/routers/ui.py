@@ -1591,6 +1591,13 @@ def pipeline_ui():
     .state-chip.gpu      { background: rgba(52,211,153,0.2); color: #34d399; }
     .state-chip.error    { background: rgba(239,68,68,0.15); color: #f87171; }
     .pl-status-meta { color: var(--muted); font-size: 12px; }
+    .gpu-cap-chip {
+      padding: 3px 9px; border-radius: 999px; font-size: 11px;
+      font-weight: 700; letter-spacing: 0.04em; display: inline-flex; align-items: center; gap: 4px;
+    }
+    .gpu-cap-chip.capable  { background: rgba(52,211,153,0.12); color: #34d399; border: 1px solid rgba(52,211,153,0.3); }
+    .gpu-cap-chip.cpu-only { background: #1f2937; color: var(--muted); border: 1px solid var(--border); }
+    .gpu-note { font-size: 12px; color: #fbbf24; }
     .pl-btn-sm {
       padding: 4px 10px; font-size: 12px; font-weight: 600;
       border-radius: 8px; border: 1px solid var(--border);
@@ -1714,7 +1721,9 @@ def pipeline_ui():
 
       <div class="pl-status-bar">
         <span id="stateChip" class="state-chip unloaded">unloaded</span>
+        <span id="gpuCapChip" class="gpu-cap-chip" style="display:none;"></span>
         <span id="statusMeta" class="pl-status-meta">&mdash;</span>
+        <span id="gpuNote" class="gpu-note" style="display:none;"></span>
         <span style="margin-left:auto; display:flex; gap:6px;">
           <button class="pl-btn-sm" onclick="mbLoad()">Load</button>
           <button class="pl-btn-sm" onclick="mbEvict()">Evict to CPU</button>
@@ -1843,17 +1852,28 @@ def pipeline_ui():
           const r = await fetch("/api/pipeline/status", {{headers: apiHeaders()}});
           if (!r.ok) {{ setChip("error", "service error"); return; }}
           const d = await r.json();
-          setChip(d.state, d.model_id, d.last_used, d.device);
+          setChip(d.state, d.model_id, d.last_used, d.device,
+                  d.gpu_capable, d.keep_alive_gpu, d.keep_alive_cpu, d.configured_device);
           if (!document.getElementById("labelsInput").value.trim()) loadLabels();
         }} catch(e) {{
           setChip("error", "unreachable");
         }}
       }}
 
-      function setChip(state, modelId, lastUsed, device) {{
+      function fmtKa(secs) {{
+        if (secs == null) return "?";
+        if (secs < 0) return "∞";
+        if (secs === 0) return "0 (immediate)";
+        if (secs >= 3600) return (secs / 3600).toFixed(0) + "h";
+        if (secs >= 60) return (secs / 60).toFixed(0) + "m";
+        return secs + "s";
+      }}
+
+      function setChip(state, modelId, lastUsed, device, gpuCapable, keepAliveGpu, keepAliveCpu, configuredDevice) {{
         const chip = document.getElementById("stateChip");
         chip.className = "state-chip " + (state || "unloaded");
         chip.textContent = state || "unloaded";
+
         const meta = document.getElementById("statusMeta");
         const parts = [];
         if (modelId) parts.push(modelId);
@@ -1863,6 +1883,38 @@ def pipeline_ui():
           parts.push("last used " + (secs < 60 ? secs + "s ago" : Math.round(secs / 60) + "m ago"));
         }}
         meta.textContent = parts.join(" · ") || "—";
+
+        // GPU capability chip
+        const capChip = document.getElementById("gpuCapChip");
+        const noteEl = document.getElementById("gpuNote");
+        if (gpuCapable != null) {{
+          capChip.style.display = "";
+          if (gpuCapable) {{
+            capChip.className = "gpu-cap-chip capable";
+            capChip.textContent = "⚡ GPU capable";
+          }} else {{
+            capChip.className = "gpu-cap-chip cpu-only";
+            const devLabel = configuredDevice === "cpu" ? "forced CPU" : "no CUDA";
+            capChip.textContent = "CPU only · " + devLabel;
+          }}
+        }} else {{
+          capChip.style.display = "none";
+        }}
+
+        // Explanatory note when on CPU but GPU is available
+        if (noteEl) {{
+          noteEl.style.display = "none";
+          noteEl.textContent = "";
+          if (state === "cpu" && gpuCapable) {{
+            const kaStr = fmtKa(keepAliveGpu);
+            noteEl.textContent = "GPU idle timer (" + kaStr + ") expired — click Load to restore GPU";
+            noteEl.style.display = "";
+          }} else if (state === "gpu" && gpuCapable) {{
+            noteEl.textContent = "GPU idle timer: " + fmtKa(keepAliveGpu);
+            noteEl.style.color = "var(--muted)";
+            noteEl.style.display = "";
+          }}
+        }}
       }}
 
       async function mbAction(path) {{
