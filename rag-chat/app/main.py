@@ -8,7 +8,7 @@ from app.metrics import MetricsMiddleware, metrics_router
 app = FastAPI(title="RAG Chat API")
 app.add_middleware(MetricsMiddleware)
 
-from app.routers import chat, api_keys, ui, generation, media, providers as providers_router, pipeline  # noqa: E402
+from app.routers import chat, api_keys, ui, generation, media, providers as providers_router, pipeline, repair  # noqa: E402
 
 app.include_router(chat.router)
 app.include_router(api_keys.router)
@@ -17,4 +17,5 @@ app.include_router(generation.router)
 app.include_router(media.router)
 app.include_router(providers_router.router)
 app.include_router(pipeline.router)
+app.include_router(repair.router)
 app.include_router(metrics_router)

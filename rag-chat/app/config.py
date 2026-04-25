@@ -47,6 +47,17 @@ PROVIDER_ENCRYPTION_KEY = os.getenv("PROVIDER_ENCRYPTION_KEY", "")
 
 MODERNBERT_URL = os.getenv("MODERNBERT_URL", "http://modernbert:7998")
 
+# ── Agentic repair pipeline ────────────────────────────────────────────────────
+# URL of the ai-code-auditor audit API — used for diff-audit validation between
+# repair iterations.  Leave empty to disable validation.
+AUDIT_API_URL = os.getenv("AUDIT_API_URL", "http://127.0.0.1:8765")
+# Path to the ai-code-auditor ecosystem.yaml — used to resolve repo paths for
+# apply-in-place and compare-branch operations.
+ECOSYSTEM_CONFIG_PATH = os.getenv(
+    "ECOSYSTEM_CONFIG_PATH",
+    "/home/smk/ai-code-auditor/config/ecosystem.yaml",
+)
+
 UTC = timezone.utc
 
 
