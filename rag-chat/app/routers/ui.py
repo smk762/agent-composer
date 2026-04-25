@@ -1749,17 +1749,47 @@ def pipeline_ui():
           </div>
 
           <div class="pl-section">
+            <label>Character</label>
+            <input type="text" id="charName" placeholder="Character name" />
+            <textarea id="charPersona" rows="3" placeholder="Persona / description&hellip;" style="margin-top:6px;"></textarea>
+            <input type="text" id="charState" placeholder="Current state (optional — e.g. anxious, playful)" style="margin-top:6px;" />
+          </div>
+
+          <div class="pl-section">
             <label>Context turns <span style="font-weight:400; color:var(--muted);">(oldest first, up to 5 used)</span></label>
             <div id="turnsList"></div>
             <button class="pl-link-btn" onclick="addTurn()" style="margin-top:4px;">+ add turn</button>
           </div>
 
           <div class="pl-section">
+            <label>Stage models <span style="font-weight:400; color:var(--muted);">(leave blank → chat default)</span></label>
+            <div style="display:grid; gap:5px; font-size:12px;">
+              <div style="display:flex; align-items:center; gap:6px;">
+                <span style="width:68px; color:var(--muted);">2 · Overlay</span>
+                <input type="text" id="modelOverlay" placeholder="model name" style="font-size:12px; padding:4px 8px;" />
+              </div>
+              <div style="display:flex; align-items:center; gap:6px;">
+                <span style="width:68px; color:var(--muted);">3 · Brain</span>
+                <input type="text" id="modelBrain" placeholder="model name" style="font-size:12px; padding:4px 8px;" />
+              </div>
+              <div style="display:flex; align-items:center; gap:6px;">
+                <span style="width:68px; color:var(--muted);">4 · Prose</span>
+                <input type="text" id="modelProse" placeholder="model name" style="font-size:12px; padding:4px 8px;" />
+              </div>
+            </div>
+          </div>
+
+          <div class="pl-section">
             <label>User message</label>
             <textarea id="msgInput" rows="4" placeholder="what the user just sent&hellip;"></textarea>
-            <button class="run-btn" id="runBtn" onclick="runClassify()" style="margin-top:10px;">
-              Run ModernBERT &#8594;
-            </button>
+            <div style="display:flex; gap:8px; margin-top:10px;">
+              <button class="run-btn" id="runBtn" onclick="runClassify()" style="flex:1;">
+                1 · ModernBERT &#8594;
+              </button>
+              <button class="run-btn" id="runAllBtn" onclick="runAll()" style="flex:1; background:linear-gradient(90deg,var(--accent-2),var(--accent));">
+                Run all &#8594;
+              </button>
+            </div>
             <div class="timing-note" id="timingNote"></div>
           </div>
 
@@ -1787,48 +1817,62 @@ def pipeline_ui():
 
           <div class="stage-connector">&#8595;</div>
 
-          <div class="stage-card stub">
+          <div class="stage-card live" id="stage2Card">
             <div class="stage-header">
               <span class="stage-name">2 &middot; 4B Overlay</span>
-              <span class="stage-badge stub">STUB &middot; external</span>
+              <span class="stage-badge live">LIVE &middot; style tuner</span>
+              <button class="pl-btn-sm" onclick="runOverlay()" style="margin-left:auto;">Run</button>
             </div>
             <div class="stage-meta">
               <div class="stage-knows">Knows: character config + current state. Not full session history.</div>
-              <div class="stage-io"><b>Gets:</b> character config + state + classifier tokens + turn context</div>
-              <div class="stage-io"><b>Produces:</b> style tuner &mdash; 80&ndash;120 token voice directive</div>
+              <div class="stage-io"><b>Gets:</b> character + classifier tokens + turn context</div>
+              <div class="stage-io"><b>Produces:</b> 80&ndash;120 token voice directive</div>
             </div>
-            <div id="stage2Preview" class="stage-stub-preview" style="display:none;">
-              <b>Would receive classifier tokens:</b>
-              <span id="stage2Tokens"></span>
+            <div id="stage2Output" style="display:none;" class="stage-output">
+              <div class="stage-output-title">Voice directive <span id="stage2Model" style="font-weight:400; text-transform:none; letter-spacing:0;"></span></div>
+              <div id="stage2Text" style="white-space:pre-wrap; font-size:13px; line-height:1.5;"></div>
             </div>
+            <div id="stage2Error" style="display:none;" class="error-box"></div>
           </div>
 
           <div class="stage-connector">&#8595;</div>
 
-          <div class="stage-card stub">
+          <div class="stage-card live" id="stage3Card">
             <div class="stage-header">
               <span class="stage-name">3 &middot; Brain</span>
-              <span class="stage-badge stub">STUB &middot; large &middot; once/turn</span>
+              <span class="stage-badge live">LIVE &middot; large &middot; once/turn</span>
+              <button class="pl-btn-sm" onclick="runBrain()" style="margin-left:auto;">Run</button>
             </div>
             <div class="stage-meta">
-              <div class="stage-knows">Knows: everything &mdash; character, state, history, memory, promises, events, classifier read, voice directive. Does not write in the character&apos;s voice.</div>
-              <div class="stage-io"><b>Gets:</b> full context + style tuner + classifier tokens + history</div>
-              <div class="stage-io"><b>Produces:</b> think block + response skeleton</div>
+              <div class="stage-knows">Knows: everything &mdash; character, state, history, classifier, voice directive. Does not write in character voice.</div>
+              <div class="stage-io"><b>Gets:</b> full context + directive + classifier + history</div>
+              <div class="stage-io"><b>Produces:</b> structured plan (intent, key points, arc, avoid)</div>
             </div>
+            <div id="stage3Output" style="display:none;" class="stage-output">
+              <div class="stage-output-title">Skeleton <span id="stage3Model" style="font-weight:400; text-transform:none; letter-spacing:0;"></span></div>
+              <div id="stage3Text" style="white-space:pre-wrap; font-size:13px; line-height:1.5;"></div>
+            </div>
+            <div id="stage3Error" style="display:none;" class="error-box"></div>
           </div>
 
           <div class="stage-connector">&#8595;</div>
 
-          <div class="stage-card stub">
+          <div class="stage-card live" id="stage4Card">
             <div class="stage-header">
               <span class="stage-name">4 &middot; Prose Model</span>
-              <span class="stage-badge stub">STUB &middot; medium &middot; streams</span>
+              <span class="stage-badge live">LIVE &middot; medium &middot; streams</span>
+              <button class="pl-btn-sm" onclick="runProse()" style="margin-left:auto;">Run</button>
             </div>
             <div class="stage-meta">
-              <div class="stage-knows">Knows: how to write in the character&apos;s voice + what to write from the skeleton. Does not reason over the relationship arc.</div>
-              <div class="stage-io"><b>Gets:</b> style tuner + skeleton + recent history</div>
+              <div class="stage-knows">Knows: how to write as the character + what to write from the skeleton. Does not reason over the relationship arc.</div>
+              <div class="stage-io"><b>Gets:</b> directive + skeleton + recent history</div>
               <div class="stage-io"><b>Produces:</b> character&apos;s streamed response</div>
             </div>
+            <div id="stage4Output" style="display:none;" class="stage-output">
+              <div class="stage-output-title">Response <span id="stage4Model" style="font-weight:400; text-transform:none; letter-spacing:0;"></span></div>
+              <div id="stage4Text" style="white-space:pre-wrap; font-size:13px; line-height:1.5;"></div>
+            </div>
+            <div id="stage4Error" style="display:none;" class="error-box"></div>
           </div>
 
         </div>
@@ -1981,6 +2025,15 @@ def pipeline_ui():
           .map(i => i.value.trim()).filter(Boolean);
       }}
 
+      // Pipeline state — passed forward between stages
+      let _classifyResult = null;  // {{labels, scores}}
+      let _directive = "";
+      let _skeleton = "";
+
+      function charName()    {{ return document.getElementById("charName").value.trim() || "Character"; }}
+      function charPersona() {{ return document.getElementById("charPersona").value.trim(); }}
+      function charState()   {{ return document.getElementById("charState").value.trim(); }}
+
       async function runClassify() {{
         const text = document.getElementById("msgInput").value.trim();
         if (!text) {{ document.getElementById("msgInput").focus(); return; }}
@@ -1990,8 +2043,8 @@ def pipeline_ui():
         btn.textContent = "Running…";
         document.getElementById("stage1Output").style.display = "none";
         document.getElementById("stage1Error").style.display = "none";
-        document.getElementById("stage2Preview").style.display = "none";
         document.getElementById("timingNote").textContent = "";
+        _classifyResult = null;
 
         const t0 = Date.now();
         try {{
@@ -2001,43 +2054,167 @@ def pipeline_ui():
             body: JSON.stringify({{text, context: getContext()}}),
           }});
           const elapsed = Date.now() - t0;
-
           if (!r.ok) {{
             const msg = await r.text();
-            showError(msg);
+            showStageError("stage1Error", msg);
             document.getElementById("timingNote").textContent = elapsed + "ms (error)";
             return;
           }}
-
           const d = await r.json();
+          _classifyResult = d;
           renderStage1(d);
           document.getElementById("timingNote").textContent =
             elapsed + "ms · task: " + d.task + " · model state: " + d.model_state;
-
-          if (d.labels && d.labels.length) showStage2Preview(d.labels, d.scores);
           loadStatus();
         }} catch(e) {{
-          showError(e.toString());
+          showStageError("stage1Error", e.toString());
         }} finally {{
           btn.disabled = false;
-          btn.textContent = "Run ModernBERT →";
+          btn.textContent = "1 · ModernBERT →";
         }}
       }}
 
-      function showError(msg) {{
-        const el = document.getElementById("stage1Error");
+      async function runOverlay() {{
+        if (!_classifyResult) {{ alert("Run stage 1 first."); return; }}
+        setStageRunning("stage2Card", true);
+        document.getElementById("stage2Output").style.display = "none";
+        document.getElementById("stage2Error").style.display = "none";
+        try {{
+          const body = {{
+            character_name: charName(),
+            character_persona: charPersona(),
+            character_state: charState(),
+            labels: _classifyResult.labels,
+            scores: _classifyResult.scores,
+            turns: getContext(),
+            model: document.getElementById("modelOverlay").value.trim(),
+          }};
+          const r = await fetch("/api/pipeline/overlay", {{
+            method: "POST", headers: apiHeaders(), body: JSON.stringify(body),
+          }});
+          if (!r.ok) {{ showStageError("stage2Error", await r.text()); return; }}
+          const d = await r.json();
+          _directive = d.directive;
+          document.getElementById("stage2Output").style.display = "block";
+          document.getElementById("stage2Text").textContent = d.directive;
+          document.getElementById("stage2Model").textContent = "· " + d.model;
+        }} catch(e) {{
+          showStageError("stage2Error", e.toString());
+        }} finally {{
+          setStageRunning("stage2Card", false);
+        }}
+      }}
+
+      async function runBrain() {{
+        if (!_classifyResult) {{ alert("Run stage 1 first."); return; }}
+        if (!_directive) {{ alert("Run stage 2 first."); return; }}
+        setStageRunning("stage3Card", true);
+        document.getElementById("stage3Output").style.display = "none";
+        document.getElementById("stage3Error").style.display = "none";
+        try {{
+          const body = {{
+            character_name: charName(),
+            character_persona: charPersona(),
+            character_state: charState(),
+            style_directive: _directive,
+            labels: _classifyResult.labels,
+            turns: getContext(),
+            message: document.getElementById("msgInput").value.trim(),
+            model: document.getElementById("modelBrain").value.trim(),
+          }};
+          const r = await fetch("/api/pipeline/brain", {{
+            method: "POST", headers: apiHeaders(), body: JSON.stringify(body),
+          }});
+          if (!r.ok) {{ showStageError("stage3Error", await r.text()); return; }}
+          const d = await r.json();
+          _skeleton = d.skeleton;
+          document.getElementById("stage3Output").style.display = "block";
+          document.getElementById("stage3Text").textContent = d.skeleton;
+          document.getElementById("stage3Model").textContent = "· " + d.model;
+        }} catch(e) {{
+          showStageError("stage3Error", e.toString());
+        }} finally {{
+          setStageRunning("stage3Card", false);
+        }}
+      }}
+
+      async function runProse() {{
+        if (!_directive) {{ alert("Run stage 2 first."); return; }}
+        if (!_skeleton)  {{ alert("Run stage 3 first."); return; }}
+        setStageRunning("stage4Card", true);
+        document.getElementById("stage4Output").style.display = "block";
+        document.getElementById("stage4Error").style.display = "none";
+        const textEl = document.getElementById("stage4Text");
+        textEl.textContent = "";
+        try {{
+          const body = {{
+            character_name: charName(),
+            style_directive: _directive,
+            skeleton: _skeleton,
+            turns: getContext(),
+            message: document.getElementById("msgInput").value.trim(),
+            model: document.getElementById("modelProse").value.trim(),
+          }};
+          const r = await fetch("/api/pipeline/prose", {{
+            method: "POST", headers: apiHeaders(), body: JSON.stringify(body),
+          }});
+          if (!r.ok) {{ showStageError("stage4Error", await r.text()); return; }}
+          document.getElementById("stage4Model").textContent =
+            "· " + (document.getElementById("modelProse").value.trim() || "default");
+          const reader = r.body.getReader();
+          const dec = new TextDecoder();
+          let buf = "";
+          while (true) {{
+            const {{ done, value }} = await reader.read();
+            if (done) break;
+            buf += dec.decode(value, {{stream: true}});
+            const lines = buf.split("\\n");
+            buf = lines.pop();
+            for (const line of lines) {{
+              const t = line.trim();
+              if (!t || !t.startsWith("data: ")) continue;
+              const payload = t.slice(6);
+              if (payload === "[DONE]") continue;
+              try {{
+                const chunk = JSON.parse(payload);
+                if (chunk.token) textEl.textContent += chunk.token;
+              }} catch(_) {{}}
+            }}
+          }}
+        }} catch(e) {{
+          showStageError("stage4Error", e.toString());
+        }} finally {{
+          setStageRunning("stage4Card", false);
+        }}
+      }}
+
+      async function runAll() {{
+        await runClassify();
+        if (!_classifyResult) return;
+        await runOverlay();
+        if (!_directive) return;
+        await runBrain();
+        if (!_skeleton) return;
+        await runProse();
+      }}
+
+      function setStageRunning(cardId, running) {{
+        const btn = document.querySelector("#" + cardId + " .pl-btn-sm");
+        if (btn) {{ btn.disabled = running; btn.textContent = running ? "…" : "Run"; }}
+      }}
+
+      function showStageError(elId, msg) {{
+        const el = document.getElementById(elId);
         el.style.display = "block";
         el.textContent = msg;
       }}
 
       function renderStage1(d) {{
         document.getElementById("stage1Output").style.display = "block";
-
         document.getElementById("tokenChips").innerHTML = d.labels.map((lbl, i) =>
           '<span class="token-chip">' + esc(lbl) +
           '<span class="token-score">' + d.scores[i].toFixed(3) + '</span></span>'
         ).join("");
-
         const raw = d.raw || {{}};
         const sorted = Object.entries(raw).sort((a, b) => b[1] - a[1]);
         document.getElementById("scoreBars").innerHTML = sorted.map(([lbl, score]) => {{
@@ -2047,15 +2224,6 @@ def pipeline_ui():
             '<div class="score-bar-bg"><div class="score-bar-fill" style="width:' + pct + '%"></div></div>' +
             '<span class="score-val">' + score.toFixed(3) + '</span></div>';
         }}).join("");
-      }}
-
-      function showStage2Preview(labels, scores) {{
-        document.getElementById("stage2Preview").style.display = "block";
-        document.getElementById("stage2Tokens").innerHTML = " " + labels.map((lbl, i) =>
-          '<span style="background:rgba(99,102,241,0.15);border:1px solid rgba(99,102,241,0.35);' +
-          'border-radius:6px;padding:2px 7px;font-size:12px;margin:0 2px;">' +
-          esc(lbl) + ' <span style="color:var(--accent);">' + scores[i].toFixed(2) + '</span></span>'
-        ).join("");
       }}
 
       function esc(s) {{
