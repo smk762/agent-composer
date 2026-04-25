@@ -251,7 +251,9 @@ def _derive_summary(messages: List[Message], max_len: int = 220) -> Optional[str
     parts = []
     for m in reversed(tail):
         prefix = "U:" if m.role == "user" else "A:"
-        parts.append(f"{prefix} {m.content.strip()}")
+        text = (m.content or "").strip()
+        if text:
+            parts.append(f"{prefix} {text}")
     joined = "\n".join(parts)
     if len(joined) > max_len:
         return joined[: max_len - 1] + "\u2026"
@@ -467,12 +469,14 @@ async def chat(
                         seq=next_seq + 1,
                     ),
                 ])
+                await db.flush()
                 if not conv.title:
                     conv.title = _derive_title(last_user_msg)
-                tail_res = await db.execute(
-                    select(Message).where(Message.conversation_id == conv.id)
-                    .order_by(Message.seq.desc()).limit(6)
-                )
+                with db.no_autoflush:
+                    tail_res = await db.execute(
+                        select(Message).where(Message.conversation_id == conv.id)
+                        .order_by(Message.seq.desc()).limit(6)
+                    )
                 conv.summary = _derive_summary(list(reversed(tail_res.scalars().all())))
                 conv.updated_at = datetime.now(tz=UTC)
                 await db.commit()
