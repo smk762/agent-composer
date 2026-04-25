@@ -15,7 +15,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
-from app.config import QDRANT_URL
+from app.config import AUDIT_API_URL, ECOSYSTEM_CONFIG_PATH, QDRANT_URL
 from app.repair.models import RepairIteration, RepairRequest, RepairResult
 from app.repair.multi_model import repair_loop
 from app.repair.patch_applier import apply_inplace, apply_to_temp
@@ -88,6 +88,9 @@ async def run_repair(request: RepairRequest) -> StreamingResponse:
     )
     _store_job(result)
 
+    # Use configured AUDIT_API_URL as default when the client doesn't override it
+    effective_audit_url = request.audit_api_url or AUDIT_API_URL
+
     async def event_stream():
         _update_job(job_id, status="running")
         yield _sse("started", {"job_id": job_id, "repo": request.repo, "mode": request.mode})
@@ -109,7 +112,10 @@ async def run_repair(request: RepairRequest) -> StreamingResponse:
                     return
 
             # Run the multi-model repair loop
-            effective_request = request.model_copy(update={"diff": diff_text})
+            effective_request = request.model_copy(update={
+                "diff": diff_text,
+                "audit_api_url": effective_audit_url,
+            })
             async for iteration in repair_loop(effective_request, qdrant_url=QDRANT_URL):
                 iter_dict = iteration.model_dump()
                 iterations.append(iter_dict)
@@ -218,13 +224,9 @@ async def _resolve_repo_path(repo: str, audit_api_url: str):
     Reads the ai-code-auditor ecosystem config if it's on this host.
     Returns None if the path cannot be determined.
     """
-    import os
     from pathlib import Path
 
-    config_path = os.getenv(
-        "ECOSYSTEM_CONFIG_PATH",
-        "/home/smk/ai-code-auditor/config/ecosystem.yaml",
-    )
+    config_path = ECOSYSTEM_CONFIG_PATH
     try:
         import yaml
         raw = yaml.safe_load(Path(config_path).read_text(encoding="utf-8"))

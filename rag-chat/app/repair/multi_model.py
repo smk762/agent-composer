@@ -21,7 +21,7 @@ log = logging.getLogger("rag-chat.repair")
 
 # ── Prompt templates ──────────────────────────────────────────────────────────
 
-_FIXER_SYSTEM = """\
+_FIXER_SYSTEM_AUTO = """\
 You are an expert software engineer performing a code repair.
 You will be given a unified diff, any validation errors, and related code context.
 Your task is to produce a corrected unified diff that fixes all stated problems
@@ -31,6 +31,25 @@ Output ONLY a unified diff inside a ```diff ... ``` fenced block.
 Do not include explanations outside the fence — put them in comments inside the diff.
 If you cannot produce a valid diff, output an empty ```diff ``` block and explain why
 in a brief paragraph before the fence."""
+
+_FIXER_SYSTEM_REVIEW = """\
+You are a senior code reviewer performing an annotated review.
+You will be given a unified diff, any validation errors, and related code context.
+Produce:
+1. A brief analysis (bullet points) of the issues found in the diff.
+2. A corrected unified diff inside a ```diff ... ``` fenced block (if changes are needed).
+3. A short summary of what was changed and why.
+
+If no changes are needed, say so and output an empty ```diff ``` block."""
+
+_FIXER_SYSTEM_SUGGEST = """\
+You are a code improvement advisor.
+You will be given a unified diff and related code context.
+Suggest improvements WITHOUT producing a new diff.
+Format your suggestions as a numbered list, grouped by: correctness, security, performance, style.
+Be concise and reference specific line numbers where relevant."""
+
+_FIXER_SYSTEM = _FIXER_SYSTEM_AUTO  # default; overridden per mode below
 
 _CRITIC_SYSTEM = """\
 You are a senior code reviewer critiquing a proposed repair diff.
@@ -151,6 +170,13 @@ async def repair_loop(
     critique_model = request.critique_model or ""
     adversary_model = request.adversarial_model or ""
 
+    # Select system prompt based on mode
+    mode_system = {
+        "auto_fix": _FIXER_SYSTEM_AUTO,
+        "review": _FIXER_SYSTEM_REVIEW,
+        "suggest": _FIXER_SYSTEM_SUGGEST,
+    }.get(request.mode, _FIXER_SYSTEM_AUTO)
+
     # Build initial Qdrant context (best-effort)
     qdrant_snippets: list[str] = []
     if qdrant_url:
@@ -174,7 +200,7 @@ async def repair_loop(
 
         # ── Model A: fixer ────────────────────────────────────────────────────
         fixer_prompt_text = _fixer_prompt(context, iteration)
-        fixer_response = await _generate(fixer_prompt_text, fix_model, _FIXER_SYSTEM)
+        fixer_response = await _generate(fixer_prompt_text, fix_model, mode_system)
         patch = extract_patch(fixer_response)
 
         iter_result = RepairIteration(
