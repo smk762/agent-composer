@@ -1,20 +1,99 @@
 services:
+  # Chat database — dedicated PostgreSQL for rag-chat
+  postgres:
+    image: postgres:16-alpine
+    container_name: rag-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${PG_USER:-ragchat}
+      - POSTGRES_PASSWORD=${PG_PASSWORD:-ragchat}
+      - POSTGRES_DB=${PG_DB:-ragchat}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-ragchat}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [internal]
+
+  # Vector store — used by rag-ingest (write) and rag-chat (read)
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_BIND_IP:-127.0.0.1}:${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_BIND_IP:-127.0.0.1}:${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:6333/readyz >/dev/null 2>&1 || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
   # Local LLM runtime (kept internal; accessed by rag-ingest and rag-chat only)
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
     restart: unless-stopped
+    # GPU: requires NVIDIA Container Toolkit on the host
+    # (https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
+    # Remove `gpus` and NVIDIA_* env vars to run CPU-only.
+    gpus: all
     ports:
       - "${OLLAMA_BIND_IP:-127.0.0.1}:${OLLAMA_PORT:-11434}:11434"
     volumes:
       - ollama:/root/.ollama
     environment:
       - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-15m}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     healthcheck:
       test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:11434/api/tags >/dev/null 2>&1 || exit 1"]
       interval: 20s
       timeout: 5s
       retries: 10
+    networks: [internal]
+
+  # Code-audit embedder + reranker (sentence-transformers via Infinity)
+  # OpenAI-compatible /embeddings and /rerank endpoints. Used by rag-ingest in
+  # code mode and reachable from external services (e.g. ai-code-auditor) via
+  # 127.0.0.1:${INFINITY_PORT:-7997} on the host.
+  infinity:
+    image: michaelf34/infinity:latest
+    container_name: infinity
+    restart: unless-stopped
+    command:
+      - v2
+      - --model-id
+      - ${EMBED_MODEL_CODE:-nomic-ai/CodeRankEmbed}
+      - --model-id
+      - ${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      - --port
+      - "7997"
+      - --engine
+      - torch
+      - --device
+      - cuda
+    gpus: all
+    environment:
+      - HF_HOME=/data/hf
+      - INFINITY_QUEUE_SIZE=${INFINITY_QUEUE_SIZE:-512}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - infinity_hf_cache:/data/hf
+    ports:
+      - "${INFINITY_BIND_IP:-127.0.0.1}:${INFINITY_PORT:-7997}:7997"
+    healthcheck:
+      test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:7997/health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
     networks: [internal]
 
   # Ingestion API (the ONLY remote write entrypoint)
@@ -35,7 +114,7 @@ services:
       - INGEST_REDIS_URL=${INGEST_REDIS_URL:-}
       - INGEST_NONCE_KEY_PREFIX=${INGEST_NONCE_KEY_PREFIX:-ingest:nonce:}
       - INGEST_MAX_SKEW_S=${INGEST_MAX_SKEW_S:-300}
-      - QDRANT_URL=${QDRANT_URL:?Set QDRANT_URL to the external Qdrant endpoint, e.g. http://192.168.1.128:6333}
+      - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
       - OLLAMA_URL=http://ollama:11434
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-project_docs}
       - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
@@ -46,10 +125,17 @@ services:
       - OOM_WAIT_INTERVAL_SECONDS=${OOM_WAIT_INTERVAL_SECONDS:-5}
       - INGEST_WORKER_CONCURRENCY=${INGEST_WORKER_CONCURRENCY:-1}
       - APP_RELOAD=${APP_RELOAD:-1}
+      # Code-audit retrieval (additive; defaults preserve legacy text-only behavior)
+      - RETRIEVAL_PROFILE=${RETRIEVAL_PROFILE:-text}
+      - EMBED_BACKEND=${EMBED_BACKEND:-ollama}
+      - EMBED_BACKEND_URL=${EMBED_BACKEND_URL:-http://infinity:7997}
+      - EMBED_MODEL_CODE=${EMBED_MODEL_CODE:-nomic-ai/CodeRankEmbed}
+      - HYBRID_SPARSE=${HYBRID_SPARSE:-0}
+      - QDRANT_COLLECTION_CODE=${QDRANT_COLLECTION_CODE:-code_audit}
     command: /app/init.sh
     ports:
       - "${RAG_INGEST_BIND_IP:-0.0.0.0}:${RAG_INGEST_PORT:-9050}:9050"
-    depends_on: [ollama]
+    depends_on: [ollama, qdrant]
     healthcheck:
       test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:9050/health >/dev/null 2>&1 || exit 1"]
       interval: 20s
@@ -68,16 +154,16 @@ services:
       - rag_chat_media:/data/media
     environment:
       - OLLAMA_URL=http://ollama:11434
+      - MODERNBERT_URL=${MODERNBERT_URL:-http://modernbert:7998}
       - CHAT_MODEL=${CHAT_MODEL:-llama3.2:3b}
       - CHAT_SYSTEM_PROMPT=${CHAT_SYSTEM_PROMPT:-You are a helpful assistant.}
-      - QDRANT_URL=${QDRANT_URL:?Set QDRANT_URL to the external Qdrant endpoint, e.g. http://192.168.1.128:6333}
+      - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-project_docs}
       - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
       - RAG_ENABLED=${RAG_ENABLED:-1}
       - RAG_TOP_K=${RAG_TOP_K:-5}
       - RAG_MAX_CONTEXT_CHARS=${RAG_MAX_CONTEXT_CHARS:-4000}
-      - CHAT_DB_URL=${CHAT_DB_URL:-sqlite:////data/chat.db}
-      - DATABASE_URL=${DATABASE_URL:-}
+      - DATABASE_URL=postgresql://${PG_USER:-ragchat}:${PG_PASSWORD:-ragchat}@postgres:5432/${PG_DB:-ragchat}
       - CHAT_HISTORY_MAX_MSGS=${CHAT_HISTORY_MAX_MSGS:-100}
       - DEV_AUTH_BYPASS=${DEV_AUTH_BYPASS:-0}
       - DEV_DEFAULT_USER=${DEV_DEFAULT_USER:-dev@example.com}
@@ -101,12 +187,56 @@ services:
     command: /app/init.sh
     ports:
       - "${RAG_CHAT_BIND_IP:-0.0.0.0}:${RAG_CHAT_PORT:-9150}:9150"
-    depends_on: [ollama]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+      qdrant:
+        condition: service_started
     healthcheck:
       test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:9150/health >/dev/null 2>&1 || exit 1"]
       interval: 20s
       timeout: 5s
       retries: 10
+    networks: [internal]
+
+  # ModernBERT classifier sidecar — lazy-loads on first request, auto-evicts after idle.
+  # States: unloaded → cpu → gpu. /health always 200; check model_state field.
+  # Override memory policy: MODERNBERT_KEEP_ALIVE_GPU / KEEP_ALIVE_CPU (-1=forever, 0=immediate, N=seconds)
+  modernbert:
+    build:
+      context: ./modernbert
+    container_name: modernbert
+    restart: unless-stopped
+    gpus: all
+    environment:
+      - MODERNBERT_MODEL=${MODERNBERT_MODEL:-answerdotai/ModernBERT-base}
+      - MODERNBERT_TASK=${MODERNBERT_TASK:-zero_shot}
+      - MODERNBERT_DEVICE=${MODERNBERT_DEVICE:-auto}
+      - MODERNBERT_LABELS=${MODERNBERT_LABELS:-}
+      - MODERNBERT_LABELS_FILE=${MODERNBERT_LABELS_FILE:-/data/labels.json}
+      - MODERNBERT_TOP_K=${MODERNBERT_TOP_K:-10}
+      - MODERNBERT_THRESHOLD=${MODERNBERT_THRESHOLD:-0.05}
+      - MODERNBERT_MAX_LENGTH=${MODERNBERT_MAX_LENGTH:-512}
+      - MODERNBERT_POOL=${MODERNBERT_POOL:-mean}
+      - MODERNBERT_PRELOAD=${MODERNBERT_PRELOAD:-0}
+      - MODERNBERT_KEEP_ALIVE_GPU=${MODERNBERT_KEEP_ALIVE_GPU:-300}
+      - MODERNBERT_KEEP_ALIVE_CPU=${MODERNBERT_KEEP_ALIVE_CPU:-0}
+      - HF_HOME=/data/hf
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - modernbert_data:/data
+    ports:
+      - "${MODERNBERT_BIND_IP:-127.0.0.1}:${MODERNBERT_PORT:-7998}:7998"
+    healthcheck:
+      test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:7998/health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
     networks: [internal]
 
   # Cloudflare Tunnel (publish ONLY rag-ingest + rag-chat hostnames in Cloudflare UI)
@@ -127,7 +257,11 @@ networks:
     driver: bridge
 
 volumes:
+  postgres_data:
   ollama:
+  qdrant_data:
   rag_ingest_data:
   rag_chat_data:
   rag_chat_media:
+  infinity_hf_cache:
+  modernbert_data:
