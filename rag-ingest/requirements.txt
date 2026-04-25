@@ -6,3 +6,11 @@ qdrant-client==1.12.1
 cryptography==44.0.0
 redis==5.2.1
 prometheus-client>=0.20.0
+# AST-aware code chunking (RETRIEVAL_PROFILE=code).
+# tree-sitter-language-pack 0.13.0 is the last 0.x release; the 1.x line keeps
+# the same get_parser/get_language API surface but bumps grammar versions
+# aggressively, so pin the 0.x line until we've validated upgrades.
+tree-sitter>=0.25.2,<0.26
+tree-sitter-language-pack==0.13.0
+# BM25 sparse vectors for hybrid retrieval (HYBRID_SPARSE=1).
+fastembed==0.4.2

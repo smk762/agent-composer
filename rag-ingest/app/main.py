@@ -89,7 +89,20 @@ def _fernet() -> Fernet:
     return Fernet(key)
 
 class IngestDoc(BaseModel):
-    docs: list[Dict[str, Any]] = Field(..., description="List of documents to index")
+    docs: list[Dict[str, Any]] = Field(
+        ...,
+        description=(
+            "List of documents to index. Each doc accepts:\n"
+            "- text/content/page_content/body (one of): the document text\n"
+            "- id, doc_id, title, url, source: standard metadata\n"
+            "Code-audit profile (RETRIEVAL_PROFILE=code) additionally accepts:\n"
+            "- kind: 'code' | 'text' (forces routing; otherwise inferred from path)\n"
+            "- path: repo-relative file path (drives language detection)\n"
+            "- language: tree-sitter language id (overrides path-based inference)\n"
+            "- repo: repository identifier\n"
+            "- commit_sha: commit hash for provenance"
+        ),
+    )
     source: Optional[str] = Field(None, description="Source identifier (e.g. 'grocy', 'growdb')")
     tags: Optional[list[str]] = Field(default_factory=list)
 
