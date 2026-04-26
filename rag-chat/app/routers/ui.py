@@ -1565,6 +1565,7 @@ def chat_ui():
 @router.get("/ui/pipeline", response_class=HTMLResponse)
 def pipeline_ui():
     extra_css = """
+    /* ---- layout ---- */
     .pl-wrap {
       width: min(1280px, 100%);
       background: linear-gradient(180deg, var(--card-2), var(--card));
@@ -1576,51 +1577,30 @@ def pipeline_ui():
       min-height: 92vh;
     }
     .pl-sub { color: var(--muted); font-size: 13px; margin: 0 0 14px; }
-    .pl-status-bar {
-      display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-      background: rgba(0,0,0,0.25); border: 1px solid var(--border);
-      border-radius: 10px; padding: 8px 12px; margin-bottom: 16px;
-    }
-    .state-chip {
-      padding: 3px 10px; border-radius: 999px; font-size: 12px;
-      font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
-    }
-    .state-chip.unloaded { background: #1f2937; color: var(--muted); }
-    .state-chip.loading  { background: rgba(251,191,36,0.2); color: #fbbf24; }
-    .state-chip.cpu      { background: rgba(99,102,241,0.2); color: #818cf8; }
-    .state-chip.gpu      { background: rgba(52,211,153,0.2); color: #34d399; }
-    .state-chip.error    { background: rgba(239,68,68,0.15); color: #f87171; }
-    .pl-status-meta { color: var(--muted); font-size: 12px; }
-    .gpu-cap-chip {
-      padding: 3px 9px; border-radius: 999px; font-size: 11px;
-      font-weight: 700; letter-spacing: 0.04em; display: inline-flex; align-items: center; gap: 4px;
-    }
-    .gpu-cap-chip.capable  { background: rgba(52,211,153,0.12); color: #34d399; border: 1px solid rgba(52,211,153,0.3); }
-    .gpu-cap-chip.cpu-only { background: #1f2937; color: var(--muted); border: 1px solid var(--border); }
-    .gpu-note { font-size: 12px; color: #fbbf24; }
-    .pl-btn-sm {
-      padding: 4px 10px; font-size: 12px; font-weight: 600;
-      border-radius: 8px; border: 1px solid var(--border);
-      background: #0b1221; color: var(--text); cursor: pointer;
-      transition: border-color 120ms;
-    }
-    .pl-btn-sm:hover { border-color: var(--accent); }
-    .pl-columns { display: grid; grid-template-columns: 340px 1fr; gap: 20px; }
+    .pl-columns { display: grid; grid-template-columns: 320px 1fr; gap: 20px; }
     .pl-left { display: flex; flex-direction: column; gap: 14px; }
+    .pl-right { display: flex; flex-direction: column; gap: 0; }
+    /* ---- left panel inputs ---- */
     .pl-section {
       background: rgba(0,0,0,0.2); border: 1px solid var(--border);
       border-radius: 12px; padding: 14px;
     }
     .pl-section label {
-      font-size: 13px; font-weight: 600; display: block; margin-bottom: 6px;
+      font-size: 13px; font-weight: 600; display: flex;
+      align-items: center; gap: 5px; margin-bottom: 6px;
     }
-    .pl-section textarea, .pl-section input[type=text] {
+    .pl-section textarea, .pl-section input[type=text], .pl-section input[type=number] {
       width: 100%; background: #0b1221; border: 1px solid var(--border);
       border-radius: 8px; color: var(--text); font: inherit; font-size: 13px;
       padding: 8px 10px; resize: vertical; box-sizing: border-box;
     }
-    .pl-section textarea:focus, .pl-section input[type=text]:focus {
+    .pl-section textarea:focus, .pl-section input:focus {
       outline: none; border-color: var(--accent);
+    }
+    .pl-section select {
+      width: 100%; background: #0b1221; border: 1px solid var(--border);
+      border-radius: 8px; color: var(--text); font: inherit; font-size: 13px;
+      padding: 7px 10px; box-sizing: border-box;
     }
     .turn-row { display: flex; gap: 6px; margin-bottom: 6px; align-items: center; }
     .turn-row input { flex: 1; }
@@ -1634,6 +1614,14 @@ def pipeline_ui():
       font-size: 12px; color: var(--accent); background: none; border: none;
       cursor: pointer; padding: 0; text-decoration: underline;
     }
+    .pl-btn-sm {
+      padding: 4px 10px; font-size: 12px; font-weight: 600;
+      border-radius: 8px; border: 1px solid var(--border);
+      background: #0b1221; color: var(--text); cursor: pointer;
+      transition: border-color 120ms; white-space: nowrap;
+    }
+    .pl-btn-sm:hover { border-color: var(--accent); }
+    .pl-btn-sm:disabled { opacity: 0.4; cursor: not-allowed; }
     .run-btn {
       width: 100%; padding: 11px; font-size: 14px; font-weight: 700;
       border-radius: 10px; border: none; cursor: pointer;
@@ -1643,28 +1631,51 @@ def pipeline_ui():
     }
     .run-btn:hover { opacity: 0.9; transform: translateY(-1px); }
     .run-btn:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
-    .timing-note { color: var(--muted); font-size: 12px; margin-top: 6px; min-height: 18px; }
-    .pl-right { display: flex; flex-direction: column; gap: 0; }
+    /* ---- stage cards ---- */
     .stage-card {
       border: 1px solid var(--border); border-radius: 12px;
       padding: 14px 16px; background: rgba(0,0,0,0.18);
+      transition: border-color 300ms, background 300ms;
     }
-    .stage-card.live { border-color: rgba(56,189,248,0.45); }
-    .stage-card.stub { opacity: 0.72; }
+    .stage-card.live    { border-color: rgba(56,189,248,0.35); }
+    .stage-card.running { border-color: rgba(251,191,36,0.7); background: rgba(251,191,36,0.04);
+      animation: pulse-border 1.6s ease-in-out infinite; }
+    .stage-card.complete { border-color: rgba(52,211,153,0.65); background: rgba(52,211,153,0.04); }
+    .stage-card.s-error  { border-color: rgba(239,68,68,0.55); }
+    @keyframes pulse-border {{
+      0%,100% {{ border-color: rgba(251,191,36,0.4); }}
+      50%      {{ border-color: rgba(251,191,36,0.85); }}
+    }}
     .stage-connector {
       display: flex; align-items: center; justify-content: center;
       color: var(--muted); font-size: 20px; padding: 2px 0;
     }
-    .stage-header { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+    .stage-header {
+      display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap;
+    }
     .stage-name { font-weight: 700; font-size: 15px; }
     .stage-badge {
       font-size: 11px; font-weight: 700; letter-spacing: 0.05em;
       padding: 2px 8px; border-radius: 999px; text-transform: uppercase;
     }
-    .stage-badge.live  { background: rgba(56,189,248,0.18); color: var(--accent); }
-    .stage-badge.stub  { background: #1f2937; color: var(--muted); }
+    .stage-badge.live { background: rgba(56,189,248,0.18); color: var(--accent); }
+    .stage-run-btn {
+      margin-left: auto; padding: 4px 12px; font-size: 12px; font-weight: 700;
+      border-radius: 8px; border: none; cursor: pointer;
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      color: #0b1020; transition: opacity 120ms, transform 120ms;
+      box-shadow: 0 3px 10px rgba(56,189,248,0.2); white-space: nowrap;
+    }
+    .stage-run-btn:hover { opacity: 0.88; transform: translateY(-1px); }
+    .stage-run-btn:disabled { opacity: 0.35; cursor: not-allowed; transform: none; }
+    .stage-spin {
+      width: 13px; height: 13px; border: 2px solid rgba(255,255,255,0.15);
+      border-top-color: #fbbf24; border-radius: 50%;
+      animation: spin 0.75s linear infinite; display: inline-block; flex-shrink: 0;
+    }
+    @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
     .stage-meta { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 3px; }
-    .stage-knows { font-style: italic; margin-bottom: 2px; }
+    .stage-knows { font-style: italic; margin-bottom: 2px; cursor: default; }
     .stage-io b { color: var(--text); font-weight: 600; }
     .stage-output {
       margin-top: 12px; padding: 10px 12px;
@@ -1675,6 +1686,12 @@ def pipeline_ui():
       font-size: 11px; font-weight: 700; color: var(--accent);
       letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 8px;
     }
+    .error-box {
+      padding: 8px 12px; border-radius: 8px; font-size: 13px;
+      background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.4);
+      color: #f87171; margin-top: 8px;
+    }
+    /* ---- classifier output ---- */
     .token-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
     .token-chip {
       display: flex; align-items: center; gap: 6px;
@@ -1685,7 +1702,7 @@ def pipeline_ui():
     .score-bars { display: flex; flex-direction: column; gap: 4px; }
     .score-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
     .score-label {
-      width: 120px; text-align: right; color: var(--muted);
+      width: 110px; text-align: right; color: var(--muted);
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
     }
     .score-bar-bg { flex: 1; height: 6px; background: #1f2937; border-radius: 3px; }
@@ -1694,121 +1711,193 @@ def pipeline_ui():
       background: linear-gradient(90deg, var(--accent-2), var(--accent));
     }
     .score-val { width: 42px; color: var(--text); font-variant-numeric: tabular-nums; }
-    .stage-stub-preview {
-      margin-top: 10px; padding: 8px 10px;
-      background: rgba(99,102,241,0.06); border: 1px dashed rgba(99,102,241,0.25);
-      border-radius: 8px; font-size: 12px; color: var(--muted);
+    /* ---- inline model state (stage 1 header) ---- */
+    .state-chip {
+      padding: 2px 8px; border-radius: 999px; font-size: 11px;
+      font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase;
     }
-    .stage-stub-preview b { color: var(--text); }
-    .error-box {
-      padding: 8px 12px; border-radius: 8px; font-size: 13px;
-      background: rgba(239,68,68,0.12); border: 1px solid rgba(239,68,68,0.4);
-      color: #f87171; margin-top: 8px;
+    .state-chip.unloaded { background: #1f2937; color: var(--muted); }
+    .state-chip.loading  { background: rgba(251,191,36,0.2); color: #fbbf24; }
+    .state-chip.cpu      { background: rgba(99,102,241,0.2); color: #818cf8; }
+    .state-chip.gpu      { background: rgba(52,211,153,0.2); color: #34d399; }
+    .state-chip.error    { background: rgba(239,68,68,0.15); color: #f87171; }
+    .gpu-cap-chip {
+      padding: 2px 7px; border-radius: 999px; font-size: 11px;
+      font-weight: 700; cursor: default;
     }
-    @media (max-width: 900px) { .pl-columns { grid-template-columns: 1fr; } }
+    .gpu-cap-chip.capable  { background: rgba(52,211,153,0.12); color: #34d399; border: 1px solid rgba(52,211,153,0.3); }
+    .gpu-cap-chip.cpu-only { background: #1f2937; color: var(--muted); border: 1px solid var(--border); }
+    /* ---- timer + download ---- */
+    .pl-timer {
+      font-variant-numeric: tabular-nums; font-size: 13px;
+      color: var(--accent); font-weight: 700; min-width: 48px; text-align: right;
+    }
+    .pl-dl-btn {
+      padding: 4px 10px; font-size: 12px; font-weight: 600;
+      border-radius: 8px; border: 1px solid rgba(52,211,153,0.4);
+      background: rgba(52,211,153,0.1); color: #34d399; cursor: pointer;
+      transition: border-color 120ms;
+    }
+    .pl-dl-btn:hover { border-color: #34d399; }
+    /* ---- help icon ---- */
+    .help-ico {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 14px; height: 14px; border-radius: 50%;
+      background: rgba(148,163,184,0.2); color: var(--muted);
+      font-size: 10px; font-weight: 700; cursor: default; flex-shrink: 0;
+    }
+    /* ---- modals ---- */
+    .modal-backdrop {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 200; backdrop-filter: blur(3px);
+    }
+    .modal-box {
+      background: var(--card-2); border: 1px solid var(--border);
+      border-radius: 16px; padding: 24px; width: min(500px, 92vw);
+      box-shadow: 0 24px 80px rgba(0,0,0,0.55); max-height: 85vh; overflow-y: auto;
+    }
+    .modal-title { margin: 0 0 18px; font-size: 17px; font-weight: 700; }
+    .modal-footer {
+      display: flex; gap: 8px; justify-content: flex-end;
+      margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border);
+    }
+    .cfg-row { margin-bottom: 14px; }
+    .cfg-row label {
+      font-size: 12px; font-weight: 600; color: var(--muted);
+      display: flex; align-items: center; gap: 5px; margin-bottom: 5px;
+    }
+    .cfg-row select, .cfg-row input {
+      width: 100%; background: #0b1221; border: 1px solid var(--border);
+      border-radius: 8px; color: var(--text); font: inherit; font-size: 13px;
+      padding: 7px 10px; box-sizing: border-box;
+    }
+    .cfg-row input[type=number] { width: 80px; }
+    .btn-secondary {
+      padding: 8px 14px; font-size: 13px; font-weight: 600;
+      border-radius: 8px; border: 1px solid var(--border);
+      background: #0b1221; color: var(--text); cursor: pointer;
+    }
+    .btn-danger { border-color: rgba(239,68,68,0.4); color: #f87171; }
+    .btn-danger:hover { background: rgba(239,68,68,0.1); }
+    @media (max-width: 900px) {{ .pl-columns {{ grid-template-columns: 1fr; }} }}
     """
 
     body = f"""
-    <div class="pl-wrap">
-      <div style="display:flex; align-items:baseline; gap:12px; margin-bottom:4px;">
-        <h1 style="margin:0; font-size:22px;">Pipeline Lab</h1>
-        <span style="color:var(--muted); font-size:13px;">ModernBERT classifier &middot; stage 1 of 4</span>
+    <!-- Config modal -->
+    <div id="cfgModal" class="modal-backdrop" style="display:none;" onclick="if(event.target===this)closeCfg()">
+      <div class="modal-box">
+        <h3 class="modal-title" id="cfgTitle">Run configuration</h3>
+        <div id="cfgBody"></div>
+        <div class="modal-footer">
+          <button class="btn-secondary" onclick="closeCfg()">Cancel</button>
+          <button class="run-btn" style="width:auto;padding:8px 22px;" onclick="confirmRun()">Run &#9654;</button>
+        </div>
       </div>
-      <p class="pl-sub">
-        Scout and refine the classifier step. Stages 2&ndash;4 are stubs showing the intended contract.
-        Each model knows exactly what it needs &mdash; no more.
-      </p>
+    </div>
 
-      <div class="pl-status-bar">
-        <span id="stateChip" class="state-chip unloaded">unloaded</span>
-        <span id="gpuCapChip" class="gpu-cap-chip" style="display:none;"></span>
-        <span id="statusMeta" class="pl-status-meta">&mdash;</span>
-        <span id="gpuNote" class="gpu-note" style="display:none;"></span>
-        <span style="margin-left:auto; display:flex; gap:6px;">
-          <button class="pl-btn-sm" onclick="mbLoad()">Load</button>
-          <button class="pl-btn-sm" onclick="mbEvict()">Evict to CPU</button>
-          <button class="pl-btn-sm" onclick="mbUnload()">Unload</button>
+    <!-- Character modal -->
+    <div id="charModal" class="modal-backdrop" style="display:none;" onclick="if(event.target===this)closeCharModal()">
+      <div class="modal-box">
+        <h3 class="modal-title" id="charModalTitle">Character</h3>
+        <div class="cfg-row">
+          <label>Name</label>
+          <input type="text" id="cmName" placeholder="Character name (required)" />
+        </div>
+        <div class="cfg-row">
+          <label>Persona <span class="help-ico" id="tipPersona">?</span></label>
+          <textarea id="cmPersona" rows="5" style="width:100%;background:#0b1221;border:1px solid var(--border);border-radius:8px;color:var(--text);font:inherit;font-size:13px;padding:8px 10px;resize:vertical;box-sizing:border-box;" placeholder="Personality, background, speech patterns, values&hellip;"></textarea>
+        </div>
+        <div class="cfg-row">
+          <label>Current state <span class="help-ico" id="tipState">?</span></label>
+          <input type="text" id="cmState" placeholder="e.g. nervous about the audition, feeling playful" />
+        </div>
+        <div class="modal-footer">
+          <button class="btn-secondary btn-danger" id="cmDeleteBtn" onclick="deleteChar()" style="margin-right:auto;display:none;">Delete</button>
+          <button class="btn-secondary" onclick="closeCharModal()">Cancel</button>
+          <button class="run-btn" style="width:auto;padding:8px 22px;" onclick="saveChar()">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tooltip div -->
+    <div id="plTip" style="position:fixed;display:none;background:#0d1527;border:1px solid var(--border);border-radius:9px;padding:9px 13px;font-size:12px;color:var(--text);max-width:270px;z-index:400;pointer-events:none;line-height:1.55;box-shadow:0 8px 28px rgba(0,0,0,0.45);"></div>
+
+    <div class="pl-wrap">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px;flex-wrap:wrap;">
+        <h1 style="margin:0;font-size:22px;">Pipeline Lab</h1>
+        <span style="color:var(--muted);font-size:13px;">4-stage character pipeline</span>
+        <span style="margin-left:auto;display:flex;gap:10px;align-items:center;">
+          <button class="pl-dl-btn" id="dlBtn" onclick="downloadRun()" style="display:none;">&#8595; Download run</button>
+          <span id="plTimer" class="pl-timer" style="display:none;">0.0s</span>
         </span>
       </div>
+      <p class="pl-sub">Run stages individually or all at once. Each stage receives only what it needs — no more.</p>
 
       <div class="pl-columns">
 
         <div class="pl-left">
 
           <div class="pl-section">
-            <label>Label set</label>
-            <textarea id="labelsInput" rows="5"
-              placeholder="curious, defensive, playful, sad, angry, flirtatious, neutral, ..."></textarea>
-            <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
+            <label>Label set <span class="help-ico" id="tipLabels">?</span></label>
+            <textarea id="labelsInput" rows="5" placeholder="curious, defensive, playful, sad, angry, flirtatious, neutral, &hellip;"></textarea>
+            <div style="display:flex;gap:8px;align-items:center;margin-top:8px;">
               <button class="pl-btn-sm" onclick="updateLabels()">Update labels</button>
-              <span id="labelsStatus" style="color:var(--muted); font-size:12px;"></span>
+              <span id="labelsStatus" style="color:var(--muted);font-size:12px;"></span>
             </div>
-            <div style="color:var(--muted); font-size:11px; margin-top:6px;">
-              Comma or newline separated. Re-embeds immediately if model is resident.
-            </div>
+            <div style="color:var(--muted);font-size:11px;margin-top:6px;">Comma or newline separated. Re-embeds if model is resident.</div>
           </div>
 
           <div class="pl-section">
-            <label>Character</label>
-            <input type="text" id="charName" placeholder="Character name" />
-            <textarea id="charPersona" rows="3" placeholder="Persona / description&hellip;" style="margin-top:6px;"></textarea>
-            <input type="text" id="charState" placeholder="Current state (optional — e.g. anxious, playful)" style="margin-top:6px;" />
+            <label>Character <span class="help-ico" id="tipChar">?</span></label>
+            <div style="display:flex;gap:6px;align-items:center;">
+              <select id="charSelect" style="flex:1;">
+                <option value="">— no character —</option>
+              </select>
+              <button class="pl-btn-sm" id="charEditBtn" onclick="openCharModal(false)" style="display:none;">Edit</button>
+              <button class="pl-btn-sm" onclick="openCharModal(true)">New</button>
+            </div>
+            <div id="charPreview" style="margin-top:6px;font-size:12px;color:var(--muted);display:none;"></div>
           </div>
 
           <div class="pl-section">
-            <label>Context turns <span style="font-weight:400; color:var(--muted);">(oldest first, up to 5 used)</span></label>
+            <label>Context turns <span class="help-ico" id="tipTurns">?</span> <span style="font-weight:400;color:var(--muted);font-size:12px;">(oldest first)</span></label>
             <div id="turnsList"></div>
             <button class="pl-link-btn" onclick="addTurn()" style="margin-top:4px;">+ add turn</button>
           </div>
 
           <div class="pl-section">
-            <label>Stage models <span style="font-weight:400; color:var(--muted);">(leave blank → chat default)</span></label>
-            <div style="display:grid; gap:5px; font-size:12px;">
-              <div style="display:flex; align-items:center; gap:6px;">
-                <span style="width:68px; color:var(--muted);">2 · Overlay</span>
-                <input type="text" id="modelOverlay" placeholder="model name" style="font-size:12px; padding:4px 8px;" />
-              </div>
-              <div style="display:flex; align-items:center; gap:6px;">
-                <span style="width:68px; color:var(--muted);">3 · Brain</span>
-                <input type="text" id="modelBrain" placeholder="model name" style="font-size:12px; padding:4px 8px;" />
-              </div>
-              <div style="display:flex; align-items:center; gap:6px;">
-                <span style="width:68px; color:var(--muted);">4 · Prose</span>
-                <input type="text" id="modelProse" placeholder="model name" style="font-size:12px; padding:4px 8px;" />
-              </div>
-            </div>
-          </div>
-
-          <div class="pl-section">
-            <label>User message</label>
+            <label>User message <span class="help-ico" id="tipMsg">?</span></label>
             <textarea id="msgInput" rows="4" placeholder="what the user just sent&hellip;"></textarea>
-            <div style="display:flex; gap:8px; margin-top:10px;">
-              <button class="run-btn" id="runBtn" onclick="runClassify()" style="flex:1;">
-                1 · ModernBERT &#8594;
-              </button>
-              <button class="run-btn" id="runAllBtn" onclick="runAll()" style="flex:1; background:linear-gradient(90deg,var(--accent-2),var(--accent));">
-                Run all &#8594;
-              </button>
-            </div>
-            <div class="timing-note" id="timingNote"></div>
+            <button class="run-btn" id="runAllBtn" onclick="openRunModal('all')" style="margin-top:10px;">
+              Run all &rarr;
+            </button>
           </div>
 
         </div>
 
         <div class="pl-right">
 
-          <div class="stage-card live">
+          <div class="stage-card live" id="stage1Card">
             <div class="stage-header">
               <span class="stage-name">1 &middot; ModernBERT</span>
               <span class="stage-badge live">LIVE &middot; 149M params</span>
+              <span style="display:flex;align-items:center;gap:4px;">
+                <span id="mbStateChip" class="state-chip unloaded">unloaded</span>
+                <span id="mbGpuChip" style="display:none;"></span>
+                <button id="mbLoadBtn" class="pl-btn-sm" onclick="mbLoad()" style="display:none;">Load</button>
+                <button id="mbEvictBtn" class="pl-btn-sm" onclick="mbEvict()" style="display:none;">&rarr; CPU</button>
+              </span>
+              <span id="stage1Spin" class="stage-spin" style="display:none;"></span>
+              <button class="stage-run-btn" id="run1Btn" onclick="openRunModal(1)">Run &#9654;</button>
             </div>
             <div class="stage-meta">
-              <div class="stage-knows">Knows: user message + 5 turns of context. Not who the character is.</div>
-              <div class="stage-io"><b>Gets:</b> raw text &mdash; message + 5 turns context</div>
-              <div class="stage-io"><b>Produces:</b> 5&ndash;10 classifier tokens (ranked labels + scores)</div>
+              <div class="stage-knows" id="tipS1knows">Knows: user message + up to 5 turns of context. Not who the character is.</div>
+              <div class="stage-io"><b>Gets:</b> raw text &mdash; message + turn context</div>
+              <div class="stage-io"><b>Produces:</b> ranked label tokens + scores</div>
             </div>
             <div id="stage1Output" style="display:none;" class="stage-output">
-              <div class="stage-output-title">Output &mdash; classifier tokens</div>
+              <div class="stage-output-title">Classifier tokens</div>
               <div id="tokenChips" class="token-chips"></div>
               <div id="scoreBars" class="score-bars"></div>
             </div>
@@ -1821,16 +1910,17 @@ def pipeline_ui():
             <div class="stage-header">
               <span class="stage-name">2 &middot; 4B Overlay</span>
               <span class="stage-badge live">LIVE &middot; style tuner</span>
-              <button class="pl-btn-sm" onclick="runOverlay()" style="margin-left:auto;">Run</button>
+              <span id="stage2Spin" class="stage-spin" style="display:none;"></span>
+              <button class="stage-run-btn" id="run2Btn" onclick="openRunModal(2)">Run &#9654;</button>
             </div>
             <div class="stage-meta">
-              <div class="stage-knows">Knows: character config + current state. Not full session history.</div>
+              <div class="stage-knows" id="tipS2knows">Knows: character config + current state. Not full session history.</div>
               <div class="stage-io"><b>Gets:</b> character + classifier tokens + turn context</div>
-              <div class="stage-io"><b>Produces:</b> 80&ndash;120 token voice directive</div>
+              <div class="stage-io"><b>Produces:</b> 80&ndash;120 word voice directive</div>
             </div>
             <div id="stage2Output" style="display:none;" class="stage-output">
-              <div class="stage-output-title">Voice directive <span id="stage2Model" style="font-weight:400; text-transform:none; letter-spacing:0;"></span></div>
-              <div id="stage2Text" style="white-space:pre-wrap; font-size:13px; line-height:1.5;"></div>
+              <div class="stage-output-title">Voice directive <span id="stage2Model" style="font-weight:400;text-transform:none;letter-spacing:0;font-size:11px;"></span></div>
+              <div id="stage2Text" style="white-space:pre-wrap;font-size:13px;line-height:1.55;"></div>
             </div>
             <div id="stage2Error" style="display:none;" class="error-box"></div>
           </div>
@@ -1841,16 +1931,17 @@ def pipeline_ui():
             <div class="stage-header">
               <span class="stage-name">3 &middot; Brain</span>
               <span class="stage-badge live">LIVE &middot; large &middot; once/turn</span>
-              <button class="pl-btn-sm" onclick="runBrain()" style="margin-left:auto;">Run</button>
+              <span id="stage3Spin" class="stage-spin" style="display:none;"></span>
+              <button class="stage-run-btn" id="run3Btn" onclick="openRunModal(3)">Run &#9654;</button>
             </div>
             <div class="stage-meta">
-              <div class="stage-knows">Knows: everything &mdash; character, state, history, classifier, voice directive. Does not write in character voice.</div>
+              <div class="stage-knows" id="tipS3knows">Knows: everything — character, state, history, classifier read, voice directive. Does not write in character voice.</div>
               <div class="stage-io"><b>Gets:</b> full context + directive + classifier + history</div>
               <div class="stage-io"><b>Produces:</b> structured plan (intent, key points, arc, avoid)</div>
             </div>
             <div id="stage3Output" style="display:none;" class="stage-output">
-              <div class="stage-output-title">Skeleton <span id="stage3Model" style="font-weight:400; text-transform:none; letter-spacing:0;"></span></div>
-              <div id="stage3Text" style="white-space:pre-wrap; font-size:13px; line-height:1.5;"></div>
+              <div class="stage-output-title">Skeleton <span id="stage3Model" style="font-weight:400;text-transform:none;letter-spacing:0;font-size:11px;"></span></div>
+              <div id="stage3Text" style="white-space:pre-wrap;font-size:13px;line-height:1.55;"></div>
             </div>
             <div id="stage3Error" style="display:none;" class="error-box"></div>
           </div>
@@ -1861,16 +1952,17 @@ def pipeline_ui():
             <div class="stage-header">
               <span class="stage-name">4 &middot; Prose Model</span>
               <span class="stage-badge live">LIVE &middot; medium &middot; streams</span>
-              <button class="pl-btn-sm" onclick="runProse()" style="margin-left:auto;">Run</button>
+              <span id="stage4Spin" class="stage-spin" style="display:none;"></span>
+              <button class="stage-run-btn" id="run4Btn" onclick="openRunModal(4)">Run &#9654;</button>
             </div>
             <div class="stage-meta">
-              <div class="stage-knows">Knows: how to write as the character + what to write from the skeleton. Does not reason over the relationship arc.</div>
+              <div class="stage-knows" id="tipS4knows">Knows: how to write in the character's voice + what to say from the skeleton. Does not reason over the relationship arc.</div>
               <div class="stage-io"><b>Gets:</b> directive + skeleton + recent history</div>
               <div class="stage-io"><b>Produces:</b> character&apos;s streamed response</div>
             </div>
             <div id="stage4Output" style="display:none;" class="stage-output">
-              <div class="stage-output-title">Response <span id="stage4Model" style="font-weight:400; text-transform:none; letter-spacing:0;"></span></div>
-              <div id="stage4Text" style="white-space:pre-wrap; font-size:13px; line-height:1.5;"></div>
+              <div class="stage-output-title">Response <span id="stage4Model" style="font-weight:400;text-transform:none;letter-spacing:0;font-size:11px;"></span></div>
+              <div id="stage4Text" style="white-space:pre-wrap;font-size:13px;line-height:1.55;"></div>
             </div>
             <div id="stage4Error" style="display:none;" class="error-box"></div>
           </div>
@@ -1881,7 +1973,9 @@ def pipeline_ui():
 
     <script>
       const DEV_BYPASS = {"true" if DEV_AUTH_BYPASS else "false"};
+      const DEFAULT_MODEL = "{CHAT_MODEL}";
 
+      // ---- auth ----
       function apiHeaders() {{
         const h = {{"Content-Type": "application/json"}};
         if (!DEV_BYPASS) {{
@@ -1891,345 +1985,481 @@ def pipeline_ui():
         return h;
       }}
 
+      // ---- tooltip ----
+      const _tipEl = document.getElementById("plTip");
+      function bindTip(id, text) {{
+        const el = document.getElementById(id);
+        if (!el) return;
+        el.addEventListener("mouseenter", () => {{ _tipEl.textContent = text; _tipEl.style.display = "block"; }});
+        el.addEventListener("mousemove", e => {{ _tipEl.style.left=(e.clientX+14)+"px"; _tipEl.style.top=(e.clientY+14)+"px"; }});
+        el.addEventListener("mouseleave", () => {{ _tipEl.style.display = "none"; }});
+      }}
+      bindTip("tipLabels", "Emotion/intent words the classifier maps text to. ModernBERT embeds both the input and each label, then ranks them by cosine similarity. Try: curious, defensive, playful, sad, flirtatious, guarded, warm.");
+      bindTip("tipChar",   "Character config passed to stages 2–4. The Overlay sets voice/tone, the Brain reasons as the character, the Prose writes in their voice.");
+      bindTip("tipTurns",  "Recent conversation turns (oldest first, up to 5 used). Passed to stage 1 as context and to stages 2–4 as history.");
+      bindTip("tipMsg",    "The message the user just sent. Stage 1 classifies its emotional signal; stages 3–4 use it as the message to respond to.");
+      bindTip("tipPersona","Personality, background, speech patterns, values, relationships. The Brain and Prose models use this to reason and write as the character.");
+      bindTip("tipState",  "Optional: character's current mood or situational context, updated per conversation turn. E.g. 'nervous about the audition, feeling hopeful'.");
+      bindTip("tipS1knows","ModernBERT only sees the raw text — it has no knowledge of the character, making the signal unbiased.");
+      bindTip("tipS2knows","The Overlay knows the character and classifier signal, but not the full history, keeping it focused on style rather than content.");
+      bindTip("tipS3knows","The Brain sees everything and plans the response content. It deliberately does not write in character voice — that's stage 4's job.");
+      bindTip("tipS4knows","The Prose model only knows how to write (directive) and what to write (skeleton). It doesn't reason over history or relationships.");
+
+      // ---- timer ----
+      let _timerIv = null;
+      function startTimer() {{
+        const el = document.getElementById("plTimer");
+        el.style.display = "inline";
+        const t0 = Date.now();
+        if (_timerIv) clearInterval(_timerIv);
+        _timerIv = setInterval(() => {{
+          const s = (Date.now() - t0) / 1000;
+          el.textContent = s < 60 ? s.toFixed(1) + "s" : Math.floor(s/60) + "m " + (s%60|0) + "s";
+        }}, 100);
+      }}
+      function stopTimer() {{ if (_timerIv) {{ clearInterval(_timerIv); _timerIv = null; }} }}
+
+      // ---- stage state ----
+      function setStageState(n, state) {{
+        const card = document.getElementById("stage" + n + "Card");
+        if (card) {{ card.classList.remove("running","complete","s-error"); if (state !== "idle") card.classList.add(state === "error" ? "s-error" : state); }}
+        const spin = document.getElementById("stage" + n + "Spin");
+        if (spin) spin.style.display = state === "running" ? "inline-block" : "none";
+        const btn = document.getElementById("run" + n + "Btn");
+        if (btn) btn.disabled = state === "running";
+        document.getElementById("runAllBtn").disabled = [1,2,3,4].some(i => {{
+          const c = document.getElementById("stage"+i+"Card");
+          return c && c.classList.contains("running");
+        }});
+      }}
+      function resetDownstream(from) {{
+        for (let n = from; n <= 4; n++) {{
+          setStageState(n, "idle");
+          const o = document.getElementById("stage"+n+"Output"); if (o) o.style.display = "none";
+          const e = document.getElementById("stage"+n+"Error");  if (e) e.style.display = "none";
+        }}
+        if (from <= 1) {{ _classifyResult = null; _runData.stage1 = null; }}
+        if (from <= 2) {{ _directive = ""; _runData.stage2 = null; }}
+        if (from <= 3) {{ _skeleton  = ""; _runData.stage3 = null; }}
+        if (from <= 4) {{ _runData.stage4 = null; }}
+        document.getElementById("dlBtn").style.display = "none";
+      }}
+
+      // ---- ModernBERT inline state ----
+      function fmtKa(s) {{
+        if (s==null) return "?"; if (s<0) return "∞"; if (s===0) return "0s";
+        return s>=3600 ? (s/3600|0)+"h" : s>=60 ? (s/60|0)+"m" : s+"s";
+      }}
+      function updateMbState(state, device, gpuCapable, configuredDevice, keepAliveGpu) {{
+        const chip = document.getElementById("mbStateChip");
+        chip.className = "state-chip " + (state||"unloaded");
+        chip.textContent = state||"unloaded";
+        const gpuChip = document.getElementById("mbGpuChip");
+        const loadBtn = document.getElementById("mbLoadBtn");
+        const evictBtn = document.getElementById("mbEvictBtn");
+        if (gpuCapable != null) {{
+          gpuChip.style.display = "";
+          if (gpuCapable) {{
+            gpuChip.className = "gpu-cap-chip capable";
+            gpuChip.textContent = "⚡";
+            gpuChip.title = "GPU capable · idle timer: " + fmtKa(keepAliveGpu);
+          }} else {{
+            gpuChip.className = "gpu-cap-chip cpu-only";
+            gpuChip.textContent = "CPU";
+            gpuChip.title = "CPU only · " + (configuredDevice==="cpu" ? "forced CPU" : "no CUDA");
+          }}
+        }} else {{ gpuChip.style.display = "none"; }}
+        loadBtn.style.display  = (state==="unloaded"||state==="error") ? "" : "none";
+        evictBtn.style.display = (state==="gpu") ? "" : "none";
+      }}
       async function loadStatus() {{
         try {{
           const r = await fetch("/api/pipeline/status", {{headers: apiHeaders()}});
-          if (!r.ok) {{ setChip("error", "service error"); return; }}
+          if (!r.ok) {{ updateMbState("error"); return; }}
           const d = await r.json();
-          setChip(d.state, d.model_id, d.last_used, d.device,
-                  d.gpu_capable, d.keep_alive_gpu, d.keep_alive_cpu, d.configured_device);
+          updateMbState(d.state, d.device, d.gpu_capable, d.configured_device, d.keep_alive_gpu);
           if (!document.getElementById("labelsInput").value.trim()) loadLabels();
-        }} catch(e) {{
-          setChip("error", "unreachable");
-        }}
+        }} catch(e) {{ updateMbState("error"); }}
       }}
-
-      function fmtKa(secs) {{
-        if (secs == null) return "?";
-        if (secs < 0) return "∞";
-        if (secs === 0) return "0 (immediate)";
-        if (secs >= 3600) return (secs / 3600).toFixed(0) + "h";
-        if (secs >= 60) return (secs / 60).toFixed(0) + "m";
-        return secs + "s";
-      }}
-
-      function setChip(state, modelId, lastUsed, device, gpuCapable, keepAliveGpu, keepAliveCpu, configuredDevice) {{
-        const chip = document.getElementById("stateChip");
-        chip.className = "state-chip " + (state || "unloaded");
-        chip.textContent = state || "unloaded";
-
-        const meta = document.getElementById("statusMeta");
-        const parts = [];
-        if (modelId) parts.push(modelId);
-        if (device && device !== "none") parts.push(device);
-        if (lastUsed) {{
-          const secs = Math.round((Date.now() / 1000) - lastUsed);
-          parts.push("last used " + (secs < 60 ? secs + "s ago" : Math.round(secs / 60) + "m ago"));
-        }}
-        meta.textContent = parts.join(" · ") || "—";
-
-        // GPU capability chip
-        const capChip = document.getElementById("gpuCapChip");
-        const noteEl = document.getElementById("gpuNote");
-        if (gpuCapable != null) {{
-          capChip.style.display = "";
-          if (gpuCapable) {{
-            capChip.className = "gpu-cap-chip capable";
-            capChip.textContent = "⚡ GPU capable";
-          }} else {{
-            capChip.className = "gpu-cap-chip cpu-only";
-            const devLabel = configuredDevice === "cpu" ? "forced CPU" : "no CUDA";
-            capChip.textContent = "CPU only · " + devLabel;
-          }}
-        }} else {{
-          capChip.style.display = "none";
-        }}
-
-        // Explanatory note when on CPU but GPU is available
-        if (noteEl) {{
-          noteEl.style.display = "none";
-          noteEl.textContent = "";
-          if (state === "cpu" && gpuCapable) {{
-            const kaStr = fmtKa(keepAliveGpu);
-            noteEl.textContent = "GPU idle timer (" + kaStr + ") expired — click Load to restore GPU";
-            noteEl.style.display = "";
-          }} else if (state === "gpu" && gpuCapable) {{
-            noteEl.textContent = "GPU idle timer: " + fmtKa(keepAliveGpu);
-            noteEl.style.color = "var(--muted)";
-            noteEl.style.display = "";
-          }}
-        }}
-      }}
-
       async function mbAction(path) {{
-        setChip("loading");
+        updateMbState("loading");
         try {{
-          const r = await fetch(path, {{method: "POST", headers: apiHeaders()}});
+          const r = await fetch(path, {{method:"POST", headers:apiHeaders()}});
           const d = await r.json();
-          setChip(d.state, null, null, d.device);
-        }} catch(e) {{ setChip("error"); }}
-        setTimeout(loadStatus, 1000);
+          updateMbState(d.state, d.device);
+        }} catch(e) {{ updateMbState("error"); }}
+        setTimeout(loadStatus, 800);
       }}
+      const mbLoad  = () => mbAction("/api/pipeline/load");
+      const mbEvict = () => mbAction("/api/pipeline/evict");
 
-      const mbLoad   = () => mbAction("/api/pipeline/load");
-      const mbEvict  = () => mbAction("/api/pipeline/evict");
-      const mbUnload = () => mbAction("/api/pipeline/unload");
-
+      // ---- labels ----
       async function loadLabels() {{
         try {{
-          const r = await fetch("/api/pipeline/labels", {{headers: apiHeaders()}});
+          const r = await fetch("/api/pipeline/labels", {{headers:apiHeaders()}});
           if (!r.ok) return;
           const d = await r.json();
-          if (d.labels && d.labels.length) {{
-            document.getElementById("labelsInput").value = d.labels.join(", ");
-          }}
+          if (d.labels && d.labels.length) document.getElementById("labelsInput").value = d.labels.join(", ");
         }} catch(_) {{}}
       }}
-
       async function updateLabels() {{
-        const raw = document.getElementById("labelsInput").value;
-        const labels = raw.split(/[,\\n]+/).map(s => s.trim()).filter(Boolean);
+        const labels = document.getElementById("labelsInput").value.split(/[,\\n]+/).map(s=>s.trim()).filter(Boolean);
         if (!labels.length) return;
         const el = document.getElementById("labelsStatus");
         el.textContent = "updating…";
         try {{
-          const r = await fetch("/api/pipeline/labels", {{
-            method: "PUT",
-            headers: apiHeaders(),
-            body: JSON.stringify({{labels}}),
-          }});
+          const r = await fetch("/api/pipeline/labels", {{method:"PUT", headers:apiHeaders(), body:JSON.stringify({{labels}})}});
           if (r.ok) {{
             const d = await r.json();
-            const emb = d.embeddings_ready ? " · embeddings ready" : " · will embed on next classify";
-            el.textContent = labels.length + " labels" + emb;
-          }} else {{
-            el.textContent = "error " + r.status;
-          }}
+            el.textContent = labels.length + " labels" + (d.embeddings_ready ? " · embedded" : " · embeds on classify");
+          }} else {{ el.textContent = "error " + r.status; }}
         }} catch(e) {{ el.textContent = "unreachable"; }}
       }}
 
+      // ---- context turns ----
       function addTurn(val) {{
         const list = document.getElementById("turnsList");
-        const n = list.children.length + 1;
         const row = document.createElement("div");
         row.className = "turn-row";
-        const safe = (val || "").replace(/"/g, "&quot;");
-        row.innerHTML =
-          '<input type="text" placeholder="turn ' + n + '" value="' + safe + '" />' +
-          '<button class="turn-del" onclick="this.parentElement.remove()" title="remove">×</button>';
+        const safe = (val||"").replace(/"/g,"&quot;");
+        row.innerHTML = '<input type="text" placeholder="turn '+(list.children.length+1)+'" value="'+safe+'" />' +
+          '<button class="turn-del" onclick="this.parentElement.remove()" title="remove">&times;</button>';
         list.appendChild(row);
       }}
-
       function getContext() {{
-        return Array.from(document.querySelectorAll("#turnsList .turn-row input"))
-          .map(i => i.value.trim()).filter(Boolean);
+        return Array.from(document.querySelectorAll("#turnsList .turn-row input")).map(i=>i.value.trim()).filter(Boolean);
       }}
 
-      // Pipeline state — passed forward between stages
-      let _classifyResult = null;  // {{labels, scores}}
+      // ---- characters (localStorage) ----
+      const _CHAR_KEY = "pl_characters";
+      function loadChars() {{ return JSON.parse(localStorage.getItem(_CHAR_KEY)||"[]"); }}
+      function saveChars(cs) {{ localStorage.setItem(_CHAR_KEY, JSON.stringify(cs)); }}
+      let _charEditId = null;
+
+      function refreshCharDropdown() {{
+        const sel = document.getElementById("charSelect");
+        const cur = sel.value;
+        sel.innerHTML = '<option value="">— no character —</option>';
+        loadChars().forEach(c => {{
+          const opt = document.createElement("option");
+          opt.value = c.id; opt.textContent = c.name;
+          if (c.id === cur) opt.selected = true;
+          sel.appendChild(opt);
+        }});
+        updateCharPreview();
+      }}
+      function updateCharPreview() {{
+        const c = getSelectedChar();
+        const el = document.getElementById("charPreview");
+        document.getElementById("charEditBtn").style.display = c.name ? "" : "none";
+        if (c.name && c.persona) {{
+          el.style.display = "block";
+          el.textContent = c.persona.slice(0,90) + (c.persona.length>90 ? "…" : "");
+        }} else {{ el.style.display = "none"; }}
+      }}
+      function getSelectedChar() {{
+        const id = document.getElementById("charSelect").value;
+        if (!id) return {{name:"",persona:"",state:""}};
+        return loadChars().find(c=>c.id===id) || {{name:"",persona:"",state:""}};
+      }}
+      function charName()    {{ return getSelectedChar().name    || "Character"; }}
+      function charPersona() {{ return getSelectedChar().persona || ""; }}
+      function charState()   {{ return getSelectedChar().state   || ""; }}
+
+      function openCharModal(isNew) {{
+        const c = isNew ? null : getSelectedChar();
+        if (!isNew && !c.name) {{ openCharModal(true); return; }}
+        _charEditId = isNew ? null : document.getElementById("charSelect").value;
+        document.getElementById("charModalTitle").textContent = isNew ? "New character" : "Edit character";
+        document.getElementById("cmName").value    = c ? c.name    : "";
+        document.getElementById("cmPersona").value = c ? c.persona : "";
+        document.getElementById("cmState").value   = c ? c.state   : "";
+        document.getElementById("cmDeleteBtn").style.display = isNew ? "none" : "";
+        document.getElementById("charModal").style.display = "flex";
+        setTimeout(() => document.getElementById("cmName").focus(), 50);
+      }}
+      function closeCharModal() {{ document.getElementById("charModal").style.display = "none"; }}
+      function saveChar() {{
+        const name = document.getElementById("cmName").value.trim();
+        if (!name) {{ document.getElementById("cmName").focus(); return; }}
+        const chars = loadChars();
+        const existing = _charEditId ? chars.find(c=>c.id===_charEditId) : null;
+        const persona = document.getElementById("cmPersona").value.trim();
+        const state   = document.getElementById("cmState").value.trim();
+        let selId;
+        if (existing) {{
+          existing.name = name; existing.persona = persona; existing.state = state;
+          selId = existing.id;
+        }} else {{
+          const nc = {{id: Date.now().toString(), name, persona, state}};
+          chars.push(nc); selId = nc.id;
+        }}
+        saveChars(chars);
+        refreshCharDropdown();
+        document.getElementById("charSelect").value = selId;
+        updateCharPreview();
+        closeCharModal();
+      }}
+      function deleteChar() {{
+        if (!_charEditId || !confirm("Delete this character?")) return;
+        saveChars(loadChars().filter(c=>c.id!==_charEditId));
+        refreshCharDropdown();
+        closeCharModal();
+      }}
+
+      // ---- Ollama models ----
+      let _ollamaModels = [];
+      async function fetchModels() {{
+        if (_ollamaModels.length) return;
+        try {{
+          const r = await fetch("/models", {{headers:apiHeaders()}});
+          const d = await r.json();
+          _ollamaModels = d.models || [];
+        }} catch(_) {{}}
+      }}
+
+      // ---- config modal ----
+      let _runTarget = null;
+      let _stageCfg = JSON.parse(localStorage.getItem("pl_stage_cfg")||"{{}}");
+
+      async function openRunModal(target) {{
+        _runTarget = target;
+        await fetchModels();
+        const names = {{2:"4B Overlay", 3:"Brain", 4:"Prose"}};
+        const isAll = target === "all";
+        document.getElementById("cfgTitle").textContent = isAll ? "Run all stages" :
+          "Stage " + target + (names[target] ? " · " + names[target] : " · ModernBERT");
+        const body = document.getElementById("cfgBody");
+        body.innerHTML = "";
+
+        const mkSel = (n) => {{
+          const saved = (_stageCfg[n]||{{}}).model || "";
+          const opts = _ollamaModels.map(m =>
+            '<option value="'+esc(m)+'"'+(m===saved?" selected":"")+'>'+esc(m)+'</option>'
+          ).join("");
+          return '<div class="cfg-row"><label>Stage '+n+' &middot; '+names[n]+' &mdash; model</label>' +
+            '<select id="cfgM'+n+'"><option value="">Default ('+esc(DEFAULT_MODEL)+')</option>'+opts+'</select></div>';
+        }};
+
+        if (target===1||isAll) {{
+          const topK = (_stageCfg[1]||{{}}).top_k || 5;
+          body.innerHTML += '<div class="cfg-row"><label>Top-K results <span class="help-ico" id="tipTopK">?</span></label>' +
+            '<input type="number" id="cfgTopK" value="'+topK+'" min="1" max="20" style="width:80px;" /></div>';
+          bindTip("tipTopK","How many top-scoring labels to return from the classifier. Higher values show more of the score distribution.");
+        }}
+        if (target===2||isAll) body.innerHTML += mkSel(2);
+        if (target===3||isAll) body.innerHTML += mkSel(3);
+        if (target===4||isAll) body.innerHTML += mkSel(4);
+
+        document.getElementById("cfgModal").style.display = "flex";
+      }}
+
+      function closeCfg() {{ document.getElementById("cfgModal").style.display = "none"; }}
+      function confirmRun() {{
+        const topK = document.getElementById("cfgTopK");
+        if (topK) _stageCfg[1] = {{...(_stageCfg[1]||{{}}), top_k: parseInt(topK.value)||5}};
+        [2,3,4].forEach(n => {{
+          const sel = document.getElementById("cfgM"+n);
+          if (sel) _stageCfg[n] = {{...(_stageCfg[n]||{{}}), model: sel.value}};
+        }});
+        localStorage.setItem("pl_stage_cfg", JSON.stringify(_stageCfg));
+        closeCfg();
+        const t = _runTarget;
+        if (t==="all") runAll(); else if (t===1) runClassify();
+        else if (t===2) runOverlay(); else if (t===3) runBrain(); else if (t===4) runProse();
+      }}
+      function stageModel(n) {{ return ((_stageCfg[n]||{{}}).model)||""; }}
+      function stageTopK()   {{ return ((_stageCfg[1]||{{}}).top_k)||5; }}
+
+      // ---- pipeline state ----
+      let _classifyResult = null;
       let _directive = "";
-      let _skeleton = "";
+      let _skeleton  = "";
+      let _runData   = {{}};
 
-      function charName()    {{ return document.getElementById("charName").value.trim() || "Character"; }}
-      function charPersona() {{ return document.getElementById("charPersona").value.trim(); }}
-      function charState()   {{ return document.getElementById("charState").value.trim(); }}
-
+      // ---- run functions ----
       async function runClassify() {{
         const text = document.getElementById("msgInput").value.trim();
         if (!text) {{ document.getElementById("msgInput").focus(); return; }}
-
-        const btn = document.getElementById("runBtn");
-        btn.disabled = true;
-        btn.textContent = "Running…";
-        document.getElementById("stage1Output").style.display = "none";
-        document.getElementById("stage1Error").style.display = "none";
-        document.getElementById("timingNote").textContent = "";
-        _classifyResult = null;
-
-        const t0 = Date.now();
+        resetDownstream(1);
+        setStageState(1, "running");
+        startTimer();
         try {{
           const r = await fetch("/api/pipeline/classify", {{
-            method: "POST",
-            headers: apiHeaders(),
-            body: JSON.stringify({{text, context: getContext()}}),
+            method:"POST", headers:apiHeaders(),
+            body: JSON.stringify({{text, context:getContext(), top_k:stageTopK()}}),
           }});
-          const elapsed = Date.now() - t0;
-          if (!r.ok) {{
-            const msg = await r.text();
-            showStageError("stage1Error", msg);
-            document.getElementById("timingNote").textContent = elapsed + "ms (error)";
-            return;
-          }}
+          if (!r.ok) {{ setStageState(1,"error"); showErr("stage1Error", await r.text()); return; }}
           const d = await r.json();
-          _classifyResult = d;
+          _classifyResult = d; _runData.stage1 = d;
           renderStage1(d);
-          document.getElementById("timingNote").textContent =
-            elapsed + "ms · task: " + d.task + " · model state: " + d.model_state;
+          setStageState(1, "complete");
           loadStatus();
         }} catch(e) {{
-          showStageError("stage1Error", e.toString());
+          setStageState(1, "error"); showErr("stage1Error", e.toString());
         }} finally {{
-          btn.disabled = false;
-          btn.textContent = "1 · ModernBERT →";
+          if (_runTarget !== "all") stopTimer();
         }}
       }}
 
       async function runOverlay() {{
         if (!_classifyResult) {{ alert("Run stage 1 first."); return; }}
-        setStageRunning("stage2Card", true);
-        document.getElementById("stage2Output").style.display = "none";
-        document.getElementById("stage2Error").style.display = "none";
+        resetDownstream(2);
+        setStageState(2, "running");
         try {{
-          const body = {{
-            character_name: charName(),
-            character_persona: charPersona(),
-            character_state: charState(),
-            labels: _classifyResult.labels,
-            scores: _classifyResult.scores,
-            turns: getContext(),
-            model: document.getElementById("modelOverlay").value.trim(),
-          }};
           const r = await fetch("/api/pipeline/overlay", {{
-            method: "POST", headers: apiHeaders(), body: JSON.stringify(body),
+            method:"POST", headers:apiHeaders(),
+            body: JSON.stringify({{
+              character_name: charName(), character_persona: charPersona(),
+              character_state: charState(), labels: _classifyResult.labels,
+              scores: _classifyResult.scores, turns: getContext(), model: stageModel(2),
+            }}),
           }});
-          if (!r.ok) {{ showStageError("stage2Error", await r.text()); return; }}
+          if (!r.ok) {{ setStageState(2,"error"); showErr("stage2Error", await r.text()); return; }}
           const d = await r.json();
-          _directive = d.directive;
+          _directive = d.directive; _runData.stage2 = d;
           document.getElementById("stage2Output").style.display = "block";
           document.getElementById("stage2Text").textContent = d.directive;
           document.getElementById("stage2Model").textContent = "· " + d.model;
+          setStageState(2, "complete");
         }} catch(e) {{
-          showStageError("stage2Error", e.toString());
+          setStageState(2, "error"); showErr("stage2Error", e.toString());
         }} finally {{
-          setStageRunning("stage2Card", false);
+          if (_runTarget !== "all") stopTimer();
         }}
       }}
 
       async function runBrain() {{
         if (!_classifyResult) {{ alert("Run stage 1 first."); return; }}
         if (!_directive) {{ alert("Run stage 2 first."); return; }}
-        setStageRunning("stage3Card", true);
-        document.getElementById("stage3Output").style.display = "none";
-        document.getElementById("stage3Error").style.display = "none";
+        resetDownstream(3);
+        setStageState(3, "running");
         try {{
-          const body = {{
-            character_name: charName(),
-            character_persona: charPersona(),
-            character_state: charState(),
-            style_directive: _directive,
-            labels: _classifyResult.labels,
-            turns: getContext(),
-            message: document.getElementById("msgInput").value.trim(),
-            model: document.getElementById("modelBrain").value.trim(),
-          }};
           const r = await fetch("/api/pipeline/brain", {{
-            method: "POST", headers: apiHeaders(), body: JSON.stringify(body),
+            method:"POST", headers:apiHeaders(),
+            body: JSON.stringify({{
+              character_name: charName(), character_persona: charPersona(),
+              character_state: charState(), style_directive: _directive,
+              labels: _classifyResult.labels, turns: getContext(),
+              message: document.getElementById("msgInput").value.trim(), model: stageModel(3),
+            }}),
           }});
-          if (!r.ok) {{ showStageError("stage3Error", await r.text()); return; }}
+          if (!r.ok) {{ setStageState(3,"error"); showErr("stage3Error", await r.text()); return; }}
           const d = await r.json();
-          _skeleton = d.skeleton;
+          _skeleton = d.skeleton; _runData.stage3 = d;
           document.getElementById("stage3Output").style.display = "block";
           document.getElementById("stage3Text").textContent = d.skeleton;
           document.getElementById("stage3Model").textContent = "· " + d.model;
+          setStageState(3, "complete");
         }} catch(e) {{
-          showStageError("stage3Error", e.toString());
+          setStageState(3, "error"); showErr("stage3Error", e.toString());
         }} finally {{
-          setStageRunning("stage3Card", false);
+          if (_runTarget !== "all") stopTimer();
         }}
       }}
 
       async function runProse() {{
         if (!_directive) {{ alert("Run stage 2 first."); return; }}
         if (!_skeleton)  {{ alert("Run stage 3 first."); return; }}
-        setStageRunning("stage4Card", true);
+        resetDownstream(4);
+        setStageState(4, "running");
         document.getElementById("stage4Output").style.display = "block";
-        document.getElementById("stage4Error").style.display = "none";
         const textEl = document.getElementById("stage4Text");
         textEl.textContent = "";
+        let prose = "";
         try {{
-          const body = {{
-            character_name: charName(),
-            style_directive: _directive,
-            skeleton: _skeleton,
-            turns: getContext(),
-            message: document.getElementById("msgInput").value.trim(),
-            model: document.getElementById("modelProse").value.trim(),
-          }};
           const r = await fetch("/api/pipeline/prose", {{
-            method: "POST", headers: apiHeaders(), body: JSON.stringify(body),
+            method:"POST", headers:apiHeaders(),
+            body: JSON.stringify({{
+              character_name: charName(), style_directive: _directive,
+              skeleton: _skeleton, turns: getContext(),
+              message: document.getElementById("msgInput").value.trim(), model: stageModel(4),
+            }}),
           }});
-          if (!r.ok) {{ showStageError("stage4Error", await r.text()); return; }}
-          document.getElementById("stage4Model").textContent =
-            "· " + (document.getElementById("modelProse").value.trim() || "default");
+          if (!r.ok) {{ setStageState(4,"error"); showErr("stage4Error", await r.text()); return; }}
+          document.getElementById("stage4Model").textContent = "· " + (stageModel(4)||DEFAULT_MODEL);
           const reader = r.body.getReader();
           const dec = new TextDecoder();
           let buf = "";
           while (true) {{
-            const {{ done, value }} = await reader.read();
+            const {{done, value}} = await reader.read();
             if (done) break;
-            buf += dec.decode(value, {{stream: true}});
-            const lines = buf.split("\\n");
-            buf = lines.pop();
+            buf += dec.decode(value, {{stream:true}});
+            const lines = buf.split("\\n"); buf = lines.pop();
             for (const line of lines) {{
               const t = line.trim();
               if (!t || !t.startsWith("data: ")) continue;
-              const payload = t.slice(6);
-              if (payload === "[DONE]") continue;
-              try {{
-                const chunk = JSON.parse(payload);
-                if (chunk.token) textEl.textContent += chunk.token;
-              }} catch(_) {{}}
+              const pl = t.slice(6);
+              if (pl === "[DONE]") continue;
+              try {{ const c = JSON.parse(pl); if (c.token) {{ prose += c.token; textEl.textContent = prose; }} }} catch(_) {{}}
             }}
           }}
+          _runData.stage4 = {{model: stageModel(4)||DEFAULT_MODEL, response: prose}};
+          setStageState(4, "complete");
+          if (_runData.stage1 && _runData.stage2 && _runData.stage3 && _runData.stage4) {{
+            document.getElementById("dlBtn").style.display = "";
+          }}
         }} catch(e) {{
-          showStageError("stage4Error", e.toString());
+          setStageState(4, "error"); showErr("stage4Error", e.toString());
         }} finally {{
-          setStageRunning("stage4Card", false);
+          stopTimer();
         }}
       }}
 
       async function runAll() {{
-        await runClassify();
-        if (!_classifyResult) return;
-        await runOverlay();
-        if (!_directive) return;
-        await runBrain();
-        if (!_skeleton) return;
+        _runData = {{}};
+        startTimer();
+        await runClassify(); if (!_classifyResult) {{ stopTimer(); return; }}
+        await runOverlay();  if (!_directive)       {{ stopTimer(); return; }}
+        await runBrain();    if (!_skeleton)         {{ stopTimer(); return; }}
         await runProse();
       }}
 
-      function setStageRunning(cardId, running) {{
-        const btn = document.querySelector("#" + cardId + " .pl-btn-sm");
-        if (btn) {{ btn.disabled = running; btn.textContent = running ? "…" : "Run"; }}
-      }}
-
-      function showStageError(elId, msg) {{
+      function showErr(elId, msg) {{
         const el = document.getElementById(elId);
-        el.style.display = "block";
-        el.textContent = msg;
+        if (el) {{ el.style.display = "block"; el.textContent = msg; }}
       }}
 
+      // ---- download ----
+      function downloadRun() {{
+        const c = getSelectedChar();
+        const blob = new Blob([JSON.stringify({{
+          timestamp: new Date().toISOString(),
+          character: {{name:c.name, persona:c.persona, state:c.state}},
+          turns: getContext(),
+          message: document.getElementById("msgInput").value.trim(),
+          stage1: _runData.stage1||null,
+          stage2: _runData.stage2||null,
+          stage3: _runData.stage3||null,
+          stage4: _runData.stage4||null,
+        }}, null, 2)], {{type:"application/json"}});
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "pipeline-run-" + Date.now() + ".json";
+        a.click(); URL.revokeObjectURL(a.href);
+      }}
+
+      // ---- render stage 1 ----
       function renderStage1(d) {{
         document.getElementById("stage1Output").style.display = "block";
-        document.getElementById("tokenChips").innerHTML = d.labels.map((lbl, i) =>
-          '<span class="token-chip">' + esc(lbl) +
-          '<span class="token-score">' + d.scores[i].toFixed(3) + '</span></span>'
+        document.getElementById("tokenChips").innerHTML = d.labels.map((lbl,i) =>
+          '<span class="token-chip">'+esc(lbl)+'<span class="token-score">'+d.scores[i].toFixed(3)+'</span></span>'
         ).join("");
-        const raw = d.raw || {{}};
-        const sorted = Object.entries(raw).sort((a, b) => b[1] - a[1]);
-        document.getElementById("scoreBars").innerHTML = sorted.map(([lbl, score]) => {{
-          const pct = Math.max(0, Math.min(100, score * 100)).toFixed(1);
-          return '<div class="score-row">' +
-            '<span class="score-label" title="' + esc(lbl) + '">' + esc(lbl) + '</span>' +
-            '<div class="score-bar-bg"><div class="score-bar-fill" style="width:' + pct + '%"></div></div>' +
-            '<span class="score-val">' + score.toFixed(3) + '</span></div>';
+        const sorted = Object.entries(d.raw||{{}}).sort((a,b)=>b[1]-a[1]);
+        document.getElementById("scoreBars").innerHTML = sorted.map(([lbl,score]) => {{
+          const pct = Math.max(0,Math.min(100,score*100)).toFixed(1);
+          return '<div class="score-row"><span class="score-label" title="'+esc(lbl)+'">'+esc(lbl)+'</span>' +
+            '<div class="score-bar-bg"><div class="score-bar-fill" style="width:'+pct+'%"></div></div>' +
+            '<span class="score-val">'+score.toFixed(3)+'</span></div>';
         }}).join("");
       }}
 
-      function esc(s) {{
-        return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-      }}
+      function esc(s) {{ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }}
 
+      // ---- init ----
+      document.getElementById("charSelect").addEventListener("change", updateCharPreview);
+      document.addEventListener("keydown", e => {{ if (e.key==="Escape") {{ closeCfg(); closeCharModal(); }} }});
+      refreshCharDropdown();
       loadStatus();
       loadLabels();
       setInterval(loadStatus, 12000);
