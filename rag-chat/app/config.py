@@ -16,6 +16,7 @@ for _quiet in ("aiosqlite", "sqlalchemy.engine", "httpcore", "httpx", "hpack"):
     logging.getLogger(_quiet).setLevel(logging.WARNING)
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "15m").strip()
 CHAT_MODEL = os.getenv("CHAT_MODEL", "llama3.2:3b")
 SYSTEM_PROMPT = os.getenv("CHAT_SYSTEM_PROMPT", "You are a helpful assistant.")
 
@@ -46,6 +47,7 @@ MEDIA_S3_PREFIX = os.getenv("MEDIA_S3_PREFIX", "rag-chat-media").strip().strip("
 PROVIDER_ENCRYPTION_KEY = os.getenv("PROVIDER_ENCRYPTION_KEY", "")
 
 MODERNBERT_URL = os.getenv("MODERNBERT_URL", "http://modernbert:7998")
+INFINITY_URL = os.getenv("INFINITY_URL", "http://infinity:7997").rstrip("/")
 
 # ── Agentic repair pipeline ────────────────────────────────────────────────────
 # URL of the ai-code-auditor audit API — used for diff-audit validation between

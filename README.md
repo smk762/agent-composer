@@ -206,6 +206,7 @@ See `docs/integration-guide.md` for external service/agent integration (LAN or C
 ### `rag-chat`
 - `GET /health`
 - `POST /chat` → forwards to Ollama `/api/chat`
+- Runtime controls: `GET /api/runtime/ollama/status`, `POST /api/runtime/ollama/evict`, `POST /api/runtime/ollama/wake`, `GET /api/runtime/infinity/status`, `POST /api/runtime/infinity/evict`, `POST /api/runtime/infinity/wake`
 - UI: `GET /ui/chat` (and `/`) for a minimal in-browser chat form
 - API keys: `GET /ui/api-keys` to create/list/revoke keys (use `Authorization: Bearer <key>` for requests)
 - History UI: `GET /ui/history` to browse/open conversations

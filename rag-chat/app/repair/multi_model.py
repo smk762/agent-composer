@@ -11,7 +11,7 @@ from typing import AsyncIterator, Optional
 
 import httpx
 
-from app.config import CHAT_MODEL, OLLAMA_TIMEOUT, OLLAMA_URL
+from app.config import CHAT_MODEL, OLLAMA_KEEP_ALIVE, OLLAMA_TIMEOUT, OLLAMA_URL
 from app.repair.context_builder import build_repair_context, fetch_qdrant_snippets
 from app.repair.models import RepairIteration, RepairRequest
 from app.repair.patch_applier import extract_patch
@@ -109,6 +109,7 @@ async def _generate(prompt: str, model: str, system: str) -> str:
         "system": system,
         "prompt": prompt,
         "stream": False,
+        "keep_alive": OLLAMA_KEEP_ALIVE,
     }
     try:
         async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:

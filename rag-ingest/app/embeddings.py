@@ -36,6 +36,7 @@ EMBED_BACKEND_URL = os.getenv("EMBED_BACKEND_URL", "http://infinity:7997").rstri
 EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
 EMBED_MODEL_CODE = os.getenv("EMBED_MODEL_CODE", "nomic-ai/CodeRankEmbed")
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434").rstrip("/")
+OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "15m").strip()
 EMBED_TIMEOUT_S = _env_int("EMBED_TIMEOUT_S", 120)
 EMBED_MAX_CHARS = _env_int("EMBED_MAX_CHARS", 4000)
 EMBED_MIN_CHARS = _env_int("EMBED_MIN_CHARS", 200)
@@ -87,7 +88,7 @@ class OllamaEmbeddingClient(EmbeddingClient):
         min_len = max(1, EMBED_MIN_CHARS)
         last_r: httpx.Response | None = None
         for _ in range(tries):
-            payload = {"model": self.model, "prompt": prompt}
+            payload = {"model": self.model, "prompt": prompt, "keep_alive": OLLAMA_KEEP_ALIVE}
             r = await _EMBED_WORKERS.run(
                 lambda: run_with_oom_wait(
                     lambda: client.post(f"{OLLAMA_URL}/api/embeddings", json=payload),

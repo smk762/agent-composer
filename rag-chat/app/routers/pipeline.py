@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
-from app.config import CHAT_MODEL, MODERNBERT_URL, OLLAMA_TIMEOUT, OLLAMA_URL
+from app.config import CHAT_MODEL, MODERNBERT_URL, OLLAMA_KEEP_ALIVE, OLLAMA_TIMEOUT, OLLAMA_URL
 
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 
@@ -132,7 +132,13 @@ async def classify(req: ClassifyRequest):
 # ------------------------------------------------------------------ Ollama helper
 
 async def _ollama_generate(model: str, system: str, prompt: str) -> str:
-    payload = {"model": model, "system": system, "prompt": prompt, "stream": False}
+    payload = {
+        "model": model,
+        "system": system,
+        "prompt": prompt,
+        "stream": False,
+        "keep_alive": OLLAMA_KEEP_ALIVE,
+    }
     try:
         async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
             r = await client.post(f"{OLLAMA_URL}/api/generate", json=payload)
@@ -145,7 +151,13 @@ async def _ollama_generate(model: str, system: str, prompt: str) -> str:
 
 
 async def _ollama_stream(model: str, system: str, prompt: str) -> AsyncIterator[str]:
-    payload = {"model": model, "system": system, "prompt": prompt, "stream": True}
+    payload = {
+        "model": model,
+        "system": system,
+        "prompt": prompt,
+        "stream": True,
+        "keep_alive": OLLAMA_KEEP_ALIVE,
+    }
     try:
         async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
             async with client.stream("POST", f"{OLLAMA_URL}/api/generate", json=payload) as r:

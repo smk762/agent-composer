@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import (
     CHAT_HISTORY_MAX_MSGS, CHAT_MODEL, DEV_AUTH_BYPASS, EMBED_MODEL,
-    OLLAMA_TIMEOUT, OLLAMA_URL, QDRANT_COLLECTION, QDRANT_URL,
+    OLLAMA_KEEP_ALIVE, OLLAMA_TIMEOUT, OLLAMA_URL, QDRANT_COLLECTION, QDRANT_URL,
     RAG_ENABLED, RAG_MAX_CONTEXT_CHARS, RAG_TOP_K, SYSTEM_PROMPT, UTC,
 )
 from app.db import get_db
@@ -108,7 +108,7 @@ async def _resolve_model(requested: str) -> str:
 
 
 async def ollama_embed(text: str) -> list[float]:
-    payload = {"model": EMBED_MODEL, "prompt": text}
+    payload = {"model": EMBED_MODEL, "prompt": text, "keep_alive": OLLAMA_KEEP_ALIVE}
     async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
         r = await client.post(f"{OLLAMA_URL}/api/embeddings", json=payload)
     if r.status_code != 200:
@@ -423,7 +423,12 @@ async def chat(
             if ctx:
                 msgs = [msgs[0], Msg(role="system", content=ctx)] + msgs[1:]
 
-            payload = {"model": model, "messages": [_msg_to_ollama_format(m) for m in msgs], "stream": True}
+            payload = {
+                "model": model,
+                "messages": [_msg_to_ollama_format(m) for m in msgs],
+                "stream": True,
+                "keep_alive": OLLAMA_KEEP_ALIVE,
+            }
             if req.temperature is not None:
                 payload["options"] = payload.get("options", {})
                 payload["options"]["temperature"] = req.temperature
@@ -516,7 +521,12 @@ async def chat(
     if ctx:
         msgs = [msgs[0], Msg(role="system", content=ctx)] + msgs[1:]
 
-    payload = {"model": model, "messages": [_msg_to_ollama_format(m) for m in msgs], "stream": False}
+    payload = {
+        "model": model,
+        "messages": [_msg_to_ollama_format(m) for m in msgs],
+        "stream": False,
+        "keep_alive": OLLAMA_KEEP_ALIVE,
+    }
     if req.temperature is not None:
         payload["options"] = payload.get("options", {})
         payload["options"]["temperature"] = req.temperature
