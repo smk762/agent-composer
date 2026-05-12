@@ -183,6 +183,13 @@ services:
       - OOM_WAIT_INTERVAL_SECONDS=${OOM_WAIT_INTERVAL_SECONDS:-5}
       - INFERENCE_WORKER_CONCURRENCY=${INFERENCE_WORKER_CONCURRENCY:-1}
       - APP_RELOAD=${APP_RELOAD:-1}
+      # ai-code-auditor audit API — used by the repair router for diff generation,
+      # validate_patch, and git ops.  Routed via host.docker.internal because
+      # audit-api lives in a separate Docker network (ai-code-auditor_default).
+      - AUDIT_API_URL=${AUDIT_API_URL:-http://host.docker.internal:8765}
+      - ECOSYSTEM_CONFIG_PATH=${ECOSYSTEM_CONFIG_PATH:-/home/smk/ai-code-auditor/config/ecosystem.yaml}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: /app/init.sh
     ports:
       - "${RAG_CHAT_BIND_IP:-0.0.0.0}:${RAG_CHAT_PORT:-9150}:9150"

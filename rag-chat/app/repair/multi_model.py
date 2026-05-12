@@ -131,7 +131,7 @@ async def _validate_via_api(
     repo: str,
     audit_api_url: str,
 ) -> tuple[bool, list[str]]:
-    """POST patch to audit API, return (passed, errors)."""
+    """POST patch to /audit/diff (static analysis), return (passed, errors)."""
     if not audit_api_url or not patch:
         return True, []
     try:
@@ -153,6 +153,79 @@ async def _validate_via_api(
         return len(critical) == 0, critical
     except Exception as exc:
         log.debug("Validation call failed: %s", exc)
+        return True, []
+
+
+async def _validate_via_tests(
+    patch: str,
+    repo: str,
+    audit_api_url: str,
+    timeout: int = 180,
+) -> tuple[bool, list[str]]:
+    """Apply the patch to a temp copy and run the repo's test/lint suite.
+
+    Calls ``POST /audit/validate_patch`` on the audit API.  The response
+    includes a ``failure_summary`` — compact, LLM-ready lines that are
+    pre-filtered from the raw test output.  This avoids filling the local
+    model's context with thousands of lines of pytest boilerplate.
+
+    Degrades gracefully:
+    - Returns (True, []) when the endpoint is unavailable (404 or connection error).
+    - Returns (True, []) when validation is skipped (read-only mount, no test runner).
+    - Returns (False, [<patch-error>]) when git apply fails on the temp copy.
+    """
+    if not audit_api_url or not patch:
+        return True, []
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.post(
+                f"{audit_api_url.rstrip('/')}/audit/validate_patch",
+                json={"repo": repo, "patch": patch, "timeout_s": max(60, timeout - 30)},
+            )
+        # 404 means the endpoint isn't deployed yet — skip silently
+        if r.status_code == 404:
+            return True, []
+        if r.status_code != 200:
+            log.debug("validate_patch returned %d", r.status_code)
+            return True, []
+
+        data = r.json()
+
+        # Skipped (read-only mount, no test runner) → don't penalise
+        if data.get("skipped_reason"):
+            log.debug("validate_patch skipped: %s", data["skipped_reason"])
+            return True, []
+
+        # Patch didn't apply cleanly — this IS a real error to feed back
+        if not data.get("patch_applied", True):
+            patch_err = data.get("patch_error", "patch did not apply cleanly")
+            return False, [f"Patch apply error: {patch_err}"]
+
+        passed = data.get("passed", True)
+        # Use failure_summary (pre-filtered, LLM-ready) as the canonical error source.
+        # Never fall back to raw errors — they may contain infrastructure noise
+        # (broken venv symlinks, missing runners) that would mislead the model.
+        failure_summary: list[str] = data.get("failure_summary") or []
+        if not passed and not failure_summary:
+            # Test runner failed but produced no actionable failure lines.
+            # This is an infrastructure issue (broken venv, missing runner, bad shebang
+            # in a copied .venv, etc.) — not something the repair model can fix.
+            # Log as warning so ops can investigate, but don't feed it to the model.
+            raw_errors = data.get("errors") or []
+            log.warning(
+                "validate_patch: runner failed with no actionable output "
+                "(tool=%s, repo=%s) — infra issue, not propagating to repair loop. "
+                "Raw errors: %s",
+                data.get("tool"), repo, raw_errors[:3],
+            )
+            return True, []
+        return passed, failure_summary
+
+    except httpx.ConnectError:
+        log.debug("validate_patch: audit API unreachable")
+        return True, []
+    except Exception as exc:
+        log.debug("validate_patch call failed: %s", exc)
         return True, []
 
 
@@ -225,22 +298,47 @@ async def repair_loop(
             iter_result.adversary_prompt = adversary_prompt_text
             iter_result.adversary_response = adversary_notes
 
-        # ── Validation ────────────────────────────────────────────────────────
+        # ── Static diff-audit ─────────────────────────────────────────────────
         if request.audit_api_url and patch:
             passed, val_errors = await _validate_via_api(
                 patch, request.repo, request.audit_api_url
             )
             iter_result.validation_passed = passed
             iter_result.validation_errors = val_errors
-            current_errors = val_errors  # feed back into next iteration's context
         elif not request.audit_api_url:
-            iter_result.validation_passed = None  # validation disabled
+            iter_result.validation_passed = None  # static validation disabled
+
+        # ── Test-suite validation ─────────────────────────────────────────────
+        # Only run when:
+        # - The static audit didn't already reject the patch (avoid double-spending
+        #   inference on a known-bad diff).
+        # - The mode produces a patch (suggest mode never does).
+        # - validate_tests is enabled (caller can disable for speed).
+        test_passed = True
+        test_errors: list[str] = []
+        if (
+            request.audit_api_url
+            and patch
+            and getattr(request, "validate_tests", True)
+            and request.mode != "suggest"
+            and iter_result.validation_passed is not False
+        ):
+            test_passed, test_errors = await _validate_via_tests(
+                patch, request.repo, request.audit_api_url
+            )
+            iter_result.test_validation_passed = test_passed
+            iter_result.test_validation_errors = test_errors
+
+        # Merge all error signals for the next iteration's context.
+        # Static-audit errors come first (higher signal), test errors follow.
+        current_errors = list(iter_result.validation_errors) + test_errors
 
         yield iter_result
 
-        # Stop if validation passed or there's nothing more to improve
-        if iter_result.validation_passed is True:
-            log.info("Repair loop: validation passed at iteration %d", iteration)
+        # Stop when all validations pass, or when the model produced nothing useful
+        static_ok = iter_result.validation_passed is not False
+        if static_ok and test_passed and patch:
+            log.info("Repair loop: all validations passed at iteration %d", iteration)
             break
         if not patch and iteration == 1:
             log.warning("Repair loop: model produced no patch on first iteration")

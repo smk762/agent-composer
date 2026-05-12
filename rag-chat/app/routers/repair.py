@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.config import AUDIT_API_URL, ECOSYSTEM_CONFIG_PATH, QDRANT_URL
-from app.repair.models import RepairIteration, RepairRequest, RepairResult
+from app.repair.models import GitOpsConfig, RepairIteration, RepairRequest, RepairResult
 from app.repair.multi_model import repair_loop
 from app.repair.patch_applier import apply_inplace, apply_to_temp
 
@@ -100,15 +100,15 @@ async def run_repair(request: RepairRequest) -> StreamingResponse:
         error_msg = ""
 
         try:
-            # If compare_branch given, generate diff via the audit API or local git
+            # If compare_branch given, fetch raw diff via the audit API
             diff_text = request.diff
             if not diff_text and request.compare_branch:
-                diff_text = await _fetch_diff_from_branch(
-                    request.repo, request.compare_branch, request.audit_api_url
+                diff_text, diff_error = await _fetch_diff_from_branch(
+                    request.repo, request.compare_branch, effective_audit_url
                 )
-                if not diff_text:
-                    yield _sse("error", {"message": "Could not generate diff from branch"})
-                    _update_job(job_id, status="failed", error="Could not generate diff from branch", completed_at=_now_iso())
+                if diff_error:
+                    yield _sse("error", {"message": diff_error})
+                    _update_job(job_id, status="failed", error=diff_error, completed_at=_now_iso())
                     return
 
             # Run the multi-model repair loop
@@ -122,12 +122,22 @@ async def run_repair(request: RepairRequest) -> StreamingResponse:
                 final_patch = iteration.patch or final_patch
                 yield _sse("iteration", iter_dict)
 
-                # In auto_fix mode, stop at first successful validation
+                # In auto_fix mode, stop once both static audit AND test suite pass.
+                # The multi_model loop also breaks on this condition; this guard
+                # covers the case where the caller set validate_tests=False.
                 if request.mode == "auto_fix" and iteration.validation_passed is True:
-                    break
+                    tests_skipped = not getattr(request, "validate_tests", True)
+                    test_ok = (
+                        tests_skipped
+                        or iteration.test_validation_passed is None   # endpoint not available
+                        or iteration.test_validation_passed is True
+                    )
+                    if test_ok:
+                        break
 
             # Apply in-place if requested
             applied = False
+            repo_path = None
             if request.apply and final_patch and request.mode == "auto_fix":
                 try:
                     repo_path = await _resolve_repo_path(request.repo, request.audit_api_url)
@@ -138,21 +148,43 @@ async def run_repair(request: RepairRequest) -> StreamingResponse:
                     log.warning("apply_inplace failed: %s", exc)
                     error_msg = f"Patch generated but apply failed: {exc}"
 
+            # Git operations after successful apply
+            branch = ""
+            commit_sha = ""
+            push_url = ""
+            git_error = ""
+            if applied and request.git_ops and request.git_ops.enabled:
+                branch, commit_sha, push_url, git_error = await _run_git_ops(
+                    job_id=job_id,
+                    final_patch=final_patch,
+                    git_ops=request.git_ops,
+                    repo=request.repo,
+                    audit_api_url=effective_audit_url,
+                )
+
             _update_job(
                 job_id,
                 status="completed",
                 iterations=iterations,
                 final_patch=final_patch,
                 applied=applied,
+                branch=branch,
+                commit_sha=commit_sha,
+                push_url=push_url,
+                git_error=git_error,
                 error=error_msg,
                 completed_at=_now_iso(),
             )
             yield _sse("complete", {
-                "job_id": job_id,
+                "job_id":      job_id,
                 "final_patch": final_patch,
-                "applied": applied,
-                "iterations": len(iterations),
-                "error": error_msg,
+                "applied":     applied,
+                "branch":      branch,
+                "commit_sha":  commit_sha,
+                "push_url":    push_url,
+                "git_error":   git_error,
+                "iterations":  len(iterations),
+                "error":       error_msg,
             })
 
         except Exception as exc:
@@ -186,36 +218,58 @@ async def _fetch_diff_from_branch(
     repo: str,
     compare_branch: str,
     audit_api_url: str,
-) -> str:
-    """Ask the audit API to generate a git diff, or fall back to local git."""
+) -> tuple[str, str]:
+    """Ask the audit API for the raw diff between *compare_branch* and HEAD.
+
+    Returns ``(diff_text, error_message)``.  On success, error_message is "".
+    On failure, diff_text is "" and error_message describes exactly what went wrong.
+
+    Uses ``POST /audit/git/diff`` — the audit API is the authority on repo paths
+    and git operations; rag-chat has no local access to the ecosystem config.
+    """
     import httpx
 
-    if audit_api_url:
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                r = await client.post(
-                    f"{audit_api_url.rstrip('/')}/audit/diff",
-                    json={"repo": repo, "compare_branch": compare_branch},
-                )
-            if r.status_code == 200:
-                data = r.json()
-                # The audit/diff endpoint doesn't return the raw diff — it returns findings.
-                # We need to call /audit/diff to get findings but the diff text comes
-                # from the audit API differently. For now, fall through to local git.
-                pass
-        except Exception as exc:
-            log.debug("Audit API fetch_diff failed: %s", exc)
+    if not audit_api_url:
+        return "", "No audit_api_url configured — cannot generate diff from branch."
 
-    # Fall back: resolve path from ecosystem config and run git locally
-    repo_path = await _resolve_repo_path(repo, audit_api_url)
-    if repo_path is None:
-        return ""
-    import subprocess
-    result = subprocess.run(
-        ["git", "-C", str(repo_path), "diff", f"{compare_branch}...HEAD"],
-        capture_output=True, text=True,
-    )
-    return result.stdout if result.returncode == 0 else ""
+    try:
+        async with httpx.AsyncClient(timeout=35) as client:
+            r = await client.post(
+                f"{audit_api_url.rstrip('/')}/audit/git/diff",
+                json={"repo": repo, "compare_branch": compare_branch},
+            )
+    except httpx.ConnectError:
+        return "", f"Audit API unreachable at {audit_api_url}."
+    except Exception as exc:
+        return "", f"Audit API request failed: {exc}"
+
+    try:
+        data = r.json()
+    except Exception:
+        return "", f"Audit API returned non-JSON (status {r.status_code})."
+
+    if r.status_code == 404:
+        return "", data.get("error", f"Repo {repo!r} not found in audit API ecosystem config.")
+
+    if r.status_code != 200 or data.get("error"):
+        reason = data.get("reason", "")
+        error  = data.get("error", f"Audit API returned status {r.status_code}.")
+        # Append a hint for the most common mistake
+        if reason == "branch_not_found":
+            error += (
+                f" Check available branches via GET {audit_api_url}/audit/repos/status"
+                f" — the repo may be on a feature branch with no local {compare_branch!r} ref."
+            )
+        return "", error
+
+    diff_text = data.get("diff", "")
+    if data.get("is_empty") or not diff_text.strip():
+        return "", (
+            f"Diff between {compare_branch!r} and HEAD is empty — "
+            f"the branches are identical or {compare_branch!r} is the current HEAD."
+        )
+
+    return diff_text, ""
 
 
 async def _resolve_repo_path(repo: str, audit_api_url: str):
@@ -238,3 +292,105 @@ async def _resolve_repo_path(repo: str, audit_api_url: str):
     except Exception as exc:
         log.debug("Could not read ecosystem config: %s", exc)
     return None
+
+
+async def _run_git_ops(
+    *,
+    job_id: str,
+    final_patch: str,
+    git_ops: GitOpsConfig,
+    repo: str,
+    audit_api_url: str,
+) -> tuple[str, str, str, str]:
+    """Call the audit API git endpoints after a successful apply.
+
+    Returns (branch, commit_sha, push_url, git_error).
+    git_error is non-empty on partial failure (e.g. commit succeeded but push failed);
+    the apply is already done at this point so we don't raise.
+    """
+    import httpx
+
+    base = audit_api_url.rstrip("/")
+    branch = ""
+    commit_sha = ""
+    push_url = ""
+    error_parts: list[str] = []
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            # 1. Create repair branch
+            slug = job_id.replace("repair-", "")
+            r = await client.post(
+                f"{base}/audit/git/branch",
+                json={
+                    "repo":        repo,
+                    "slug":        slug,
+                    "base_branch": git_ops.base_branch,
+                },
+            )
+            if r.status_code == 200:
+                branch = r.json().get("branch", "")
+                log.info("Git ops: created branch %r for job %s", branch, job_id)
+            else:
+                error_parts.append(f"branch creation failed ({r.status_code}): {r.text[:200]}")
+                # Don't proceed to commit/push if branch creation failed
+                return branch, commit_sha, push_url, "; ".join(error_parts)
+
+            # 2. Commit
+            if git_ops.commit:
+                commit_msg = (
+                    f"repair: {slug}\n\n"
+                    f"Auto-generated by ai-code-auditor repair loop (job {job_id}).\n"
+                    f"Repo: {repo}"
+                )
+                r = await client.post(
+                    f"{base}/audit/git/commit",
+                    json={
+                        "repo":         repo,
+                        "message":      commit_msg,
+                        "patch":        final_patch,
+                        "author_name":  git_ops.author_name,
+                        "author_email": git_ops.author_email,
+                    },
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    commit_sha = data.get("sha", "")
+                    if data.get("skipped"):
+                        log.info("Git ops: nothing to commit for job %s", job_id)
+                    else:
+                        log.info(
+                            "Git ops: committed %s (%d files) for job %s",
+                            commit_sha[:12], data.get("files_staged", 0), job_id,
+                        )
+                else:
+                    error_parts.append(f"commit failed ({r.status_code}): {r.text[:200]}")
+
+            # 3. Push (only attempt when commit succeeded)
+            if git_ops.push and commit_sha:
+                r = await client.post(
+                    f"{base}/audit/git/push",
+                    json={
+                        "repo":   repo,
+                        "branch": branch,
+                        "remote": git_ops.remote,
+                    },
+                )
+                if r.status_code == 200:
+                    data = r.json()
+                    if data.get("pushed"):
+                        push_url = data.get("remote_url", "")
+                        log.info("Git ops: pushed %r → %s", branch, push_url)
+                    else:
+                        reason = data.get("skipped_reason", "unknown")
+                        log.info("Git ops: push skipped — %s", reason)
+                        error_parts.append(f"push skipped: {reason}")
+                else:
+                    error_parts.append(f"push failed ({r.status_code}): {r.text[:200]}")
+
+    except Exception as exc:
+        log.warning("Git ops failed for job %s: %s", job_id, exc)
+        error_parts.append(str(exc)[:300])
+
+    git_error = "; ".join(error_parts)
+    return branch, commit_sha, push_url, git_error
