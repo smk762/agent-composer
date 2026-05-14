@@ -15,6 +15,8 @@ Three FastAPI services plus sidecars, all wired together in `docker-compose.yml`
 | `postgres` | 5432 | Chat history DB for rag-chat (AsyncSQLAlchemy + Alembic) |
 | `infinity` | 7997 | Infinity sidecar serving CodeRankEmbed + bge-reranker (code-audit path) |
 | `ollama` | 11434 | Local LLM runtime (internal only) |
+| `whisper` | 8030 | faster-whisper STT sidecar (GPU, CTranslate2, large-v3-turbo) |
+| `tts` | 8031 | Qwen3-TTS sidecar (GPU, 0.6b Base + CustomVoice) |
 
 ## Commands
 
@@ -51,6 +53,7 @@ Copy `env.example` → `.env`. Key variables:
 - `MODERNBERT_URL` — defaults to `http://modernbert:7998`
 - `AUDIT_API_URL` — ai-code-auditor audit API for diff-audit validation between repair iterations (default `http://127.0.0.1:8765`)
 - `ECOSYSTEM_CONFIG_PATH` — path to `ai-code-auditor/config/ecosystem.yaml` for repo path resolution (default `/home/smk/ai-code-auditor/config/ecosystem.yaml`)
+- `GUARD_MODEL` — LlamaGuard model tag for content-safety checks (default `llama-guard3:8b`, runs on shared Ollama)
 - `CF_TUNNEL_TOKEN` — only needed when running `--profile cloud`
 
 GPU passthrough requires NVIDIA Container Toolkit on the host. Remove `gpus: all` from compose services to run CPU-only.
@@ -66,12 +69,14 @@ GPU passthrough requires NVIDIA Container Toolkit on the host. Remove `gpus: all
 
 ## Architecture: rag-chat
 
-`rag-chat/app/main.py` assembles these routers: `chat`, `api_keys`, `ui`, `generation`, `media`, `providers`, `pipeline`, `repair`, `metrics`.
+`rag-chat/app/main.py` assembles these routers: `chat`, `api_keys`, `ui`, `generation`, `media`, `providers`, `pipeline`, `repair`, `guard`, `voice`, `metrics`.
 
 - **Chat** (`routers/chat.py`): streams Ollama responses, optionally injects Qdrant RAG context as a system message, persists conversation + messages to Postgres via async SQLAlchemy.
 - **Pipeline proxy** (`routers/pipeline.py`): reverse-proxies `/api/pipeline/*` → ModernBERT sidecar. Exposes classify, load/evict/unload, and labels CRUD.
 - **Repair** (`routers/repair.py` + `repair/`): multi-model agentic repair loop. `POST /api/repair/run` accepts a diff or `compare_branch`, runs fixer→critic→adversary iterations, validates via ai-code-auditor audit API, and streams SSE events. `GET /api/repair/jobs/{job_id}` retrieves final state. Key env: `AUDIT_API_URL`, `ECOSYSTEM_CONFIG_PATH`.
-- **UI** (`routers/ui.py`): server-rendered HTML pages for chat, history, API keys, image generation, and Pipeline Lab. All pages share `render_page()` / `BASE_CSS`.
+- **Guard** (`routers/guard.py`): LlamaGuard content-safety checks via shared Ollama. `POST /api/guard/check` accepts input text + optional conversation context, returns safe/unsafe verdict with flagged category codes. `GET /api/guard/categories` returns the taxonomy. Key env: `GUARD_MODEL`.
+- **Voice** (`routers/voice.py`): proxies STT/TTS requests to the whisper and tts containers. `POST /api/voice/transcribe` (multipart audio → text), `POST /api/voice/synthesise` (text → audio URL), `POST /api/voice/synthesise/stream` (SSE sentence-chunked TTS), `GET /api/voice/speakers`, `GET /api/voice/health`. Key env: `WHISPER_URL`, `TTS_URL`.
+- **UI** (`routers/ui.py`): server-rendered HTML pages for chat, history, API keys, image generation, Pipeline Lab, and Guard tester. All pages share `render_page()` / `BASE_CSS`.
 - **DB** (`db.py` + `models/orm.py`): async Postgres via `asyncpg` driver. `bootstrap_db.py` auto-creates the DB on startup; `init.sh` runs `alembic upgrade head` before uvicorn.
 
 ## Architecture: modernbert sidecar

@@ -155,6 +155,7 @@ services:
       - MODERNBERT_URL=${MODERNBERT_URL:-http://modernbert:7998}
       - INFINITY_URL=${INFINITY_URL:-http://infinity:7997}
       - CHAT_MODEL=${CHAT_MODEL:-llama3.2:3b}
+      - GUARD_MODEL=${GUARD_MODEL:-llama-guard3:8b}
       - CHAT_SYSTEM_PROMPT=${CHAT_SYSTEM_PROMPT:-You are a helpful assistant.}
       - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-project_docs}
@@ -188,6 +189,10 @@ services:
       # audit-api lives in a separate Docker network (ai-code-auditor_default).
       - AUDIT_API_URL=${AUDIT_API_URL:-http://host.docker.internal:8765}
       - ECOSYSTEM_CONFIG_PATH=${ECOSYSTEM_CONFIG_PATH:-/home/smk/ai-code-auditor/config/ecosystem.yaml}
+      # Voice services (whisper + tts containers on this host)
+      - WHISPER_URL=${WHISPER_URL:-http://whisper:8030}
+      - TTS_URL=${TTS_URL:-http://tts:8031}
+      - VOICE_TIMEOUT=${VOICE_TIMEOUT:-30}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: /app/init.sh
@@ -245,6 +250,81 @@ services:
       start_period: 60s
     networks: [internal]
 
+  # faster-whisper STT — GPU-accelerated speech-to-text via CTranslate2.
+  # Lazy-loads model on first request. API: POST /transcribe (multipart), GET /health.
+  whisper:
+    build:
+      context: ./voice-stack
+      dockerfile: Dockerfile.whisper
+    container_name: whisper
+    restart: unless-stopped
+    environment:
+      - STT_MODEL=${STT_MODEL:-large-v3-turbo}
+      - STT_DEVICE=${STT_DEVICE:-cuda}
+      - STT_COMPUTE_TYPE=${STT_COMPUTE_TYPE:-float16}
+      - STT_VAD_FILTER=${STT_VAD_FILTER:-1}
+      - STT_BEAM_SIZE=${STT_BEAM_SIZE:-5}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - whisper_cache:/root/.cache
+    ports:
+      - "${WHISPER_BIND_IP:-127.0.0.1}:${WHISPER_PORT:-8032}:8030"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8030/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks: [internal]
+
+  # Qwen3-TTS — GPU text-to-speech (CustomVoice + Base model variants).
+  # Loads models at startup. API: POST /synthesise, GET /speakers, POST /clone-voice, GET /health.
+  # Requires tts_server.py copied from playact-engine into voice-stack/ (see voice.md).
+  tts:
+    build:
+      context: ./voice-stack
+      dockerfile: Dockerfile.tts
+      args:
+        TTS_MODEL_SIZE: "${TTS_MODEL_SIZE:-0.6b}"
+        TTS_TORCH_INDEX_URL: "https://download.pytorch.org/whl/cu124"
+    container_name: tts
+    restart: unless-stopped
+    environment:
+      - TTS_MODEL_SIZE=${TTS_MODEL_SIZE:-0.6b}
+      - TTS_DEVICE=${TTS_DEVICE:-cuda:0}
+      - TTS_LOAD_MODELS=${TTS_LOAD_MODELS:-both}
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://192.168.1.109:9000}
+      - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
+      - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-compance-media}
+      - S3_PUBLIC_URL=${S3_PUBLIC_URL:-http://192.168.1.109:9000/compance-media}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    ports:
+      - "${TTS_BIND_IP:-127.0.0.1}:${TTS_PORT:-8031}:8031"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8031/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+    networks: [internal]
+
   # Cloudflare Tunnel (publish ONLY rag-ingest + rag-chat hostnames in Cloudflare UI)
   cloudflared:
     image: cloudflare/cloudflared:latest
@@ -271,3 +351,4 @@ volumes:
   rag_chat_media:
   infinity_hf_cache:
   modernbert_data:
+  whisper_cache:

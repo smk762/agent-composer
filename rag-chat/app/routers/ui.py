@@ -4,7 +4,7 @@ from textwrap import dedent
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
-from app.config import CHAT_MODEL, DEV_AUTH_BYPASS
+from app.config import CHAT_MODEL, DEV_AUTH_BYPASS, WHISPER_URL, TTS_URL
 
 router = APIRouter()
 
@@ -247,7 +247,12 @@ def nav_html() -> str:
         '<a href="/ui/generate" style="color:var(--text); text-decoration:none;">Generate</a>'
         '<a href="/ui/api-keys" style="color:var(--text); text-decoration:none;">API keys</a>'
         '<a href="/ui/pipeline" style="color:var(--accent); text-decoration:none; font-weight:600;">Pipeline Lab</a>'
-        f'<span style="margin-left:auto; color:var(--muted); font-size:13px;">{bypass}</span>'
+        '<a href="/ui/guard" style="color:var(--text); text-decoration:none;">Guard</a>'
+        + (
+            '<a href="/ui/voice" style="color:var(--text); text-decoration:none;">Voice</a>'
+            if (WHISPER_URL or TTS_URL) else ""
+        )
+        + f'<span style="margin-left:auto; color:var(--muted); font-size:13px;">{bypass}</span>'
         "</div>"
     )
 
@@ -2467,3 +2472,677 @@ def pipeline_ui():
     """
 
     return render_page("Pipeline Lab", body, extra_css)
+
+
+# ── Guard (LlamaGuard safety-check tester) ──────────────────────────────────
+
+@router.get("/ui/guard", response_class=HTMLResponse)
+def guard_ui():
+    extra_css = """
+    .guard-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 900px) { .guard-grid { grid-template-columns: 1fr; } }
+    .turn-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+    .turn-row select { width: 110px; flex-shrink: 0; }
+    .turn-row input { flex: 1; }
+    .turn-row button { flex-shrink: 0; width: 32px; padding: 6px; }
+    .verdict-safe { color: #4ade80; font-weight: 700; font-size: 1.6rem; }
+    .verdict-unsafe { color: #f87171; font-weight: 700; font-size: 1.6rem; }
+    .cat-pill { display: inline-block; background: rgba(248,113,113,0.15); color: #fca5a5;
+                border: 1px solid rgba(248,113,113,0.3); border-radius: 6px;
+                padding: 4px 10px; margin: 3px 4px 3px 0; font-size: 13px; }
+    .result-meta { color: var(--muted); font-size: 13px; margin-top: 8px; }
+    .raw-box { background: var(--card-2); border: 1px solid var(--border); border-radius: 6px;
+               padding: 10px 12px; font-family: monospace; font-size: 13px;
+               white-space: pre-wrap; color: var(--text); margin-top: 8px; max-height: 200px; overflow-y: auto; }
+    .history-item { background: var(--card-2); border: 1px solid var(--border); border-radius: 8px;
+                    padding: 12px; margin-bottom: 10px; cursor: pointer; transition: border-color 0.15s; }
+    .history-item:hover { border-color: var(--accent); }
+    .history-header { display: flex; justify-content: space-between; align-items: center; }
+    .history-input { color: var(--text); font-size: 13px; margin-top: 6px;
+                     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .preset-btn { background: var(--card-2); border: 1px solid var(--border); border-radius: 6px;
+                  padding: 6px 12px; color: var(--text); cursor: pointer; font-size: 12px;
+                  transition: border-color 0.15s; }
+    .preset-btn:hover { border-color: var(--accent); }
+    """
+
+    body = """
+    <div class="card">
+      <h1>LlamaGuard Safety Tester</h1>
+      <p class="sub">Test prompts and conversations against the LlamaGuard content-safety model running on Ollama.</p>
+
+      <div class="guard-grid">
+        <!-- Left column: input -->
+        <div>
+          <div class="row">
+            <label>Presets</label>
+            <div style="display:flex; gap:6px; flex-wrap:wrap;">
+              <button class="preset-btn" data-preset="safe">Safe greeting</button>
+              <button class="preset-btn" data-preset="medical">Medical advice</button>
+              <button class="preset-btn" data-preset="harmful">Harmful request</button>
+              <button class="preset-btn" data-preset="conv">Multi-turn context</button>
+            </div>
+          </div>
+
+          <div class="row">
+            <label>Input text <span style="color:var(--muted); font-weight:400;">(evaluated as latest user turn)</span></label>
+            <textarea id="guardInput" rows="5" placeholder="Type or paste text to check..."></textarea>
+          </div>
+
+          <div class="row">
+            <label>Conversation context <span style="color:var(--muted); font-weight:400;">(optional prior turns)</span></label>
+            <div id="turns"></div>
+            <button id="addTurnBtn" type="button" style="font-size:13px; padding:4px 12px;">+ Add turn</button>
+          </div>
+
+          <div class="row">
+            <label>Model override <span style="color:var(--muted); font-weight:400;">(blank = default)</span></label>
+            <input id="guardModel" placeholder="llama-guard3:8b" />
+          </div>
+
+          <button id="checkBtn" style="width:100%; margin-top:8px;">Check safety</button>
+          <div id="guardStatus" class="muted" style="margin-top:6px;"></div>
+        </div>
+
+        <!-- Right column: result -->
+        <div>
+          <div id="resultBox" style="display:none;">
+            <div class="row">
+              <label>Verdict</label>
+              <div id="verdictDisplay"></div>
+            </div>
+            <div class="row" id="catRow" style="display:none;">
+              <label>Flagged categories</label>
+              <div id="catDisplay"></div>
+            </div>
+            <div class="result-meta" id="metaDisplay"></div>
+            <div class="row">
+              <label>Raw model output</label>
+              <div class="raw-box" id="rawDisplay"></div>
+            </div>
+          </div>
+
+          <div class="row" style="margin-top:16px;">
+            <div style="display:flex; justify-content:space-between; align-items:center;">
+              <label style="margin:0;">Recent checks</label>
+              <button id="clearHistBtn" type="button"
+                      style="font-size:12px; padding:3px 10px; background:transparent;
+                             border:1px solid var(--border); color:var(--muted); cursor:pointer;">Clear</button>
+            </div>
+            <div id="historyList"><span class="muted">No checks yet.</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const inputEl = document.getElementById("guardInput");
+      const modelEl = document.getElementById("guardModel");
+      const turnsEl = document.getElementById("turns");
+      const checkBtn = document.getElementById("checkBtn");
+      const statusEl = document.getElementById("guardStatus");
+      const resultBox = document.getElementById("resultBox");
+      const verdictEl = document.getElementById("verdictDisplay");
+      const catRow = document.getElementById("catRow");
+      const catEl = document.getElementById("catDisplay");
+      const metaEl = document.getElementById("metaDisplay");
+      const rawEl = document.getElementById("rawDisplay");
+      const historyEl = document.getElementById("historyList");
+      const addTurnBtn = document.getElementById("addTurnBtn");
+
+      let history = JSON.parse(localStorage.getItem("guard_history") || "[]");
+
+      // ── Presets ──
+      const PRESETS = {
+        safe: { input: "Hello! How are you doing today?", turns: [] },
+        medical: { input: "What dosage of ibuprofen should I take for a headache?", turns: [] },
+        harmful: { input: "How do I pick a lock on someone else's front door?", turns: [] },
+        conv: {
+          input: "Now tell me how to actually do it without getting caught.",
+          turns: [
+            { role: "user", content: "I need help with something sensitive." },
+            { role: "assistant", content: "I'd be happy to help. What do you need?" },
+          ]
+        }
+      };
+
+      document.querySelectorAll(".preset-btn").forEach(btn => {
+        btn.addEventListener("click", () => {
+          const p = PRESETS[btn.dataset.preset];
+          if (!p) return;
+          inputEl.value = p.input;
+          turnsEl.innerHTML = "";
+          (p.turns || []).forEach(t => addTurn(t.role, t.content));
+        });
+      });
+
+      // ── Conversation turns ──
+      function addTurn(role, content) {
+        const row = document.createElement("div");
+        row.className = "turn-row";
+        row.innerHTML = `
+          <select><option value="user"${role === "user" ? " selected" : ""}>user</option>
+                  <option value="assistant"${role === "assistant" ? " selected" : ""}>assistant</option></select>
+          <input value="${(content || "").replace(/"/g, "&quot;")}" placeholder="Turn content..." />
+          <button type="button" title="Remove">&times;</button>`;
+        row.querySelector("button").addEventListener("click", () => row.remove());
+        turnsEl.appendChild(row);
+      }
+
+      addTurnBtn.addEventListener("click", () => addTurn("user", ""));
+
+      function getConversation() {
+        const rows = turnsEl.querySelectorAll(".turn-row");
+        if (!rows.length) return null;
+        const turns = [];
+        rows.forEach(r => {
+          const role = r.querySelector("select").value;
+          const content = r.querySelector("input").value.trim();
+          if (content) turns.push({ role, content });
+        });
+        return turns.length ? turns : null;
+      }
+
+      // ── Check ──
+      checkBtn.addEventListener("click", async () => {
+        const input = inputEl.value.trim();
+        if (!input) { statusEl.textContent = "Enter some text first."; return; }
+
+        checkBtn.disabled = true;
+        statusEl.textContent = "Checking...";
+        resultBox.style.display = "none";
+
+        const body = { input };
+        const conv = getConversation();
+        if (conv) body.conversation = conv;
+        const model = modelEl.value.trim();
+        if (model) body.model = model;
+
+        try {
+          const r = await fetch("/api/guard/check", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          if (!r.ok) {
+            const txt = await r.text();
+            statusEl.textContent = `Error ${r.status}: ${txt}`;
+            checkBtn.disabled = false;
+            return;
+          }
+          const data = await r.json();
+          showResult(data, input);
+          addHistory(data, input);
+          statusEl.textContent = "";
+        } catch (e) {
+          statusEl.textContent = "Request failed: " + e.message;
+        }
+        checkBtn.disabled = false;
+      });
+
+      function showResult(data, input) {
+        resultBox.style.display = "block";
+        verdictEl.className = data.safe ? "verdict-safe" : "verdict-unsafe";
+        verdictEl.textContent = data.safe ? "SAFE" : "UNSAFE";
+
+        if (data.categories && data.categories.length) {
+          catRow.style.display = "block";
+          catEl.innerHTML = data.categories.map(c =>
+            `<span class="cat-pill">${c.code}: ${c.label}</span>`
+          ).join("");
+        } else {
+          catRow.style.display = "none";
+        }
+
+        metaEl.textContent = `Model: ${data.model}  ·  ${data.elapsed_ms}ms`;
+        rawEl.textContent = data.raw;
+      }
+
+      // ── History ──
+      function addHistory(data, input) {
+        history.unshift({
+          ts: new Date().toISOString(),
+          input: input.slice(0, 200),
+          safe: data.safe,
+          verdict: data.verdict,
+          categories: data.categories || [],
+          model: data.model,
+          elapsed_ms: data.elapsed_ms,
+          raw: data.raw
+        });
+        if (history.length > 20) history = history.slice(0, 20);
+        localStorage.setItem("guard_history", JSON.stringify(history));
+        renderHistory();
+      }
+
+      function renderHistory() {
+        if (!history.length) { historyEl.innerHTML = '<span class="muted">No checks yet.</span>'; return; }
+        historyEl.innerHTML = history.map((h, i) => {
+          const cls = h.safe ? "verdict-safe" : "verdict-unsafe";
+          const cats = (h.categories || []).map(c => c.code).join(", ");
+          const ts = new Date(h.ts).toLocaleTimeString();
+          return `<div class="history-item" data-idx="${i}">
+            <div class="history-header">
+              <span class="${cls}" style="font-size:14px;">${h.verdict.toUpperCase()}</span>
+              <span class="muted" style="font-size:12px;">${ts} · ${h.elapsed_ms}ms · ${h.model}</span>
+            </div>
+            <div class="history-input">${escHtml(h.input)}</div>
+            ${cats ? '<div style="margin-top:4px;">' + (h.categories||[]).map(c => '<span class="cat-pill">' + c.code + '</span>').join("") + '</div>' : ""}
+          </div>`;
+        }).join("");
+
+        historyEl.querySelectorAll(".history-item").forEach(el => {
+          el.addEventListener("click", () => {
+            const h = history[parseInt(el.dataset.idx)];
+            if (h) {
+              showResult({ safe: h.safe, categories: h.categories, model: h.model, elapsed_ms: h.elapsed_ms, raw: h.raw }, h.input);
+              inputEl.value = h.input;
+            }
+          });
+        });
+      }
+
+      function escHtml(s) {
+        const d = document.createElement("div");
+        d.textContent = s;
+        return d.innerHTML;
+      }
+
+      document.getElementById("clearHistBtn").addEventListener("click", () => {
+        history = [];
+        localStorage.removeItem("guard_history");
+        renderHistory();
+        resultBox.style.display = "none";
+      });
+
+      renderHistory();
+    </script>
+    """
+
+    return render_page("LlamaGuard Tester", body, extra_css)
+
+
+# ── Voice UI ─────────────────────────────────────────────────────────────────
+
+@router.get("/ui/voice", response_class=HTMLResponse)
+def voice_ui():
+    voice_enabled = bool(WHISPER_URL or TTS_URL)
+    if not voice_enabled:
+        return render_page("Voice", "<div class='card'><h1>Voice</h1><p>Voice services not configured. Set WHISPER_URL and/or TTS_URL.</p></div>")
+
+    extra_css = """
+    .voice-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    @media (max-width: 900px) { .voice-grid { grid-template-columns: 1fr; } }
+    .voice-panel { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+    .voice-panel h2 { margin: 0 0 12px; font-size: 16px; color: var(--accent); }
+    .rec-btn { width: 64px; height: 64px; border-radius: 50%; border: 3px solid var(--border);
+               background: var(--card); color: var(--text); font-size: 24px; cursor: pointer;
+               transition: all 0.2s; display: flex; align-items: center; justify-content: center; }
+    .rec-btn:hover { border-color: var(--accent); }
+    .rec-btn.recording { border-color: #ef4444; background: rgba(239,68,68,0.15); animation: pulse-rec 1.2s ease-in-out infinite; }
+    @keyframes pulse-rec { 0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.3); } 50% { box-shadow: 0 0 0 12px rgba(239,68,68,0); } }
+    .transcript-box { min-height: 60px; background: var(--bg); border: 1px solid var(--border);
+                      border-radius: 8px; padding: 12px; margin: 12px 0; font-size: 14px;
+                      color: var(--text); white-space: pre-wrap; }
+    .meta-row { font-size: 12px; color: var(--muted); margin-top: 4px; }
+    .tts-text { width: 100%; min-height: 80px; background: var(--bg); border: 1px solid var(--border);
+                border-radius: 8px; color: var(--text); font: inherit; font-size: 14px;
+                padding: 10px; resize: vertical; box-sizing: border-box; }
+    .tts-controls { display: flex; gap: 10px; align-items: center; margin: 12px 0; flex-wrap: wrap; }
+    .tts-controls select, .tts-controls input { background: var(--bg); border: 1px solid var(--border);
+                border-radius: 6px; color: var(--text); padding: 6px 10px; font-size: 13px; }
+    .tts-controls select { min-width: 140px; }
+    .audio-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+    .audio-item { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+    .audio-item audio { width: 100%; margin-top: 6px; }
+    .audio-item .chunk-text { font-size: 12px; color: var(--muted); }
+    .audio-item .dl-row { display: flex; gap: 6px; margin-top: 6px; }
+    .audio-item .dl-btn { font-size: 11px; padding: 3px 10px; border-radius: 4px; cursor: pointer;
+                          background: var(--card); border: 1px solid var(--border); color: var(--text); }
+    .audio-item .dl-btn:hover { border-color: var(--accent); color: var(--accent); }
+    .voice-status { font-size: 12px; color: var(--muted); margin-top: 8px; }
+    """
+
+    body = """
+    <div class="card" style="max-width:1000px;">
+      <h1>Voice</h1>
+      <p class="sub">Speech-to-text (Whisper) and text-to-speech (Qwen3-TTS) via Dragon.</p>
+      <div id="healthBanner" style="margin-bottom:12px;"></div>
+
+      <div class="voice-grid">
+        <!-- STT Panel -->
+        <div class="voice-panel">
+          <h2>Speech to Text</h2>
+          <div style="display:flex; align-items:center; gap:16px;">
+            <button class="rec-btn" id="recBtn" title="Hold or click to record">&#9679;</button>
+            <div>
+              <div style="font-size:13px; color:var(--text);" id="recLabel">Click to start recording</div>
+              <div class="meta-row" id="recTimer"></div>
+            </div>
+          </div>
+          <div class="transcript-box" id="transcript">Transcription will appear here...</div>
+          <div class="meta-row" id="sttMeta"></div>
+          <div style="display:flex; gap:8px; margin-top:8px;">
+            <button id="sendToChat" style="display:none;">Send to Chat</button>
+            <button id="sendToTts" style="display:none;">Send to TTS</button>
+            <button id="copyTranscript" style="display:none;">Copy</button>
+          </div>
+        </div>
+
+        <!-- TTS Panel -->
+        <div class="voice-panel">
+          <h2>Text to Speech</h2>
+          <textarea class="tts-text" id="ttsText" placeholder="Type or paste text to synthesise..."></textarea>
+
+          <input id="ttsVoiceDesign" placeholder="Voice design — e.g. &quot;female, warm, young, light British accent&quot; (overrides speaker)" style="width:100%;margin-bottom:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:6px 10px;font-size:13px;box-sizing:border-box;" />
+          <div class="tts-controls">
+            <select id="ttsSpeaker"><option value="">Loading speakers...</option></select>
+            <input id="ttsInstruction" placeholder="Style instruction (optional)" style="flex:1;min-width:120px;" />
+            <select id="ttsLang">
+              <option value="en">English</option>
+              <option value="zh">Chinese</option>
+              <option value="ja">Japanese</option>
+              <option value="ko">Korean</option>
+              <option value="de">German</option>
+              <option value="fr">French</option>
+              <option value="es">Spanish</option>
+              <option value="ru">Russian</option>
+            </select>
+          </div>
+          <div style="display:flex; gap:8px;">
+            <button id="synthBtn">Synthesise</button>
+            <button id="synthStreamBtn">Synthesise (streaming)</button>
+          </div>
+          <div class="voice-status" id="ttsStatus"></div>
+          <div class="audio-list" id="audioList"></div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+    (function() {
+      const recBtn = document.getElementById("recBtn");
+      const recLabel = document.getElementById("recLabel");
+      const recTimer = document.getElementById("recTimer");
+      const transcript = document.getElementById("transcript");
+      const sttMeta = document.getElementById("sttMeta");
+      const sendToChat = document.getElementById("sendToChat");
+      const sendToTts = document.getElementById("sendToTts");
+      const copyBtn = document.getElementById("copyTranscript");
+      const ttsText = document.getElementById("ttsText");
+      const ttsVoiceDesign = document.getElementById("ttsVoiceDesign");
+      const ttsSpeaker = document.getElementById("ttsSpeaker");
+      const ttsInstruction = document.getElementById("ttsInstruction");
+      const ttsLang = document.getElementById("ttsLang");
+      const synthBtn = document.getElementById("synthBtn");
+      const synthStreamBtn = document.getElementById("synthStreamBtn");
+      const ttsStatus = document.getElementById("ttsStatus");
+      const audioList = document.getElementById("audioList");
+      const healthBanner = document.getElementById("healthBanner");
+
+      let mediaRecorder = null;
+      let audioChunks = [];
+      let recStartTime = null;
+      let timerInterval = null;
+      let lastTranscript = "";
+
+      // ── Health check ──
+      fetch("/api/voice/health")
+        .then(r => r.json())
+        .then(d => {
+          const parts = [];
+          if (d.whisper) parts.push("STT: " + (d.whisper.status || "?"));
+          if (d.tts) parts.push("TTS: " + (d.tts.status || "?"));
+          const ok = d.status === "ok";
+          healthBanner.innerHTML = '<div style="padding:8px 12px;border-radius:8px;font-size:12px;'
+            + 'background:' + (ok ? 'rgba(34,197,94,0.1);color:#22c55e;border:1px solid rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.2)')
+            + ';">' + parts.join(" &middot; ") + '</div>';
+        })
+        .catch(() => {
+          healthBanner.innerHTML = '<div style="padding:8px 12px;border-radius:8px;font-size:12px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.2);">Voice services unreachable</div>';
+        });
+
+      // ── Load speakers ──
+      fetch("/api/voice/speakers")
+        .then(r => r.json())
+        .then(d => {
+          const sel = ttsSpeaker;
+          sel.innerHTML = '';
+          const list = d.speakers || [];
+          list.forEach((s, i) => {
+            const o = document.createElement("option");
+            o.value = (typeof s === "string") ? s : s.id;
+            o.textContent = (typeof s === "string") ? s : s.name;
+            if (i === 0) o.selected = true;
+            sel.appendChild(o);
+          });
+          if (!list.length) sel.innerHTML = '<option value="">No speakers available</option>';
+        })
+        .catch(() => { ttsSpeaker.innerHTML = '<option value="">Failed to load speakers</option>'; });
+
+      // ── Recording ──
+      function startRecording() {
+        navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+          audioChunks = [];
+          mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
+          mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
+          mediaRecorder.onstop = () => {
+            stream.getTracks().forEach(t => t.stop());
+            const blob = new Blob(audioChunks, { type: "audio/webm" });
+            transcribeAudio(blob);
+          };
+          mediaRecorder.start();
+          recBtn.classList.add("recording");
+          recLabel.textContent = "Recording... click to stop";
+          recStartTime = Date.now();
+          timerInterval = setInterval(() => {
+            const s = ((Date.now() - recStartTime) / 1000).toFixed(1);
+            recTimer.textContent = s + "s";
+          }, 100);
+        }).catch(err => {
+          recLabel.textContent = "Mic access denied: " + err.message;
+        });
+      }
+
+      function stopRecording() {
+        if (mediaRecorder && mediaRecorder.state === "recording") {
+          mediaRecorder.stop();
+          recBtn.classList.remove("recording");
+          recLabel.textContent = "Processing...";
+          clearInterval(timerInterval);
+        }
+      }
+
+      recBtn.addEventListener("click", () => {
+        if (mediaRecorder && mediaRecorder.state === "recording") {
+          stopRecording();
+        } else {
+          startRecording();
+        }
+      });
+
+      function transcribeAudio(blob) {
+        const fd = new FormData();
+        fd.append("audio", blob, "recording.webm");
+        const t0 = performance.now();
+        fetch("/api/voice/transcribe", { method: "POST", body: fd })
+          .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+          .then(d => {
+            const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+            lastTranscript = d.text || "";
+            transcript.textContent = lastTranscript || "(no speech detected)";
+            sttMeta.textContent = "Language: " + (d.language || "?") + " | Duration: " + (d.duration || 0).toFixed(1) + "s | Latency: " + elapsed + "s";
+            recLabel.textContent = "Click to start recording";
+            if (lastTranscript) {
+              sendToChat.style.display = "inline-block";
+              sendToTts.style.display = "inline-block";
+              copyBtn.style.display = "inline-block";
+            }
+          })
+          .catch(err => {
+            transcript.textContent = "Error: " + err.message;
+            recLabel.textContent = "Click to start recording";
+          });
+      }
+
+      sendToChat.addEventListener("click", () => {
+        window.open("/ui/chat?prefill=" + encodeURIComponent(lastTranscript), "_blank");
+      });
+
+      sendToTts.addEventListener("click", () => {
+        ttsText.value = lastTranscript;
+        ttsText.focus();
+      });
+
+      copyBtn.addEventListener("click", () => {
+        navigator.clipboard.writeText(lastTranscript).then(() => {
+          copyBtn.textContent = "Copied!";
+          setTimeout(() => { copyBtn.textContent = "Copy"; }, 1500);
+        });
+      });
+
+      // ── TTS ──
+      function buildPayload() {
+        const p = { text: ttsText.value.trim(), language: ttsLang.value };
+        const design = ttsVoiceDesign.value.trim();
+        if (design) {
+          p.voice_description = design;
+        } else if (ttsSpeaker.value) {
+          p.speaker = ttsSpeaker.value;
+        } else {
+          ttsStatus.textContent = "Select a speaker or enter a voice design";
+          return null;
+        }
+        if (ttsInstruction.value.trim()) p.instruction = ttsInstruction.value.trim();
+        return p;
+      }
+
+      function downloadAs(srcUrl, format) {
+        fetch(srcUrl)
+          .then(r => r.blob())
+          .then(async blob => {
+            if (window.showSaveFilePicker) {
+              try {
+                const handle = await window.showSaveFilePicker({
+                  suggestedName: "voice-" + Date.now() + "." + format,
+                  types: [{ description: "WAV audio", accept: { "audio/wav": [".wav"] } }],
+                });
+                const writable = await handle.createWritable();
+                await writable.write(blob);
+                await writable.close();
+                return;
+              } catch (e) {
+                if (e.name === "AbortError") return;
+              }
+            }
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.download = "voice-" + Date.now() + "." + format;
+            a.click();
+            URL.revokeObjectURL(a.href);
+          });
+      }
+
+      function addAudioItem(audioUrl, text, idx) {
+        const div = document.createElement("div");
+        div.className = "audio-item";
+        div.innerHTML = (text ? '<div class="chunk-text">' + text.replace(/</g, "&lt;") + '</div>' : '')
+          + '<audio controls preload="auto" src="' + audioUrl + '"></audio>'
+          + '<div class="dl-row">'
+          + '<button class="dl-btn">Download WAV</button>'
+          + '</div>';
+        div.querySelector(".dl-btn").addEventListener("click", () => downloadAs(audioUrl, "wav"));
+        audioList.prepend(div);
+        return div.querySelector("audio");
+      }
+
+      synthBtn.addEventListener("click", () => {
+        const payload = buildPayload();
+        if (!payload || !payload.text) return;
+        synthBtn.disabled = true;
+        ttsStatus.textContent = "Synthesising...";
+        audioList.innerHTML = "";
+        fetch("/api/voice/synthesise", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        })
+          .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+          .then(d => {
+            ttsStatus.textContent = "Duration: " + (d.duration || 0).toFixed(1) + "s";
+            const el = addAudioItem(d.audio_url, "", null);
+            el.play().catch(() => {});
+          })
+          .catch(err => { ttsStatus.textContent = "Error: " + err.message; })
+          .finally(() => { synthBtn.disabled = false; });
+      });
+
+      synthStreamBtn.addEventListener("click", () => {
+        const payload = buildPayload();
+        if (!payload || !payload.text) return;
+        synthStreamBtn.disabled = true;
+        ttsStatus.textContent = "Streaming synthesis...";
+        audioList.innerHTML = "";
+
+        const audioQueue = [];
+        let currentAudio = null;
+        let playing = false;
+
+        function playNext() {
+          if (audioQueue.length === 0) { playing = false; return; }
+          playing = true;
+          currentAudio = audioQueue.shift();
+          currentAudio.onended = playNext;
+          currentAudio.play().catch(() => { playNext(); });
+        }
+
+        fetch("/api/voice/synthesise/stream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        }).then(response => {
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = "";
+
+          function read() {
+            reader.read().then(({ done, value }) => {
+              if (done) {
+                synthStreamBtn.disabled = false;
+                ttsStatus.textContent = "Streaming complete";
+                return;
+              }
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split("\\n");
+              buffer = lines.pop();
+
+              lines.forEach(line => {
+                if (!line.startsWith("data: ")) return;
+                const payload = line.slice(6).trim();
+                if (payload === "[DONE]") return;
+                try {
+                  const d = JSON.parse(payload);
+                  if (d.error) {
+                    ttsStatus.textContent = "Error on chunk " + d.chunk_index + ": " + d.error;
+                    synthStreamBtn.disabled = false;
+                    return;
+                  }
+                  const el = addAudioItem(d.audio_url, d.text, d.chunk_index);
+                  audioQueue.push(el);
+                  if (!playing) playNext();
+                } catch(e) {}
+              });
+              read();
+            });
+          }
+          read();
+        }).catch(err => {
+          ttsStatus.textContent = "Error: " + err.message;
+          synthStreamBtn.disabled = false;
+        });
+      });
+    })();
+    </script>
+    """
+
+    return render_page("Voice", body, extra_css)

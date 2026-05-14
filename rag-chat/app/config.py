@@ -18,6 +18,7 @@ for _quiet in ("aiosqlite", "sqlalchemy.engine", "httpcore", "httpx", "hpack"):
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "15m").strip()
 CHAT_MODEL = os.getenv("CHAT_MODEL", "llama3.2:3b")
+GUARD_MODEL = os.getenv("GUARD_MODEL", "llama-guard3:8b")
 SYSTEM_PROMPT = os.getenv("CHAT_SYSTEM_PROMPT", "You are a helpful assistant.")
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
@@ -48,6 +49,13 @@ PROVIDER_ENCRYPTION_KEY = os.getenv("PROVIDER_ENCRYPTION_KEY", "")
 
 MODERNBERT_URL = os.getenv("MODERNBERT_URL", "http://modernbert:7998")
 INFINITY_URL = os.getenv("INFINITY_URL", "http://infinity:7997").rstrip("/")
+
+# ── Voice services ────────────────────────────────────────────────────────────
+# Defaults point at the whisper/tts containers in the same compose network.
+# Set to empty string to hide voice features in the UI.
+WHISPER_URL = os.getenv("WHISPER_URL", "http://whisper:8030").rstrip("/")
+TTS_URL = os.getenv("TTS_URL", "http://tts:8031").rstrip("/")
+VOICE_TIMEOUT = _env_int("VOICE_TIMEOUT", 30)
 
 # ── Agentic repair pipeline ────────────────────────────────────────────────────
 # URL of the ai-code-auditor audit API — used for diff-audit validation between
