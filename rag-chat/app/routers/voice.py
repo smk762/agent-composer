@@ -1,17 +1,23 @@
-"""Voice proxy router — forwards STT and TTS requests to Dragon services.
+"""Voice proxy router — forwards STT and TTS requests to the voice sidecars.
+
+TTS is a registry of interchangeable engines (e.g. local XTTS-v2, remote Miso)
+that all speak the same sidecar contract. Every TTS endpoint accepts an
+``engine`` selector (JSON field on synth requests, ``?engine=`` query param
+elsewhere); omitting it uses the configured default engine.
 
 Endpoints:
+  GET  /api/voice/engines           — list configured TTS engines + the default
   POST /api/voice/transcribe        — proxy audio to Whisper STT
-  POST /api/voice/synthesise        — proxy text to the TTS sidecar
+  POST /api/voice/synthesise        — proxy text to the selected TTS engine
   POST /api/voice/synthesise/stream — SSE: sentence-chunked TTS (one WAV/sentence)
-  POST /api/voice/synthesise/pcm    — raw PCM passthrough for live playback (XTTS)
+  POST /api/voice/synthesise/pcm    — raw PCM passthrough for live playback
   POST /api/voice/analyze           — score candidate clips, recommend subset + order
   POST /api/voice/clone             — create a voice clone from one or more clips
   GET  /api/voice/clones            — list stored voice clones
   GET  /api/voice/clones/{id}/download — download a clone (prompt.pt + meta.json) as a zip
   POST /api/voice/clones/import     — import a downloaded voice archive (zip)
   GET  /api/voice/speakers          — list available TTS speakers
-  GET  /api/voice/health            — fan-out health check
+  GET  /api/voice/health            — fan-out health check (whisper + all engines)
 """
 
 from __future__ import annotations
@@ -26,11 +32,23 @@ from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.config import TTS_URL, VOICE_TIMEOUT, WHISPER_URL, log
+from app.config import (
+    TTS_DEFAULT_ENGINE,
+    TTS_ENGINE_LABELS,
+    TTS_ENGINES,
+    VOICE_TIMEOUT,
+    WHISPER_URL,
+    log,
+    tts_engine_url,
+)
 
 router = APIRouter(prefix="/api/voice", tags=["voice"])
 
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
+
+# Fields that are routing hints for *this* proxy, not part of the sidecar
+# contract — stripped before forwarding the JSON body upstream.
+_PROXY_ONLY_FIELDS = {"engine"}
 
 
 def _require_whisper():
@@ -39,14 +57,23 @@ def _require_whisper():
 
 
 def _require_tts():
-    if not TTS_URL:
-        raise HTTPException(503, detail="TTS_URL not configured")
+    if not TTS_ENGINES:
+        raise HTTPException(503, detail="No TTS engine configured")
+
+
+def _tts_base(engine: Optional[str]) -> str:
+    """Resolve the upstream base URL for a (possibly unknown) engine name."""
+    base = tts_engine_url(engine)
+    if not base:
+        raise HTTPException(503, detail="No TTS engine configured")
+    return base
 
 
 # ── Request / response models ────────────────────────────────────────────────
 
 class SynthesiseRequest(BaseModel):
     text: str
+    engine: Optional[str] = None
     voice_clone_id: Optional[str] = None
     speaker: Optional[str] = None
     voice_description: Optional[str] = None
@@ -58,6 +85,7 @@ class SynthesiseRequest(BaseModel):
 class SynthesiseStreamRequest(BaseModel):
     """Same as SynthesiseRequest but explicitly for streaming."""
     text: str
+    engine: Optional[str] = None
     voice_clone_id: Optional[str] = None
     speaker: Optional[str] = None
     voice_description: Optional[str] = None
@@ -67,6 +95,27 @@ class SynthesiseStreamRequest(BaseModel):
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
+
+@router.get("/engines")
+async def engines():
+    """List the configured TTS engines and which one is the default.
+
+    The UI uses this to populate the engine picker; every other voice endpoint
+    accepts the returned ``id`` as an ``engine`` selector (query param or JSON
+    field). Internal URLs are intentionally not exposed.
+    """
+    return {
+        "engines": [
+            {
+                "id": name,
+                "label": TTS_ENGINE_LABELS.get(name, name),
+                "default": name == TTS_DEFAULT_ENGINE,
+            }
+            for name in TTS_ENGINES
+        ],
+        "default": TTS_DEFAULT_ENGINE,
+    }
+
 
 @router.post("/transcribe")
 async def transcribe(
@@ -100,13 +149,15 @@ async def transcribe(
 
 @router.post("/synthesise")
 async def synthesise(req: SynthesiseRequest):
-    """Proxy text to TTS on Dragon."""
+    """Proxy text to the selected TTS engine."""
     _require_tts()
+    base = _tts_base(req.engine)
+    payload = req.model_dump(exclude_none=True, exclude=_PROXY_ONLY_FIELDS)
 
     t0 = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
-            r = await client.post(f"{TTS_URL}/synthesise", json=req.model_dump(exclude_none=True))
+            r = await client.post(f"{base}/synthesise", json=payload)
             r.raise_for_status()
     except httpx.ConnectError:
         raise HTTPException(503, detail="TTS server unreachable")
@@ -115,7 +166,10 @@ async def synthesise(req: SynthesiseRequest):
 
     elapsed_ms = int((time.monotonic() - t0) * 1000)
     data = r.json()
-    log.info("voice: synthesise elapsed=%dms duration=%.1fs", elapsed_ms, data.get("duration", 0))
+    log.info(
+        "voice: synthesise engine=%s elapsed=%dms duration=%.1fs",
+        req.engine or TTS_DEFAULT_ENGINE, elapsed_ms, data.get("duration", 0),
+    )
     return data
 
 
@@ -127,19 +181,20 @@ async def synthesise_stream(req: SynthesiseStreamRequest):
     or an error/done sentinel.
     """
     _require_tts()
+    base = _tts_base(req.engine)
 
     sentences = [s.strip() for s in _SENTENCE_RE.split(req.text) if s.strip()]
     if not sentences:
         sentences = [req.text]
 
-    base_payload = req.model_dump(exclude_none=True, exclude={"text"})
+    base_payload = req.model_dump(exclude_none=True, exclude={"text", *_PROXY_ONLY_FIELDS})
 
     async def event_stream():
         for i, sentence in enumerate(sentences):
             payload = {**base_payload, "text": sentence}
             try:
                 async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
-                    r = await client.post(f"{TTS_URL}/synthesise", json=payload)
+                    r = await client.post(f"{base}/synthesise", json=payload)
                     r.raise_for_status()
                 data = r.json()
                 data["chunk_index"] = i
@@ -166,16 +221,17 @@ async def synthesise_pcm(req: SynthesiseRequest):
     Proxies `{TTS_URL}/synthesise/stream` byte-for-byte (24 kHz mono float32,
     `pcm_f32le`) so the browser can begin playback on the first chunk (~0.2 s)
     instead of waiting for whole-sentence WAVs. Forwards the upstream audio
-    layout headers. Only the XTTS-v2 sidecar implements this; the legacy Qwen
+    layout headers. The XTTS-v2 and Miso sidecars implement this; the legacy Qwen
     sidecar returns 404, which surfaces here as an upstream error.
     """
     _require_tts()
+    base = _tts_base(req.engine)
 
-    payload = req.model_dump(exclude_none=True)
+    payload = req.model_dump(exclude_none=True, exclude=_PROXY_ONLY_FIELDS)
     client = httpx.AsyncClient(timeout=VOICE_TIMEOUT)
     try:
         upstream_req = client.build_request(
-            "POST", f"{TTS_URL}/synthesise/stream", json=payload
+            "POST", f"{base}/synthesise/stream", json=payload
         )
         upstream = await client.send(upstream_req, stream=True)
     except httpx.ConnectError:
@@ -214,13 +270,14 @@ async def synthesise_pcm(req: SynthesiseRequest):
 
 
 @router.get("/speakers")
-async def speakers():
-    """List available TTS speakers."""
+async def speakers(engine: Optional[str] = Query(default=None)):
+    """List available TTS speakers for the selected engine."""
     _require_tts()
+    base = _tts_base(engine)
 
     try:
         async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
-            r = await client.get(f"{TTS_URL}/speakers")
+            r = await client.get(f"{base}/speakers")
             r.raise_for_status()
     except httpx.ConnectError:
         raise HTTPException(503, detail="TTS server unreachable")
@@ -244,14 +301,17 @@ async def clone_voice(
     voice_name: str = Form(...),
     companion_id: Optional[str] = Form(default=None),
     reference_text: str = Form(default=""),
+    engine: Optional[str] = Query(default=None),
 ):
-    """Create a voice clone from one or more reference clips.
+    """Create a voice clone from one or more reference clips on the chosen engine.
 
-    Forwards every uploaded clip to the TTS sidecar's `/clone-voice`, which
-    averages the speaker embedding across clips for a more robust clone than a
-    single short take. `companion_id` defaults to a slug of `voice_name`.
+    Forwards every uploaded clip to the engine's `/clone-voice`. XTTS averages
+    the speaker embedding across clips for a more robust clone than a single
+    short take; Miso is one-shot (best single clip). `companion_id` defaults to
+    a slug of `voice_name`.
     """
     _require_tts()
+    base = _tts_base(engine)
 
     if not audio:
         raise HTTPException(422, detail="At least one reference clip is required")
@@ -269,7 +329,7 @@ async def clone_voice(
     t0 = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
-            r = await client.post(f"{TTS_URL}/clone-voice", files=files, data=form)
+            r = await client.post(f"{base}/clone-voice", files=files, data=form)
             r.raise_for_status()
     except httpx.ConnectError:
         raise HTTPException(503, detail="TTS server unreachable")
@@ -279,19 +339,24 @@ async def clone_voice(
     elapsed_ms = int((time.monotonic() - t0) * 1000)
     data = r.json()
     log.info(
-        "voice: clone elapsed=%dms id=%s clips=%d", elapsed_ms, cid, len(audio)
+        "voice: clone engine=%s elapsed=%dms id=%s clips=%d",
+        engine or TTS_DEFAULT_ENGINE, elapsed_ms, cid, len(audio),
     )
     return data
 
 
 @router.post("/analyze")
-async def analyze_clips(audio: list[UploadFile] = File(...)):
-    """Score candidate reference clips (no clone created).
+async def analyze_clips(
+    audio: list[UploadFile] = File(...),
+    engine: Optional[str] = Query(default=None),
+):
+    """Score candidate reference clips on the chosen engine (no clone created).
 
-    Forwards clips to the TTS sidecar's `/analyze-clips`, which returns a per-clip
+    Forwards clips to the engine's `/analyze-clips`, which returns a per-clip
     quality/consistency score, a recommended subset, and an optimal ordering.
     """
     _require_tts()
+    base = _tts_base(engine)
 
     if not audio:
         raise HTTPException(422, detail="No clips provided")
@@ -306,7 +371,7 @@ async def analyze_clips(audio: list[UploadFile] = File(...)):
     t0 = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
-            r = await client.post(f"{TTS_URL}/analyze-clips", files=files)
+            r = await client.post(f"{base}/analyze-clips", files=files)
             r.raise_for_status()
     except httpx.ConnectError:
         raise HTTPException(503, detail="TTS server unreachable")
@@ -318,13 +383,14 @@ async def analyze_clips(audio: list[UploadFile] = File(...)):
 
 
 @router.get("/clones")
-async def clones():
-    """List stored voice clones from the TTS sidecar."""
+async def clones(engine: Optional[str] = Query(default=None)):
+    """List stored voice clones from the selected TTS engine."""
     _require_tts()
+    base = _tts_base(engine)
 
     try:
         async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
-            r = await client.get(f"{TTS_URL}/clones")
+            r = await client.get(f"{base}/clones")
             r.raise_for_status()
     except httpx.ConnectError:
         raise HTTPException(503, detail="TTS server unreachable")
@@ -339,9 +405,11 @@ async def import_clone(
     archive: UploadFile = File(...),
     voice_name: str = Form(default=""),
     companion_id: Optional[str] = Form(default=None),
+    engine: Optional[str] = Query(default=None),
 ):
-    """Import a previously downloaded voice archive (zip) into the TTS sidecar."""
+    """Import a previously downloaded voice archive (zip) into the chosen engine."""
     _require_tts()
+    base = _tts_base(engine)
 
     data = await archive.read()
     files = {"archive": (archive.filename or "voice.zip", data, archive.content_type or "application/zip")}
@@ -349,7 +417,7 @@ async def import_clone(
 
     try:
         async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
-            r = await client.post(f"{TTS_URL}/clones/import", files=files, data=form)
+            r = await client.post(f"{base}/clones/import", files=files, data=form)
             r.raise_for_status()
     except httpx.ConnectError:
         raise HTTPException(503, detail="TTS server unreachable")
@@ -360,13 +428,14 @@ async def import_clone(
 
 
 @router.get("/clones/{companion_id}/download")
-async def download_clone(companion_id: str):
+async def download_clone(companion_id: str, engine: Optional[str] = Query(default=None)):
     """Download a clone's latents + metadata sidecar as a zip."""
     _require_tts()
+    base = _tts_base(engine)
 
     try:
         async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
-            r = await client.get(f"{TTS_URL}/clones/{companion_id}/download")
+            r = await client.get(f"{base}/clones/{companion_id}/download")
             r.raise_for_status()
     except httpx.ConnectError:
         raise HTTPException(503, detail="TTS server unreachable")
@@ -382,8 +451,14 @@ async def download_clone(companion_id: str):
 
 @router.get("/health")
 async def voice_health():
-    """Fan-out health check to both voice services."""
-    results: dict = {"whisper": None, "tts": None}
+    """Fan-out health check to Whisper and every configured TTS engine.
+
+    ``engines`` carries each engine's health individually; ``tts`` mirrors the
+    default engine for back-compat with older UI code. Overall status is OK when
+    Whisper (if configured) and the default engine are both healthy — a
+    non-default engine being down only degrades that engine, not the page.
+    """
+    results: dict = {"whisper": None, "tts": None, "engines": {}, "default_engine": TTS_DEFAULT_ENGINE}
 
     async with httpx.AsyncClient(timeout=5) as client:
         if WHISPER_URL:
@@ -395,20 +470,22 @@ async def voice_health():
         else:
             results["whisper"] = {"status": "not_configured"}
 
-        if TTS_URL:
+        for name, url in TTS_ENGINES.items():
             try:
-                r = await client.get(f"{TTS_URL}/health")
-                results["tts"] = r.json() if r.status_code == 200 else {"status": "error", "code": r.status_code}
+                r = await client.get(f"{url}/health")
+                results["engines"][name] = r.json() if r.status_code == 200 else {"status": "error", "code": r.status_code}
             except Exception as exc:
-                results["tts"] = {"status": "unreachable", "error": str(exc)}
-        else:
-            results["tts"] = {"status": "not_configured"}
+                results["engines"][name] = {"status": "unreachable", "error": str(exc)}
 
-    all_ok = all(
-        isinstance(v, dict) and v.get("status") == "ok"
-        for v in results.values()
-        if v and v.get("status") != "not_configured"
-    )
+    if not TTS_ENGINES:
+        results["tts"] = {"status": "not_configured"}
+    else:
+        results["tts"] = results["engines"].get(TTS_DEFAULT_ENGINE, {"status": "not_configured"})
+
+    def _ok(entry) -> bool:
+        return isinstance(entry, dict) and entry.get("status") in ("ok", "not_configured")
+
+    all_ok = _ok(results["whisper"]) and _ok(results["tts"])
 
     return JSONResponse(
         status_code=200 if all_ok else 503,

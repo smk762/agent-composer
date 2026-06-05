@@ -1,17 +1,22 @@
-"""Wyoming TTS bridge → XTTS sidecar.
+"""Wyoming TTS bridge → XTTS-contract sidecar (XTTS-v2 or Miso).
 
 Speaks the Wyoming protocol on a TCP port and translates `synthesize` requests
-into calls to the XTTS HTTP sidecar's streaming endpoint
-(`POST /synthesise/stream`, raw 24 kHz mono float32 PCM). The float samples are
-converted to signed 16-bit and re-emitted as Wyoming AudioChunks so Home
-Assistant can consume them as a normal `tts` engine.
+into calls to a TTS sidecar's streaming endpoint (`POST /synthesise/stream`,
+raw 24 kHz mono float32 PCM). The float samples are converted to signed 16-bit
+and re-emitted as Wyoming AudioChunks so Home Assistant can consume them as a
+normal `tts` engine.
+
+The bridge is engine-agnostic: it targets whatever sidecar ``TTS_URL`` (or the
+legacy ``XTTS_URL``) points at, and the advertised program name/attribution are
+configurable, so one module powers both the `wyoming-xtts` and `wyoming-miso`
+services. Both XTTS-v2 and Miso expose the same 24 kHz float32 stream contract.
 
 Voices advertised in the Wyoming `info` response:
-  * one built-in XTTS studio speaker (``XTTS_DEFAULT_SPEAKER``)
+  * one built-in studio speaker (``XTTS_DEFAULT_SPEAKER``)
   * every stored clone from ``GET /clones`` as ``clone:<companion_id>``
 
 When HA selects a ``clone:<id>`` voice the bridge sends ``voice_clone_id`` to
-XTTS; any other voice name is forwarded as a built-in ``speaker``.
+the sidecar; any other voice name is forwarded as a built-in ``speaker``.
 """
 
 from __future__ import annotations
@@ -31,9 +36,21 @@ from wyoming.info import Attribution, Describe, Info, TtsProgram, TtsVoice
 from wyoming.server import AsyncEventHandler, AsyncServer
 from wyoming.tts import Synthesize
 
-_LOGGER = logging.getLogger("wyoming_xtts")
+# Engine identity (advertised to Home Assistant). Defaults describe XTTS so the
+# existing wyoming-xtts service is unchanged; the wyoming-miso service overrides
+# these via env.
+PROGRAM_NAME = os.getenv("WYOMING_TTS_PROGRAM_NAME", "xtts").strip() or "xtts"
+PROGRAM_DESC = os.getenv(
+    "WYOMING_TTS_PROGRAM_DESC", "XTTS-v2 (zero-shot voice cloning + streaming)"
+)
+ATTRIBUTION_NAME = os.getenv("WYOMING_TTS_ATTRIBUTION_NAME", "Coqui XTTS-v2")
+ATTRIBUTION_URL = os.getenv("WYOMING_TTS_ATTRIBUTION_URL", "https://github.com/coqui-ai/TTS")
 
-XTTS_URL = os.getenv("XTTS_URL", "http://xtts:8031").rstrip("/")
+_LOGGER = logging.getLogger(f"wyoming_{PROGRAM_NAME}")
+
+# Upstream sidecar URL. Prefer the engine-neutral TTS_URL; fall back to the
+# legacy XTTS_URL for back-compat with the original wyoming-xtts config.
+XTTS_URL = (os.getenv("TTS_URL") or os.getenv("XTTS_URL") or "http://xtts:8031").rstrip("/")
 DEFAULT_SPEAKER = os.getenv("XTTS_DEFAULT_SPEAKER", "Claribel Dervla")
 DEFAULT_VOICE = os.getenv("WYOMING_TTS_DEFAULT_VOICE", "").strip()
 DEFAULT_LANGUAGE = os.getenv("WYOMING_TTS_LANGUAGE", "en").strip() or "en"
@@ -57,7 +74,7 @@ SUPPORTED_LANGS = [
 
 
 def _attribution() -> Attribution:
-    return Attribution(name="Coqui XTTS-v2", url="https://github.com/coqui-ai/TTS")
+    return Attribution(name=ATTRIBUTION_NAME, url=ATTRIBUTION_URL)
 
 
 def _voice(name: str, description: str) -> TtsVoice:
@@ -135,7 +152,7 @@ async def _build_info() -> Info:
         names = [DEFAULT_SPEAKER, *names]
 
     voices: list[TtsVoice] = [
-        _voice(name, f"XTTS studio speaker ({name})") for name in names
+        _voice(name, f"{ATTRIBUTION_NAME} studio speaker ({name})") for name in names
     ]
     for clone in await _fetch_clones():
         cid = (clone.get("companion_id") or "").strip()
@@ -147,8 +164,8 @@ async def _build_info() -> Info:
     return Info(
         tts=[
             TtsProgram(
-                name="xtts",
-                description="XTTS-v2 (zero-shot voice cloning + streaming)",
+                name=PROGRAM_NAME,
+                description=PROGRAM_DESC,
                 attribution=_attribution(),
                 installed=True,
                 version=None,
@@ -240,13 +257,13 @@ class XttsEventHandler(AsyncEventHandler):
 
 
 async def main() -> None:
-    parser = argparse.ArgumentParser(description="Wyoming TTS bridge for XTTS")
+    parser = argparse.ArgumentParser(description=f"Wyoming TTS bridge for {PROGRAM_NAME}")
     parser.add_argument("--uri", default=os.getenv("WYOMING_URI", "tcp://0.0.0.0:10200"))
     parser.add_argument("--log-level", default=os.getenv("LOG_LEVEL", "INFO"))
     args = parser.parse_args()
 
     logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
-    _LOGGER.info("Wyoming XTTS bridge listening on %s → %s", args.uri, XTTS_URL)
+    _LOGGER.info("Wyoming %s bridge listening on %s → %s", PROGRAM_NAME, args.uri, XTTS_URL)
 
     server = AsyncServer.from_uri(args.uri)
     await server.run(partial(XttsEventHandler))

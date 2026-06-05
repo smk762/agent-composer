@@ -1,6 +1,7 @@
 import logging
 import os
 from datetime import timezone
+from typing import Optional
 
 def _env_int(name: str, default: int) -> int:
     try:
@@ -51,11 +52,71 @@ MODERNBERT_URL = os.getenv("MODERNBERT_URL", "http://modernbert:7998")
 INFINITY_URL = os.getenv("INFINITY_URL", "http://infinity:7997").rstrip("/")
 
 # ── Voice services ────────────────────────────────────────────────────────────
-# Defaults point at the whisper/tts containers in the same compose network.
-# Set to empty string to hide voice features in the UI.
+# STT (Whisper) is a single sidecar. TTS is a *registry* of one or more engines
+# that all speak the XTTS sidecar HTTP contract (/synthesise, /synthesise/stream,
+# /clone-voice, /clones, /speakers, /health, /analyze-clips). Each engine is
+# selectable per request and one is the default — so the local XTTS GPU sidecar
+# and a remote Miso host (e.g. morpheus) can coexist and be picked from the UI,
+# the API, or the Wyoming/Home Assistant bridges.
 WHISPER_URL = os.getenv("WHISPER_URL", "http://whisper:8030").rstrip("/")
-TTS_URL = os.getenv("TTS_URL", "http://tts:8031").rstrip("/")
 VOICE_TIMEOUT = _env_int("VOICE_TIMEOUT", 30)
+
+
+def _clean_url(value: str) -> str:
+    return (value or "").strip().rstrip("/")
+
+
+# Per-engine base URLs. Empty → that engine is not available.
+XTTS_TTS_URL = _clean_url(os.getenv("XTTS_TTS_URL", "http://xtts:8031"))
+MISO_TTS_URL = _clean_url(os.getenv("MISO_TTS_URL", ""))
+# Legacy single-engine knob (back-compat / rollback to the Qwen sidecar).
+_LEGACY_TTS_URL = _clean_url(os.getenv("TTS_URL", ""))
+
+# Human-friendly labels shown in the UI engine picker.
+TTS_ENGINE_LABELS = {
+    "miso": "Miso One",
+    "xtts": "XTTS-v2",
+    "tts": "Qwen3-TTS (legacy)",
+}
+
+# Build the registry in a stable, human-meaningful order.
+TTS_ENGINES: dict[str, str] = {}
+for _name, _url in (("xtts", XTTS_TTS_URL), ("miso", MISO_TTS_URL)):
+    if _url:
+        TTS_ENGINES[_name] = _url
+# A custom TTS_URL that isn't already one of the named engines is registered as
+# its own "tts" engine (the legacy Qwen sidecar) so rollback keeps working.
+if _LEGACY_TTS_URL and _LEGACY_TTS_URL not in TTS_ENGINES.values():
+    TTS_ENGINES["tts"] = _LEGACY_TTS_URL
+
+# Resolve the default engine: explicit env wins, else prefer miso, then xtts,
+# then whatever was configured first.
+_requested_default = os.getenv("TTS_DEFAULT_ENGINE", "").strip().lower()
+if _requested_default and _requested_default in TTS_ENGINES:
+    TTS_DEFAULT_ENGINE = _requested_default
+elif "miso" in TTS_ENGINES:
+    TTS_DEFAULT_ENGINE = "miso"
+elif "xtts" in TTS_ENGINES:
+    TTS_DEFAULT_ENGINE = "xtts"
+else:
+    TTS_DEFAULT_ENGINE = next(iter(TTS_ENGINES), "")
+
+# Back-compat export: many call sites import TTS_URL directly. Point it at the
+# default engine's URL so they transparently use the chosen default.
+TTS_URL = TTS_ENGINES.get(TTS_DEFAULT_ENGINE, _LEGACY_TTS_URL or XTTS_TTS_URL)
+
+
+def tts_engine_url(engine: Optional[str] = None) -> str:
+    """Resolve a TTS engine name to its base URL.
+
+    An unknown or empty engine falls back to the default engine. Returns "" only
+    when no TTS engine is configured at all.
+    """
+    if engine:
+        url = TTS_ENGINES.get(engine.strip().lower())
+        if url:
+            return url
+    return TTS_URL
 
 # ── Agentic repair pipeline ────────────────────────────────────────────────────
 # URL of the ai-code-auditor audit API — used for diff-audit validation between
@@ -91,4 +152,8 @@ CHAT_DB_URL = _normalize_db_url(_raw_db_url)
 log.info(
     "config: ollama=%s model=%s rag=%s qdrant=%s log_level=%s dev_auth_bypass=%s timeout=%ds",
     OLLAMA_URL, CHAT_MODEL, RAG_ENABLED, QDRANT_URL, LOG_LEVEL, DEV_AUTH_BYPASS, OLLAMA_TIMEOUT,
+)
+log.info(
+    "config: tts_engines=%s default=%s whisper=%s",
+    list(TTS_ENGINES) or "none", TTS_DEFAULT_ENGINE or "none", WHISPER_URL or "none",
 )

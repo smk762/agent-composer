@@ -239,10 +239,16 @@ services:
       # audit-api lives in a separate Docker network (ai-code-auditor_default).
       - AUDIT_API_URL=${AUDIT_API_URL:-http://host.docker.internal:8765}
       - ECOSYSTEM_CONFIG_PATH=${ECOSYSTEM_CONFIG_PATH:-/home/smk/ai-code-auditor/config/ecosystem.yaml}
-      # Voice services (whisper + tts containers on this host)
+      # Voice services. STT is Whisper; TTS is a registry of selectable engines.
       - WHISPER_URL=${WHISPER_URL:-http://whisper:8030}
-      # Default TTS engine is the XTTS-v2 sidecar (cloning + streaming). Point at
-      # the legacy Qwen sidecar with TTS_URL=http://tts:8031 to roll back.
+      # TTS engines (all speak the XTTS sidecar contract). XTTS is the local GPU
+      # sidecar; MISO_TTS_URL points at the remote Miso host (e.g. morpheus) and
+      # is empty (disabled) until set. TTS_DEFAULT_ENGINE picks the default;
+      # set it to xtts to roll back if Miso is unavailable. The legacy TTS_URL
+      # is still honoured as a fallback engine.
+      - XTTS_TTS_URL=${XTTS_TTS_URL:-http://xtts:8031}
+      - MISO_TTS_URL=${MISO_TTS_URL:-}
+      - TTS_DEFAULT_ENGINE=${TTS_DEFAULT_ENGINE:-xtts}
       - TTS_URL=${TTS_URL:-http://xtts:8031}
       - VOICE_TIMEOUT=${VOICE_TIMEOUT:-180}
     extra_hosts:
@@ -468,6 +474,42 @@ services:
     depends_on: [xtts]
     ports:
       - "${WYOMING_TTS_BIND_IP:-0.0.0.0}:${WYOMING_TTS_PORT:-10200}:10200"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 10200), 3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks: [internal]
+
+  # Wyoming TTS bridge for Miso — exposes the remote Miso sidecar (e.g. on
+  # morpheus) as a *second* Home Assistant `tts` engine on its own port, so HA
+  # can pick Miso or XTTS independently. Same generic bridge module; only the
+  # upstream URL, advertised program name, and port differ. Disabled unless
+  # MISO_TTS_URL is set (the bridge will just fail its healthcheck otherwise).
+  wyoming-miso:
+    build:
+      context: ./voice-stack
+      dockerfile: Dockerfile.wyoming
+    container_name: wyoming-miso
+    restart: unless-stopped
+    command: ["python", "-m", "wyoming_bridge.xtts_tts"]
+    environment:
+      - TTS_URL=${WYOMING_MISO_URL:-${MISO_TTS_URL:-}}
+      - WYOMING_TTS_PROGRAM_NAME=miso
+      - WYOMING_TTS_PROGRAM_DESC=Miso One (expressive TTS + one-shot cloning)
+      - WYOMING_TTS_ATTRIBUTION_NAME=Miso One
+      - WYOMING_TTS_ATTRIBUTION_URL=https://github.com/MisoLabsAI/MisoTTS
+      - XTTS_DEFAULT_SPEAKER=${MISO_DEFAULT_SPEAKER:-0}
+      - WYOMING_TTS_DEFAULT_VOICE=${WYOMING_MISO_DEFAULT_VOICE:-}
+      - WYOMING_TTS_LANGUAGE=${WYOMING_TTS_LANGUAGE:-en}
+      - WYOMING_TTS_LIST_SPEAKERS=${WYOMING_MISO_LIST_SPEAKERS:-0}
+      - WYOMING_URI=tcp://0.0.0.0:10200
+      - LOG_LEVEL=${WYOMING_LOG_LEVEL:-INFO}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${WYOMING_MISO_BIND_IP:-0.0.0.0}:${WYOMING_MISO_PORT:-10201}:10200"
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 10200), 3).close()"]
       interval: 30s
