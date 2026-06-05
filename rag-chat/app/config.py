@@ -105,6 +105,19 @@ else:
 # default engine's URL so they transparently use the chosen default.
 TTS_URL = TTS_ENGINES.get(TTS_DEFAULT_ENGINE, _LEGACY_TTS_URL or XTTS_TTS_URL)
 
+# Fallback engine used when the *default* engine is unreachable (e.g. a remote
+# Miso host is down). Only applies to requests that don't name an engine — an
+# explicitly selected engine is always honoured, never silently switched.
+# Explicit env wins; otherwise auto-fall back to local XTTS when the default is
+# something else (so "prefer Miso, fall back to XTTS" works out of the box).
+_requested_fallback = os.getenv("TTS_FALLBACK_ENGINE", "").strip().lower()
+if _requested_fallback in TTS_ENGINES and _requested_fallback != TTS_DEFAULT_ENGINE:
+    TTS_FALLBACK_ENGINE = _requested_fallback
+elif not _requested_fallback and TTS_DEFAULT_ENGINE != "xtts" and "xtts" in TTS_ENGINES:
+    TTS_FALLBACK_ENGINE = "xtts"
+else:
+    TTS_FALLBACK_ENGINE = ""
+
 
 def tts_engine_url(engine: Optional[str] = None) -> str:
     """Resolve a TTS engine name to its base URL.
@@ -117,6 +130,31 @@ def tts_engine_url(engine: Optional[str] = None) -> str:
         if url:
             return url
     return TTS_URL
+
+
+def tts_engine_chain(engine: Optional[str] = None) -> list:
+    """Ordered ``(name, url)`` candidates to try for a request.
+
+    A request that explicitly names a known engine uses *only* that engine (no
+    surprise fallback). A request relying on the default gets the default engine
+    followed by the configured fallback engine (if any), so callers can retry
+    the next candidate when the preferred host is unreachable.
+    """
+    if engine:
+        name = engine.strip().lower()
+        if name in TTS_ENGINES:
+            return [(name, TTS_ENGINES[name])]
+        # Unknown engine name → treat as "use the default chain".
+    chain = []
+    if TTS_DEFAULT_ENGINE in TTS_ENGINES:
+        chain.append((TTS_DEFAULT_ENGINE, TTS_ENGINES[TTS_DEFAULT_ENGINE]))
+    if (
+        TTS_FALLBACK_ENGINE
+        and TTS_FALLBACK_ENGINE in TTS_ENGINES
+        and TTS_FALLBACK_ENGINE != TTS_DEFAULT_ENGINE
+    ):
+        chain.append((TTS_FALLBACK_ENGINE, TTS_ENGINES[TTS_FALLBACK_ENGINE]))
+    return chain
 
 # ── Agentic repair pipeline ────────────────────────────────────────────────────
 # URL of the ai-code-auditor audit API — used for diff-audit validation between
@@ -154,6 +192,7 @@ log.info(
     OLLAMA_URL, CHAT_MODEL, RAG_ENABLED, QDRANT_URL, LOG_LEVEL, DEV_AUTH_BYPASS, OLLAMA_TIMEOUT,
 )
 log.info(
-    "config: tts_engines=%s default=%s whisper=%s",
-    list(TTS_ENGINES) or "none", TTS_DEFAULT_ENGINE or "none", WHISPER_URL or "none",
+    "config: tts_engines=%s default=%s fallback=%s whisper=%s",
+    list(TTS_ENGINES) or "none", TTS_DEFAULT_ENGINE or "none",
+    TTS_FALLBACK_ENGINE or "none", WHISPER_URL or "none",
 )

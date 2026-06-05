@@ -36,11 +36,18 @@ from app.config import (
     TTS_DEFAULT_ENGINE,
     TTS_ENGINE_LABELS,
     TTS_ENGINES,
+    TTS_FALLBACK_ENGINE,
     VOICE_TIMEOUT,
     WHISPER_URL,
     log,
+    tts_engine_chain,
     tts_engine_url,
 )
+
+# Connection-level failures that mean "this engine/host is down" — safe to retry
+# on the next engine in the fallback chain. HTTP error *responses* (4xx/5xx) are
+# not retried: the engine is up and deliberately rejected the request.
+_UNREACHABLE = (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.PoolTimeout)
 
 router = APIRouter(prefix="/api/voice", tags=["voice"])
 
@@ -110,10 +117,12 @@ async def engines():
                 "id": name,
                 "label": TTS_ENGINE_LABELS.get(name, name),
                 "default": name == TTS_DEFAULT_ENGINE,
+                "fallback": name == TTS_FALLBACK_ENGINE,
             }
             for name in TTS_ENGINES
         ],
         "default": TTS_DEFAULT_ENGINE,
+        "fallback": TTS_FALLBACK_ENGINE or None,
     }
 
 
@@ -149,28 +158,36 @@ async def transcribe(
 
 @router.post("/synthesise")
 async def synthesise(req: SynthesiseRequest):
-    """Proxy text to the selected TTS engine."""
+    """Proxy text to the selected TTS engine (falling back if it's unreachable)."""
     _require_tts()
-    base = _tts_base(req.engine)
+    chain = tts_engine_chain(req.engine)
+    if not chain:
+        raise HTTPException(503, detail="No TTS engine configured")
     payload = req.model_dump(exclude_none=True, exclude=_PROXY_ONLY_FIELDS)
 
     t0 = time.monotonic()
-    try:
-        async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
-            r = await client.post(f"{base}/synthesise", json=payload)
-            r.raise_for_status()
-    except httpx.ConnectError:
-        raise HTTPException(503, detail="TTS server unreachable")
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(exc.response.status_code, detail=exc.response.text)
+    last_exc: Optional[Exception] = None
+    for name, base in chain:
+        try:
+            async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
+                r = await client.post(f"{base}/synthesise", json=payload)
+                r.raise_for_status()
+        except _UNREACHABLE as exc:
+            last_exc = exc
+            log.warning("voice: synthesise engine=%s unreachable, trying next: %s", name, exc)
+            continue
+        except httpx.HTTPStatusError as exc:
+            raise HTTPException(exc.response.status_code, detail=exc.response.text)
 
-    elapsed_ms = int((time.monotonic() - t0) * 1000)
-    data = r.json()
-    log.info(
-        "voice: synthesise engine=%s elapsed=%dms duration=%.1fs",
-        req.engine or TTS_DEFAULT_ENGINE, elapsed_ms, data.get("duration", 0),
-    )
-    return data
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        data = r.json()
+        log.info(
+            "voice: synthesise engine=%s elapsed=%dms duration=%.1fs",
+            name, elapsed_ms, data.get("duration", 0),
+        )
+        return data
+
+    raise HTTPException(503, detail=f"No reachable TTS engine ({last_exc})")
 
 
 @router.post("/synthesise/stream")
@@ -181,7 +198,9 @@ async def synthesise_stream(req: SynthesiseStreamRequest):
     or an error/done sentinel.
     """
     _require_tts()
-    base = _tts_base(req.engine)
+    chain = tts_engine_chain(req.engine)
+    if not chain:
+        raise HTTPException(503, detail="No TTS engine configured")
 
     sentences = [s.strip() for s in _SENTENCE_RE.split(req.text) if s.strip()]
     if not sentences:
@@ -190,24 +209,38 @@ async def synthesise_stream(req: SynthesiseStreamRequest):
     base_payload = req.model_dump(exclude_none=True, exclude={"text", *_PROXY_ONLY_FIELDS})
 
     async def event_stream():
+        # Resolve a reachable engine on the first chunk (walking the fallback
+        # chain), then stay on it for the remaining sentences so a stream never
+        # mixes voices mid-utterance.
+        resolved: Optional[tuple] = None
         for i, sentence in enumerate(sentences):
             payload = {**base_payload, "text": sentence}
-            try:
-                async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
-                    r = await client.post(f"{base}/synthesise", json=payload)
-                    r.raise_for_status()
-                data = r.json()
-                data["chunk_index"] = i
-                data["text"] = sentence
-                yield f"data: {json.dumps(data)}\n\n"
-            except httpx.ConnectError:
-                yield f"data: {json.dumps({'error': 'TTS server unreachable', 'chunk_index': i})}\n\n"
-                return
-            except httpx.HTTPStatusError as exc:
-                yield f"data: {json.dumps({'error': exc.response.text, 'chunk_index': i})}\n\n"
-                return
-            except Exception as exc:
-                yield f"data: {json.dumps({'error': str(exc), 'chunk_index': i})}\n\n"
+            candidates = [resolved] if resolved else list(chain)
+            sent = False
+            for name, base in candidates:
+                try:
+                    async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
+                        r = await client.post(f"{base}/synthesise", json=payload)
+                        r.raise_for_status()
+                    resolved = (name, base)
+                    data = r.json()
+                    data["chunk_index"] = i
+                    data["text"] = sentence
+                    data["engine"] = name
+                    yield f"data: {json.dumps(data)}\n\n"
+                    sent = True
+                    break
+                except _UNREACHABLE as exc:
+                    log.warning("voice: stream engine=%s unreachable, trying next: %s", name, exc)
+                    continue
+                except httpx.HTTPStatusError as exc:
+                    yield f"data: {json.dumps({'error': exc.response.text, 'chunk_index': i})}\n\n"
+                    return
+                except Exception as exc:
+                    yield f"data: {json.dumps({'error': str(exc), 'chunk_index': i})}\n\n"
+                    return
+            if not sent:
+                yield f"data: {json.dumps({'error': 'No reachable TTS engine', 'chunk_index': i})}\n\n"
                 return
         yield "data: [DONE]\n\n"
 
@@ -225,21 +258,31 @@ async def synthesise_pcm(req: SynthesiseRequest):
     sidecar returns 404, which surfaces here as an upstream error.
     """
     _require_tts()
-    base = _tts_base(req.engine)
+    chain = tts_engine_chain(req.engine)
+    if not chain:
+        raise HTTPException(503, detail="No TTS engine configured")
 
     payload = req.model_dump(exclude_none=True, exclude=_PROXY_ONLY_FIELDS)
+
+    # Open the upstream stream, walking the fallback chain on connection errors.
     client = httpx.AsyncClient(timeout=VOICE_TIMEOUT)
-    try:
-        upstream_req = client.build_request(
-            "POST", f"{base}/synthesise/stream", json=payload
-        )
-        upstream = await client.send(upstream_req, stream=True)
-    except httpx.ConnectError:
+    upstream = None
+    last_exc: Optional[Exception] = None
+    for name, base in chain:
+        try:
+            upstream_req = client.build_request("POST", f"{base}/synthesise/stream", json=payload)
+            upstream = await client.send(upstream_req, stream=True)
+            break
+        except _UNREACHABLE as exc:
+            last_exc = exc
+            log.warning("voice: pcm engine=%s unreachable, trying next: %s", name, exc)
+            continue
+        except Exception:
+            await client.aclose()
+            raise
+    if upstream is None:
         await client.aclose()
-        raise HTTPException(503, detail="TTS server unreachable")
-    except Exception:
-        await client.aclose()
-        raise
+        raise HTTPException(503, detail=f"No reachable TTS engine ({last_exc})")
 
     if upstream.status_code != 200:
         body = await upstream.aread()

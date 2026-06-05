@@ -249,6 +249,9 @@ services:
       - XTTS_TTS_URL=${XTTS_TTS_URL:-http://xtts:8031}
       - MISO_TTS_URL=${MISO_TTS_URL:-}
       - TTS_DEFAULT_ENGINE=${TTS_DEFAULT_ENGINE:-xtts}
+      # Engine used (for default-path requests only) when the default engine is
+      # unreachable. Empty auto-selects xtts when the default is something else.
+      - TTS_FALLBACK_ENGINE=${TTS_FALLBACK_ENGINE:-}
       - TTS_URL=${TTS_URL:-http://xtts:8031}
       - VOICE_TIMEOUT=${VOICE_TIMEOUT:-180}
     extra_hosts:
