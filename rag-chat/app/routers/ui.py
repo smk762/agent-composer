@@ -2894,7 +2894,7 @@ def voice_ui():
     body = """
     <div class="card" style="max-width:1000px;">
       <h1>Voice</h1>
-      <p class="sub">Speech-to-text (Whisper) and text-to-speech (XTTS-v2) via Dragon.</p>
+      <p class="sub">Speech-to-text (Whisper) and text-to-speech. Pick a TTS engine (XTTS-v2 or Miso) from the dropdown.</p>
       <div id="healthBanner" style="margin-bottom:12px;"></div>
 
       <div class="voice-grid">
@@ -2925,6 +2925,7 @@ def voice_ui():
 
           <input id="ttsVoiceDesign" placeholder="Voice design — e.g. &quot;female, warm, young, light British accent&quot; (overrides speaker)" style="width:100%;margin-bottom:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:6px 10px;font-size:13px;box-sizing:border-box;" />
           <div class="tts-controls">
+            <select id="ttsEngine" title="TTS engine"><option value="">Engine…</option></select>
             <select id="ttsSpeaker"><option value="">Loading speakers...</option></select>
             <input id="ttsInstruction" placeholder="Style: e.g. &quot;speak warmly and slowly&quot;" style="flex:1;min-width:120px;" />
             <select id="ttsLang">
@@ -2961,6 +2962,7 @@ def voice_ui():
       const copyBtn = document.getElementById("copyTranscript");
       const ttsText = document.getElementById("ttsText");
       const ttsVoiceDesign = document.getElementById("ttsVoiceDesign");
+      const ttsEngine = document.getElementById("ttsEngine");
       const ttsSpeaker = document.getElementById("ttsSpeaker");
       const ttsInstruction = document.getElementById("ttsInstruction");
       const ttsLang = document.getElementById("ttsLang");
@@ -2993,42 +2995,70 @@ def voice_ui():
           healthBanner.innerHTML = '<div style="padding:8px 12px;border-radius:8px;font-size:12px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.2);">Voice services unreachable</div>';
         });
 
-      // ── Load speakers ──
-      fetch("/api/voice/speakers")
+      // ── Load engines, then speakers + clones for the selected engine ──
+      function currentEngine() { return ttsEngine.value || ""; }
+
+      function loadVoices(engine) {
+        const q = engine ? ("?engine=" + encodeURIComponent(engine)) : "";
+        ttsSpeaker.innerHTML = '<option value="">Loading speakers...</option>';
+        fetch("/api/voice/speakers" + q)
+          .then(r => r.json())
+          .then(d => {
+            const sel = ttsSpeaker;
+            sel.innerHTML = '';
+            const list = d.speakers || [];
+            list.forEach((s, i) => {
+              const o = document.createElement("option");
+              o.value = (typeof s === "string") ? s : s.id;
+              o.textContent = (typeof s === "string") ? s : s.name;
+              if (i === 0) o.selected = true;
+              sel.appendChild(o);
+            });
+            if (!list.length) sel.innerHTML = '<option value="">No speakers available</option>';
+          })
+          .catch(() => { ttsSpeaker.innerHTML = '<option value="">Failed to load speakers</option>'; })
+          .finally(() => {
+            // Prepend any cloned voices (value prefixed "clone:" → sent as voice_clone_id).
+            fetch("/api/voice/clones" + q)
+              .then(r => r.json())
+              .then(d => {
+                const clones = d.clones || [];
+                if (!clones.length) return;
+                const grp = document.createElement("optgroup");
+                grp.label = "Cloned voices";
+                clones.forEach(c => {
+                  const o = document.createElement("option");
+                  o.value = "clone:" + c.voice_clone_id;
+                  o.textContent = (c.name || c.companion_id) + " (clone)";
+                  grp.appendChild(o);
+                });
+                ttsSpeaker.insertBefore(grp, ttsSpeaker.firstChild);
+              })
+              .catch(() => {});
+          });
+      }
+
+      fetch("/api/voice/engines")
         .then(r => r.json())
         .then(d => {
-          const sel = ttsSpeaker;
-          sel.innerHTML = '';
-          const list = d.speakers || [];
-          list.forEach((s, i) => {
+          const list = d.engines || [];
+          if (list.length <= 1) {
+            // Single engine — hide the picker, just load its voices.
+            ttsEngine.style.display = "none";
+          }
+          ttsEngine.innerHTML = '';
+          list.forEach(e => {
             const o = document.createElement("option");
-            o.value = (typeof s === "string") ? s : s.id;
-            o.textContent = (typeof s === "string") ? s : s.name;
-            if (i === 0) o.selected = true;
-            sel.appendChild(o);
+            o.value = e.id;
+            o.textContent = e.label + (e.default ? " (default)" : "");
+            if (e.default) o.selected = true;
+            ttsEngine.appendChild(o);
           });
-          if (!list.length) sel.innerHTML = '<option value="">No speakers available</option>';
+          loadVoices(currentEngine());
         })
-        .catch(() => { ttsSpeaker.innerHTML = '<option value="">Failed to load speakers</option>'; })
-        .finally(() => {
-          // Prepend any cloned voices (value prefixed "clone:" → sent as voice_clone_id).
-          fetch("/api/voice/clones")
-            .then(r => r.json())
-            .then(d => {
-              const clones = d.clones || [];
-              if (!clones.length) return;
-              const grp = document.createElement("optgroup");
-              grp.label = "Cloned voices";
-              clones.forEach(c => {
-                const o = document.createElement("option");
-                o.value = "clone:" + c.voice_clone_id;
-                o.textContent = (c.name || c.companion_id) + " (clone)";
-                grp.appendChild(o);
-              });
-              ttsSpeaker.insertBefore(grp, ttsSpeaker.firstChild);
-            })
-            .catch(() => {});
-        });
+        .catch(() => { ttsEngine.style.display = "none"; loadVoices(""); });
+
+      ttsEngine.addEventListener("change", () => loadVoices(currentEngine()));
 
       // ── Recording ──
       function startRecording() {
@@ -3114,6 +3144,7 @@ def voice_ui():
       // ── TTS ──
       function buildPayload() {
         const p = { text: ttsText.value.trim(), language: ttsLang.value };
+        if (currentEngine()) p.engine = currentEngine();
         if (ttsSpeaker.value.startsWith("clone:")) {
           p.voice_clone_id = ttsSpeaker.value.slice("clone:".length);
         } else if (ttsSpeaker.value) {
@@ -3422,7 +3453,12 @@ def voice_clone_ui():
     body = """
     <div class="card" style="max-width:1040px;">
       <h1>Voice Cloning</h1>
-      <p class="sub">Clone a voice with XTTS-v2. One clean 6&nbsp;s clip works; several varied clips (different sentences, consistent mic) average out noise for a more robust voice.</p>
+      <p class="sub">Clone a voice from reference clips. <b>XTTS-v2</b> averages several varied clips (different sentences, consistent mic) for a robust voice; <b>Miso One</b> is one-shot — one clean, expressive clip is best. See the <a href="https://github.com/smk762/agent-composer/blob/dev/voice-stack/VOICE_CLONING.md" target="_blank" rel="noopener">cloning guide</a> for optimal input.</p>
+      <div class="vc-actions" style="margin:0 0 10px;">
+        <label class="clip-meta" for="vcEngine">Engine</label>
+        <select class="vc-field" id="vcEngine" style="width:auto;"><option value="">…</option></select>
+        <span class="clip-meta" id="vcEngineHint"></span>
+      </div>
       <div id="healthBanner" style="margin-bottom:12px;"></div>
 
       <div class="vc-grid">
@@ -3522,10 +3558,49 @@ def voice_clone_ui():
       const scoreSummary = document.getElementById("scoreSummary");
       const importInput = document.getElementById("importInput");
       const importStatus = document.getElementById("importStatus");
+      const vcEngine = document.getElementById("vcEngine");
+      const vcEngineHint = document.getElementById("vcEngineHint");
 
       // clips: { blob, url, seconds, name, selected, scored, score, rank, snr_db, speech_seconds, clip_ratio, consistency, flags }
       const clips = [];
       let scoreThreshold = 60;
+
+      // ── Engine selection (governs scoring, cloning, listing + the tester) ──
+      function currentEngine() { return vcEngine.value || ""; }
+      function engineQuery(extra) {
+        const e = currentEngine();
+        const parts = [];
+        if (e) parts.push("engine=" + encodeURIComponent(e));
+        if (extra) parts.push(extra);
+        return parts.length ? ("?" + parts.join("&")) : "";
+      }
+      const ENGINE_HINTS = {
+        miso: "Miso is one-shot — use one clean, expressive ~10s clip.",
+        xtts: "XTTS averages clips — 6–60s of varied, single-speaker audio.",
+      };
+      function applyEngineHint() {
+        vcEngineHint.textContent = ENGINE_HINTS[currentEngine()] || "";
+      }
+
+      fetch("/api/voice/engines")
+        .then(r => r.json())
+        .then(d => {
+          const list = d.engines || [];
+          vcEngine.innerHTML = '';
+          list.forEach(e => {
+            const o = document.createElement("option");
+            o.value = e.id;
+            o.textContent = e.label + (e.default ? " (default)" : "");
+            if (e.default) o.selected = true;
+            vcEngine.appendChild(o);
+          });
+          if (list.length <= 1) vcEngine.style.display = "none";
+          applyEngineHint();
+          loadClones();
+        })
+        .catch(() => { vcEngine.style.display = "none"; loadClones(); });
+
+      vcEngine.addEventListener("change", () => { applyEngineHint(); loadClones(); });
 
       // ── Health ──
       fetch("/api/voice/health").then(r => r.json()).then(d => {
@@ -3707,7 +3782,7 @@ def voice_clone_ui():
         scoreBtn.textContent = "Scoring…";
         scoreSummary.textContent = "Scoring " + clips.length + " clip(s) (GPU may need to wake)…";
         try {
-          const r = await fetch("/api/voice/analyze", { method: "POST", body: fd });
+          const r = await fetch("/api/voice/analyze" + engineQuery(), { method: "POST", body: fd });
           if (!r.ok) { let m = "HTTP " + r.status; try { m = (await r.text()) || m; } catch (e) {} throw new Error(m); }
           const d = await r.json();
           scoreThreshold = d.threshold != null ? d.threshold : scoreThreshold;
@@ -3793,7 +3868,7 @@ def voice_clone_ui():
         createBtn.disabled = true;
         createStatus.textContent = "Cloning voice from " + chosen.length + " clip(s) (GPU may need to wake)…";
         try {
-          const r = await fetch("/api/voice/clone", { method: "POST", body: fd });
+          const r = await fetch("/api/voice/clone" + engineQuery(), { method: "POST", body: fd });
           if (!r.ok) { let m = "HTTP " + r.status; try { m = (await r.text()) || m; } catch (e) {} throw new Error(m); }
           const d = await r.json();
           createStatus.textContent = 'Created "' + (d.name || name) + '" (' + (d.num_clips || chosen.length) + ' clips). Loaded into the tester.';
@@ -3809,7 +3884,7 @@ def voice_clone_ui():
       // ── Saved clones ──
       async function loadClones(selectId) {
         try {
-          const r = await fetch("/api/voice/clones");
+          const r = await fetch("/api/voice/clones" + engineQuery());
           const d = await r.json();
           const list = d.clones || [];
           cloneList.innerHTML = "";
@@ -3829,7 +3904,7 @@ def voice_clone_ui():
             });
             row.querySelector(".dl-btn").addEventListener("click", () => {
               const a = document.createElement("a");
-              a.href = "/api/voice/clones/" + encodeURIComponent(c.companion_id) + "/download";
+              a.href = "/api/voice/clones/" + encodeURIComponent(c.companion_id) + "/download" + engineQuery();
               a.download = (c.companion_id || "voice") + ".zip";
               document.body.appendChild(a);
               a.click();
@@ -3857,7 +3932,7 @@ def voice_clone_ui():
         fd.append("archive", file, file.name);
         importStatus.textContent = "Importing…";
         try {
-          const r = await fetch("/api/voice/clones/import", { method: "POST", body: fd });
+          const r = await fetch("/api/voice/clones/import" + engineQuery(), { method: "POST", body: fd });
           if (!r.ok) { let m = "HTTP " + r.status; try { m = (await r.text()) || m; } catch (e) {} throw new Error(m); }
           const d = await r.json();
           importStatus.textContent = 'Imported "' + (d.name || d.companion_id) + '"';
@@ -3872,7 +3947,9 @@ def voice_clone_ui():
         if (!id) { testStatus.textContent = "Select a saved voice."; return null; }
         const text = testText.value.trim();
         if (!text) { testStatus.textContent = "Type something to say."; return null; }
-        return { text, language: testLang.value, voice_clone_id: id };
+        const p = { text, language: testLang.value, voice_clone_id: id };
+        if (currentEngine()) p.engine = currentEngine();
+        return p;
       }
 
       testBtn.addEventListener("click", async () => {
@@ -3963,7 +4040,8 @@ def voice_clone_ui():
       });
 
       renderClips();
-      loadClones();
+      // Initial clone list is loaded by the engines loader above (once the
+      // selected engine is known), so no separate loadClones() call here.
     })();
     </script>
     """
