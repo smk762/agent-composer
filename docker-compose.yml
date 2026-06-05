@@ -1,20 +1,145 @@
 services:
+  # Chat database — dedicated PostgreSQL for rag-chat
+  postgres:
+    image: postgres:16-alpine
+    container_name: rag-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${PG_USER:-ragchat}
+      - POSTGRES_PASSWORD=${PG_PASSWORD:-ragchat}
+      - POSTGRES_DB=${PG_DB:-ragchat}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-ragchat}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [internal]
+
+  # Vector store — used by rag-ingest (write) and rag-chat (read)
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_BIND_IP:-127.0.0.1}:${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_BIND_IP:-127.0.0.1}:${QDRANT_GRPC_PORT:-6334}:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:6333/readyz >/dev/null 2>&1 || exit 1"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+    networks: [internal]
+
+  # S3-compatible object store — holds generated media (TTS audio + voice clone
+  # prompts) and rag-chat uploads. Published on the host so browsers can fetch
+  # TTS audio directly via S3_PUBLIC_URL; written internally via http://minio:9000.
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${S3_ACCESS_KEY_ID:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${S3_SECRET_ACCESS_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "${MINIO_BIND_IP:-0.0.0.0}:${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_BIND_IP:-0.0.0.0}:${MINIO_CONSOLE_PORT:-9001}:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 20s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    networks: [internal]
+
+  # One-shot bucket provisioner: creates the TTS + media buckets and grants
+  # anonymous read on the generated-audio prefix so browsers can play TTS output.
+  minio-setup:
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    container_name: minio-setup
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      - MINIO_ROOT_USER=${S3_ACCESS_KEY_ID:-minioadmin}
+      - MINIO_ROOT_PASSWORD=${S3_SECRET_ACCESS_KEY:-minioadmin}
+      - TTS_BUCKET=${S3_BUCKET_NAME:-voice}
+      - MEDIA_BUCKET=${MEDIA_S3_BUCKET:-uploads}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        mc mb --ignore-existing "local/$$TTS_BUCKET"
+        mc mb --ignore-existing "local/$$MEDIA_BUCKET"
+        mc anonymous set download "local/$$TTS_BUCKET/generated"
+        echo "minio buckets ready: $$TTS_BUCKET (public: generated/), $$MEDIA_BUCKET (private)"
+    networks: [internal]
+
   # Local LLM runtime (kept internal; accessed by rag-ingest and rag-chat only)
   ollama:
     image: ollama/ollama:latest
     container_name: ollama
     restart: unless-stopped
+    # GPU: requires NVIDIA Container Toolkit on the host
+    # (https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html).
+    # Remove `gpus` and NVIDIA_* env vars to run CPU-only.
+    gpus: all
     ports:
       - "${OLLAMA_BIND_IP:-127.0.0.1}:${OLLAMA_PORT:-11434}:11434"
     volumes:
       - ollama:/root/.ollama
     environment:
       - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-15m}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     healthcheck:
       test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:11434/api/tags >/dev/null 2>&1 || exit 1"]
       interval: 20s
       timeout: 5s
       retries: 10
+    networks: [internal]
+
+  # Code-audit embedder + reranker (sentence-transformers via Infinity)
+  # OpenAI-compatible /embeddings and /rerank endpoints. Used by rag-ingest in
+  # code mode and reachable from external services (e.g. ai-code-auditor) via
+  # 127.0.0.1:${INFINITY_PORT:-7997} on the host.
+  infinity:
+    build:
+      context: ./infinity-manager
+    container_name: infinity
+    restart: unless-stopped
+    gpus: all
+    environment:
+      - HF_HOME=/data/hf
+      - INFINITY_MODEL_IDS=${EMBED_MODEL_CODE:-nomic-ai/CodeRankEmbed},${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      - INFINITY_QUEUE_SIZE=${INFINITY_QUEUE_SIZE:-512}
+      - INFINITY_IDLE_TIMEOUT=${INFINITY_IDLE_TIMEOUT:-300}
+      - INFINITY_PRELOAD=${INFINITY_PRELOAD:-0}
+      - INFINITY_STARTUP_TIMEOUT=${INFINITY_STARTUP_TIMEOUT:-180}
+      - INFINITY_REQUEST_TIMEOUT=${INFINITY_REQUEST_TIMEOUT:-300}
+      - INFINITY_ENGINE=torch
+      - INFINITY_DEVICE=cuda
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - infinity_hf_cache:/data/hf
+    ports:
+      - "${INFINITY_BIND_IP:-127.0.0.1}:${INFINITY_PORT:-7997}:7997"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7997/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
     networks: [internal]
 
   # Ingestion API (the ONLY remote write entrypoint)
@@ -35,8 +160,9 @@ services:
       - INGEST_REDIS_URL=${INGEST_REDIS_URL:-}
       - INGEST_NONCE_KEY_PREFIX=${INGEST_NONCE_KEY_PREFIX:-ingest:nonce:}
       - INGEST_MAX_SKEW_S=${INGEST_MAX_SKEW_S:-300}
-      - QDRANT_URL=${QDRANT_URL:?Set QDRANT_URL to the external Qdrant endpoint, e.g. http://192.168.1.128:6333}
+      - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
       - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-15m}
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-project_docs}
       - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
       - INGEST_CHUNK_SIZE=${INGEST_CHUNK_SIZE:-1000}
@@ -46,10 +172,17 @@ services:
       - OOM_WAIT_INTERVAL_SECONDS=${OOM_WAIT_INTERVAL_SECONDS:-5}
       - INGEST_WORKER_CONCURRENCY=${INGEST_WORKER_CONCURRENCY:-1}
       - APP_RELOAD=${APP_RELOAD:-1}
+      # Code-audit retrieval (additive; defaults preserve legacy text-only behavior)
+      - RETRIEVAL_PROFILE=${RETRIEVAL_PROFILE:-text}
+      - EMBED_BACKEND=${EMBED_BACKEND:-ollama}
+      - EMBED_BACKEND_URL=${EMBED_BACKEND_URL:-http://infinity:7997}
+      - EMBED_MODEL_CODE=${EMBED_MODEL_CODE:-nomic-ai/CodeRankEmbed}
+      - HYBRID_SPARSE=${HYBRID_SPARSE:-0}
+      - QDRANT_COLLECTION_CODE=${QDRANT_COLLECTION_CODE:-code_audit}
     command: /app/init.sh
     ports:
       - "${RAG_INGEST_BIND_IP:-0.0.0.0}:${RAG_INGEST_PORT:-9050}:9050"
-    depends_on: [ollama]
+    depends_on: [ollama, qdrant]
     healthcheck:
       test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:9050/health >/dev/null 2>&1 || exit 1"]
       interval: 20s
@@ -68,16 +201,19 @@ services:
       - rag_chat_media:/data/media
     environment:
       - OLLAMA_URL=http://ollama:11434
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-15m}
+      - MODERNBERT_URL=${MODERNBERT_URL:-http://modernbert:7998}
+      - INFINITY_URL=${INFINITY_URL:-http://infinity:7997}
       - CHAT_MODEL=${CHAT_MODEL:-llama3.2:3b}
+      - GUARD_MODEL=${GUARD_MODEL:-llama-guard3:8b}
       - CHAT_SYSTEM_PROMPT=${CHAT_SYSTEM_PROMPT:-You are a helpful assistant.}
-      - QDRANT_URL=${QDRANT_URL:?Set QDRANT_URL to the external Qdrant endpoint, e.g. http://192.168.1.128:6333}
+      - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-project_docs}
       - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
       - RAG_ENABLED=${RAG_ENABLED:-1}
       - RAG_TOP_K=${RAG_TOP_K:-5}
       - RAG_MAX_CONTEXT_CHARS=${RAG_MAX_CONTEXT_CHARS:-4000}
-      - CHAT_DB_URL=${CHAT_DB_URL:-sqlite:////data/chat.db}
-      - DATABASE_URL=${DATABASE_URL:-}
+      - DATABASE_URL=postgresql://${PG_USER:-ragchat}:${PG_PASSWORD:-ragchat}@postgres:5432/${PG_DB:-ragchat}
       - CHAT_HISTORY_MAX_MSGS=${CHAT_HISTORY_MAX_MSGS:-100}
       - DEV_AUTH_BYPASS=${DEV_AUTH_BYPASS:-0}
       - DEV_DEFAULT_USER=${DEV_DEFAULT_USER:-dev@example.com}
@@ -98,15 +234,317 @@ services:
       - OOM_WAIT_INTERVAL_SECONDS=${OOM_WAIT_INTERVAL_SECONDS:-5}
       - INFERENCE_WORKER_CONCURRENCY=${INFERENCE_WORKER_CONCURRENCY:-1}
       - APP_RELOAD=${APP_RELOAD:-1}
+      # ai-code-auditor audit API — used by the repair router for diff generation,
+      # validate_patch, and git ops.  Routed via host.docker.internal because
+      # audit-api lives in a separate Docker network (ai-code-auditor_default).
+      - AUDIT_API_URL=${AUDIT_API_URL:-http://host.docker.internal:8765}
+      - ECOSYSTEM_CONFIG_PATH=${ECOSYSTEM_CONFIG_PATH:-/home/smk/ai-code-auditor/config/ecosystem.yaml}
+      # Voice services. STT is Whisper; TTS is a registry of selectable engines.
+      - WHISPER_URL=${WHISPER_URL:-http://whisper:8030}
+      # TTS engines (all speak the XTTS sidecar contract). XTTS is the local GPU
+      # sidecar; MISO_TTS_URL points at the remote Miso host (e.g. morpheus) and
+      # is empty (disabled) until set. TTS_DEFAULT_ENGINE picks the default;
+      # set it to xtts to roll back if Miso is unavailable. The legacy TTS_URL
+      # is still honoured as a fallback engine.
+      - XTTS_TTS_URL=${XTTS_TTS_URL:-http://xtts:8031}
+      - MISO_TTS_URL=${MISO_TTS_URL:-}
+      - TTS_DEFAULT_ENGINE=${TTS_DEFAULT_ENGINE:-xtts}
+      # Engine used (for default-path requests only) when the default engine is
+      # unreachable. Empty auto-selects xtts when the default is something else.
+      - TTS_FALLBACK_ENGINE=${TTS_FALLBACK_ENGINE:-}
+      - TTS_URL=${TTS_URL:-http://xtts:8031}
+      - VOICE_TIMEOUT=${VOICE_TIMEOUT:-180}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command: /app/init.sh
     ports:
       - "${RAG_CHAT_BIND_IP:-0.0.0.0}:${RAG_CHAT_PORT:-9150}:9150"
-    depends_on: [ollama]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+      qdrant:
+        condition: service_started
+      minio-setup:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:9150/health >/dev/null 2>&1 || exit 1"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9150/health', timeout=5).read()"]
       interval: 20s
       timeout: 5s
       retries: 10
+    networks: [internal]
+
+  # ModernBERT classifier sidecar — lazy-loads on first request, auto-evicts after idle.
+  # States: unloaded → cpu → gpu. /health always 200; check model_state field.
+  # Override memory policy: MODERNBERT_KEEP_ALIVE_GPU / KEEP_ALIVE_CPU (-1=forever, 0=immediate, N=seconds)
+  modernbert:
+    build:
+      context: ./modernbert
+    container_name: modernbert
+    restart: unless-stopped
+    gpus: all
+    environment:
+      - MODERNBERT_MODEL=${MODERNBERT_MODEL:-answerdotai/ModernBERT-base}
+      - MODERNBERT_TASK=${MODERNBERT_TASK:-zero_shot}
+      - MODERNBERT_DEVICE=${MODERNBERT_DEVICE:-auto}
+      - MODERNBERT_LABELS=${MODERNBERT_LABELS:-}
+      - MODERNBERT_LABELS_FILE=${MODERNBERT_LABELS_FILE:-/data/labels.json}
+      - MODERNBERT_TOP_K=${MODERNBERT_TOP_K:-10}
+      - MODERNBERT_THRESHOLD=${MODERNBERT_THRESHOLD:-0.05}
+      - MODERNBERT_MAX_LENGTH=${MODERNBERT_MAX_LENGTH:-512}
+      - MODERNBERT_POOL=${MODERNBERT_POOL:-mean}
+      - MODERNBERT_PRELOAD=${MODERNBERT_PRELOAD:-0}
+      - MODERNBERT_KEEP_ALIVE_GPU=${MODERNBERT_KEEP_ALIVE_GPU:-300}
+      - MODERNBERT_KEEP_ALIVE_CPU=${MODERNBERT_KEEP_ALIVE_CPU:-0}
+      - HF_HOME=/data/hf
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - modernbert_data:/data
+    ports:
+      - "${MODERNBERT_BIND_IP:-127.0.0.1}:${MODERNBERT_PORT:-7998}:7998"
+    healthcheck:
+      test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:7998/health >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    networks: [internal]
+
+  # faster-whisper STT — GPU-accelerated speech-to-text via CTranslate2.
+  # Lazy-loads model on first request; auto-evicts after STT_KEEP_ALIVE_GPU
+  # idle seconds to free VRAM.  API: POST /transcribe (multipart), GET /health,
+  # POST /admin/evict, POST /admin/wake.
+  whisper:
+    build:
+      context: ./voice-stack
+      dockerfile: Dockerfile.whisper
+    container_name: whisper
+    restart: unless-stopped
+    environment:
+      - STT_MODEL=${STT_MODEL:-large-v3-turbo}
+      - STT_DEVICE=${STT_DEVICE:-cuda}
+      - STT_COMPUTE_TYPE=${STT_COMPUTE_TYPE:-float16}
+      - STT_VAD_FILTER=${STT_VAD_FILTER:-1}
+      - STT_BEAM_SIZE=${STT_BEAM_SIZE:-5}
+      - STT_KEEP_ALIVE_GPU=${STT_KEEP_ALIVE_GPU:-120}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - whisper_cache:/root/.cache
+    ports:
+      - "${WHISPER_BIND_IP:-127.0.0.1}:${WHISPER_PORT:-8032}:8030"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8030/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks: [internal]
+
+  # Qwen3-TTS — GPU text-to-speech (CustomVoice + Base model variants).
+  # GPU memory managed: models lazy-load on first request, demote to CPU after
+  # TTS_KEEP_ALIVE_GPU idle seconds, fully unload after TTS_KEEP_ALIVE_CPU.
+  # API: POST /synthesise, GET /speakers, POST /clone-voice, GET /health,
+  #      POST /admin/evict, POST /admin/unload, POST /admin/wake.
+  tts:
+    build:
+      context: ./voice-stack
+      dockerfile: Dockerfile.tts
+      args:
+        TTS_MODEL_SIZE: "${TTS_MODEL_SIZE:-0.6b}"
+        TTS_TORCH_INDEX_URL: "https://download.pytorch.org/whl/cu124"
+    container_name: tts
+    restart: unless-stopped
+    environment:
+      - TTS_MODEL_SIZE=${TTS_MODEL_SIZE:-0.6b}
+      - TTS_DEVICE=${TTS_DEVICE:-cuda:0}
+      - TTS_LOAD_MODELS=${TTS_LOAD_MODELS:-both}
+      - TTS_PRELOAD=${TTS_PRELOAD:-0}
+      - TTS_KEEP_ALIVE_GPU=${TTS_KEEP_ALIVE_GPU:-120}
+      - TTS_KEEP_ALIVE_CPU=${TTS_KEEP_ALIVE_CPU:-600}
+      # Upload endpoint is internal (container → container); S3_PUBLIC_URL is the
+      # host-reachable URL handed back to the browser to fetch the rendered audio.
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://minio:9000}
+      - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
+      - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-voice}
+      - S3_PUBLIC_URL=${S3_PUBLIC_URL:-http://192.168.1.198:9000/voice}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    depends_on:
+      minio-setup:
+        condition: service_completed_successfully
+    ports:
+      - "${TTS_BIND_IP:-127.0.0.1}:${TTS_PORT:-8031}:8031"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8031/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+    networks: [internal]
+
+  # XTTS-v2 — GPU text-to-speech with zero-shot voice cloning + real streaming.
+  # Drop-in for the Qwen `tts` sidecar (same :8031 contract); the default TTS
+  # engine for rag-chat. Same three-state GPU lifecycle (lazy load, demote to
+  # CPU after XTTS_KEEP_ALIVE_GPU idle seconds, unload after XTTS_KEEP_ALIVE_CPU).
+  # API: POST /synthesise, POST /synthesise/stream, GET /speakers,
+  #      POST /clone-voice, GET /health, POST /admin/{evict,unload,wake}.
+  xtts:
+    build:
+      context: ./voice-stack
+      dockerfile: Dockerfile.xtts
+      args:
+        XTTS_TORCH_INDEX_URL: "https://download.pytorch.org/whl/cu124"
+    container_name: xtts
+    restart: unless-stopped
+    environment:
+      - XTTS_MODEL=${XTTS_MODEL:-tts_models/multilingual/multi-dataset/xtts_v2}
+      - XTTS_DEVICE=${XTTS_DEVICE:-cuda:0}
+      - XTTS_PRELOAD=${XTTS_PRELOAD:-0}
+      - XTTS_USE_DEEPSPEED=${XTTS_USE_DEEPSPEED:-0}
+      - XTTS_KEEP_ALIVE_GPU=${XTTS_KEEP_ALIVE_GPU:-120}
+      - XTTS_KEEP_ALIVE_CPU=${XTTS_KEEP_ALIVE_CPU:-600}
+      - XTTS_TEMPERATURE=${XTTS_TEMPERATURE:-0.7}
+      - XTTS_STREAM_CHUNK_SIZE=${XTTS_STREAM_CHUNK_SIZE:-20}
+      - COQUI_TOS_AGREED=1
+      # Upload endpoint is internal (container → container); S3_PUBLIC_URL is the
+      # host-reachable URL handed back to the browser to fetch the rendered audio.
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://minio:9000}
+      - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
+      - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-voice}
+      - S3_PUBLIC_URL=${S3_PUBLIC_URL:-http://192.168.1.198:9000/voice}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - xtts_cache:/root/.local/share/tts
+    depends_on:
+      minio-setup:
+        condition: service_completed_successfully
+    ports:
+      - "${XTTS_BIND_IP:-127.0.0.1}:${XTTS_PORT:-8033}:8031"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8031/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+    networks: [internal]
+
+  # Wyoming TTS bridge — exposes XTTS as a Home Assistant `tts` engine (incl.
+  # cloned voices) over the Wyoming protocol. CPU-only; talks to the xtts
+  # sidecar over the internal network and streams PCM back to HA.
+  wyoming-xtts:
+    build:
+      context: ./voice-stack
+      dockerfile: Dockerfile.wyoming
+    container_name: wyoming-xtts
+    restart: unless-stopped
+    command: ["python", "-m", "wyoming_bridge.xtts_tts"]
+    environment:
+      - XTTS_URL=${WYOMING_XTTS_URL:-http://xtts:8031}
+      - XTTS_DEFAULT_SPEAKER=${XTTS_DEFAULT_SPEAKER:-Claribel Dervla}
+      - WYOMING_TTS_DEFAULT_VOICE=${WYOMING_TTS_DEFAULT_VOICE:-}
+      - WYOMING_TTS_LANGUAGE=${WYOMING_TTS_LANGUAGE:-en}
+      - WYOMING_TTS_LIST_SPEAKERS=${WYOMING_TTS_LIST_SPEAKERS:-0}
+      - WYOMING_URI=tcp://0.0.0.0:10200
+      - LOG_LEVEL=${WYOMING_LOG_LEVEL:-INFO}
+    depends_on: [xtts]
+    ports:
+      - "${WYOMING_TTS_BIND_IP:-0.0.0.0}:${WYOMING_TTS_PORT:-10200}:10200"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 10200), 3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks: [internal]
+
+  # Wyoming TTS bridge for Miso — exposes the remote Miso sidecar (e.g. on
+  # morpheus) as a *second* Home Assistant `tts` engine on its own port, so HA
+  # can pick Miso or XTTS independently. Same generic bridge module; only the
+  # upstream URL, advertised program name, and port differ. Disabled unless
+  # MISO_TTS_URL is set (the bridge will just fail its healthcheck otherwise).
+  wyoming-miso:
+    build:
+      context: ./voice-stack
+      dockerfile: Dockerfile.wyoming
+    container_name: wyoming-miso
+    restart: unless-stopped
+    command: ["python", "-m", "wyoming_bridge.xtts_tts"]
+    environment:
+      - TTS_URL=${WYOMING_MISO_URL:-${MISO_TTS_URL:-}}
+      - WYOMING_TTS_PROGRAM_NAME=miso
+      - WYOMING_TTS_PROGRAM_DESC=Miso One (expressive TTS + one-shot cloning)
+      - WYOMING_TTS_ATTRIBUTION_NAME=Miso One
+      - WYOMING_TTS_ATTRIBUTION_URL=https://github.com/MisoLabsAI/MisoTTS
+      - XTTS_DEFAULT_SPEAKER=${MISO_DEFAULT_SPEAKER:-0}
+      - WYOMING_TTS_DEFAULT_VOICE=${WYOMING_MISO_DEFAULT_VOICE:-}
+      - WYOMING_TTS_LANGUAGE=${WYOMING_TTS_LANGUAGE:-en}
+      - WYOMING_TTS_LIST_SPEAKERS=${WYOMING_MISO_LIST_SPEAKERS:-0}
+      - WYOMING_URI=tcp://0.0.0.0:10200
+      - LOG_LEVEL=${WYOMING_LOG_LEVEL:-INFO}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "${WYOMING_MISO_BIND_IP:-0.0.0.0}:${WYOMING_MISO_PORT:-10201}:10200"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 10200), 3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks: [internal]
+
+  # Wyoming STT bridge — exposes Whisper as a Home Assistant `stt` engine over
+  # the Wyoming protocol. CPU-only; buffers HA audio and POSTs it to whisper.
+  wyoming-whisper:
+    build:
+      context: ./voice-stack
+      dockerfile: Dockerfile.wyoming
+    container_name: wyoming-whisper
+    restart: unless-stopped
+    command: ["python", "-m", "wyoming_bridge.whisper_stt"]
+    environment:
+      - WHISPER_URL=${WYOMING_WHISPER_URL:-http://whisper:8030}
+      - STT_MODEL=${STT_MODEL:-large-v3-turbo}
+      - WYOMING_STT_LANGUAGE=${WYOMING_STT_LANGUAGE:-}
+      - WYOMING_URI=tcp://0.0.0.0:10300
+      - LOG_LEVEL=${WYOMING_LOG_LEVEL:-INFO}
+    depends_on: [whisper]
+    ports:
+      - "${WYOMING_STT_BIND_IP:-0.0.0.0}:${WYOMING_STT_PORT:-10300}:10300"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 10300), 3).close()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     networks: [internal]
 
   # Cloudflare Tunnel (publish ONLY rag-ingest + rag-chat hostnames in Cloudflare UI)
@@ -127,7 +565,14 @@ networks:
     driver: bridge
 
 volumes:
+  postgres_data:
   ollama:
+  qdrant_data:
+  minio_data:
   rag_ingest_data:
   rag_chat_data:
   rag_chat_media:
+  infinity_hf_cache:
+  modernbert_data:
+  whisper_cache:
+  xtts_cache:

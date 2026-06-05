@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import (
     CHAT_HISTORY_MAX_MSGS, CHAT_MODEL, DEV_AUTH_BYPASS, EMBED_MODEL,
-    OLLAMA_TIMEOUT, OLLAMA_URL, QDRANT_COLLECTION, QDRANT_URL,
+    OLLAMA_KEEP_ALIVE, OLLAMA_TIMEOUT, OLLAMA_URL, QDRANT_COLLECTION, QDRANT_URL,
     RAG_ENABLED, RAG_MAX_CONTEXT_CHARS, RAG_TOP_K, SYSTEM_PROMPT, UTC,
 )
 from app.db import get_db
@@ -108,7 +108,7 @@ async def _resolve_model(requested: str) -> str:
 
 
 async def ollama_embed(text: str) -> list[float]:
-    payload = {"model": EMBED_MODEL, "prompt": text}
+    payload = {"model": EMBED_MODEL, "prompt": text, "keep_alive": OLLAMA_KEEP_ALIVE}
     async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
         r = await client.post(f"{OLLAMA_URL}/api/embeddings", json=payload)
     if r.status_code != 200:
@@ -251,7 +251,9 @@ def _derive_summary(messages: List[Message], max_len: int = 220) -> Optional[str
     parts = []
     for m in reversed(tail):
         prefix = "U:" if m.role == "user" else "A:"
-        parts.append(f"{prefix} {m.content.strip()}")
+        text = (m.content or "").strip()
+        if text:
+            parts.append(f"{prefix} {text}")
     joined = "\n".join(parts)
     if len(joined) > max_len:
         return joined[: max_len - 1] + "\u2026"
@@ -421,7 +423,12 @@ async def chat(
             if ctx:
                 msgs = [msgs[0], Msg(role="system", content=ctx)] + msgs[1:]
 
-            payload = {"model": model, "messages": [_msg_to_ollama_format(m) for m in msgs], "stream": True}
+            payload = {
+                "model": model,
+                "messages": [_msg_to_ollama_format(m) for m in msgs],
+                "stream": True,
+                "keep_alive": OLLAMA_KEEP_ALIVE,
+            }
             if req.temperature is not None:
                 payload["options"] = payload.get("options", {})
                 payload["options"]["temperature"] = req.temperature
@@ -467,12 +474,14 @@ async def chat(
                         seq=next_seq + 1,
                     ),
                 ])
+                await db.flush()
                 if not conv.title:
                     conv.title = _derive_title(last_user_msg)
-                tail_res = await db.execute(
-                    select(Message).where(Message.conversation_id == conv.id)
-                    .order_by(Message.seq.desc()).limit(6)
-                )
+                with db.no_autoflush:
+                    tail_res = await db.execute(
+                        select(Message).where(Message.conversation_id == conv.id)
+                        .order_by(Message.seq.desc()).limit(6)
+                    )
                 conv.summary = _derive_summary(list(reversed(tail_res.scalars().all())))
                 conv.updated_at = datetime.now(tz=UTC)
                 await db.commit()
@@ -512,7 +521,12 @@ async def chat(
     if ctx:
         msgs = [msgs[0], Msg(role="system", content=ctx)] + msgs[1:]
 
-    payload = {"model": model, "messages": [_msg_to_ollama_format(m) for m in msgs], "stream": False}
+    payload = {
+        "model": model,
+        "messages": [_msg_to_ollama_format(m) for m in msgs],
+        "stream": False,
+        "keep_alive": OLLAMA_KEEP_ALIVE,
+    }
     if req.temperature is not None:
         payload["options"] = payload.get("options", {})
         payload["options"]["temperature"] = req.temperature

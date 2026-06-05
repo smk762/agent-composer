@@ -78,6 +78,7 @@ Optional:
 - `CHAT_SYSTEM_PROMPT`: default system prompt
 - `QDRANT_COLLECTION`: default collection name (future use by ingestion pipeline)
 - `OLLAMA_KEEP_ALIVE`: Ollama keep-alive setting (example: `15m`)
+- `INFINITY_IDLE_TIMEOUT`: seconds before the managed Infinity child is evicted after idle; next inference request starts it again
 - `CHAT_DB_URL` / `DATABASE_URL`: chat database DSN. `postgresql://...` is accepted and automatically normalized to async SQLAlchemy driver usage.
   - On startup, `rag-chat` auto-creates the Postgres database if it does not exist, then runs Alembic migrations.
 - `INGEST_NONCE_STORE`: `sqlite` (default) or `redis` for replay-protection nonce claims.
@@ -205,6 +206,7 @@ See `docs/integration-guide.md` for external service/agent integration (LAN or C
 ### `rag-chat`
 - `GET /health`
 - `POST /chat` → forwards to Ollama `/api/chat`
+- Runtime controls: `GET /api/runtime/ollama/status`, `POST /api/runtime/ollama/evict`, `POST /api/runtime/ollama/wake`, `GET /api/runtime/infinity/status`, `POST /api/runtime/infinity/evict`, `POST /api/runtime/infinity/wake`
 - UI: `GET /ui/chat` (and `/`) for a minimal in-browser chat form
 - API keys: `GET /ui/api-keys` to create/list/revoke keys (use `Authorization: Bearer <key>` for requests)
 - History UI: `GET /ui/history` to browse/open conversations

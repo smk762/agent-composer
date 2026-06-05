@@ -1,0 +1,120 @@
+services:
+  whisper:
+    build:
+      context: .
+      dockerfile: Dockerfile.whisper
+    image: voice-whisper:local
+    container_name: voice_whisper
+    restart: unless-stopped
+    ports:
+      - "8030:8030"
+    environment:
+      - STT_MODEL=${STT_MODEL:-large-v3-turbo}
+      - STT_DEVICE=${STT_DEVICE:-cuda}
+      - STT_COMPUTE_TYPE=${STT_COMPUTE_TYPE:-float16}
+      - STT_VAD_FILTER=${STT_VAD_FILTER:-1}
+      - STT_BEAM_SIZE=${STT_BEAM_SIZE:-5}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - whisper-cache:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8030/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  tts:
+    build:
+      context: .
+      dockerfile: Dockerfile.tts
+      args:
+        TTS_MODEL_SIZE: "${TTS_MODEL_SIZE:-0.6b}"
+        TTS_TORCH_INDEX_URL: "https://download.pytorch.org/whl/cu124"
+    image: voice-tts:local
+    container_name: voice_tts
+    restart: unless-stopped
+    ports:
+      - "8031:8031"
+    environment:
+      - TTS_MODEL_SIZE=${TTS_MODEL_SIZE:-0.6b}
+      - TTS_DEVICE=${TTS_DEVICE:-cuda:0}
+      - TTS_LOAD_MODELS=${TTS_LOAD_MODELS:-both}
+      # Standalone voice-stack has no in-stack minio; point at the main stack's
+      # published MinIO on the host (192.168.1.198:9000).
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://192.168.1.198:9000}
+      - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
+      - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-voice}
+      - S3_PUBLIC_URL=${S3_PUBLIC_URL:-http://192.168.1.198:9000/voice}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8031/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+
+  # XTTS-v2 — zero-shot voice cloning + streaming. Drop-in for `tts` (same :8031
+  # contract), published on host :8033 so it can run alongside the Qwen sidecar.
+  xtts:
+    build:
+      context: .
+      dockerfile: Dockerfile.xtts
+      args:
+        XTTS_TORCH_INDEX_URL: "https://download.pytorch.org/whl/cu124"
+    image: voice-xtts:local
+    container_name: voice_xtts
+    restart: unless-stopped
+    ports:
+      - "8033:8031"
+    environment:
+      - XTTS_MODEL=${XTTS_MODEL:-tts_models/multilingual/multi-dataset/xtts_v2}
+      - XTTS_DEVICE=${XTTS_DEVICE:-cuda:0}
+      - XTTS_KEEP_ALIVE_GPU=${XTTS_KEEP_ALIVE_GPU:-120}
+      - XTTS_KEEP_ALIVE_CPU=${XTTS_KEEP_ALIVE_CPU:-600}
+      - COQUI_TOS_AGREED=1
+      # Standalone voice-stack has no in-stack minio; point at the main stack's
+      # published MinIO on the host (192.168.1.198:9000).
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://192.168.1.198:9000}
+      - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
+      - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-voice}
+      - S3_PUBLIC_URL=${S3_PUBLIC_URL:-http://192.168.1.198:9000/voice}
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      - xtts-cache:/root/.local/share/tts
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8031/health', timeout=5).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+
+volumes:
+  whisper-cache:
+  xtts-cache:
