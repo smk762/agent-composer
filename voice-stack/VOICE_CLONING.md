@@ -45,8 +45,22 @@ Quality of the reference dominates quality of the clone. Aim for:
 
 ## Miso One (`miso`) — one-shot
 
+> **Miso has no built-in voices — cloning is mandatory for good output.**
+> Miso TTS 8B is a Sesame-CSM-style *text-to-dialogue* model: the `speaker`
+> values `0`/`1` are **conversation-turn indices, not personas**. Synthesising
+> with a bare `speaker: "0"` and no clone leaves the voice **unconditioned** —
+> the model improvises an arbitrary, low-quality, inconsistent timbre each run.
+> (This is why bare Miso sounds far worse than XTTS, whose named speakers are
+> real trained embeddings.) The `voice_description`/`emotion`/`instruction`
+> fields exist on the API but the model has no text voice-design path, so they
+> are effectively no-ops — voice identity comes **only** from the reference clip.
+
 - Provide **one** clip, ~6–15 s, of clean, **expressive** speech. This is the
   single most important input — there is no averaging to hide a bad take.
+- **Always provide the reference transcript** (the "Reference transcript" box on
+  `/ui/voice-clone`, sent as `reference_text`). CSM aligns the clone to it —
+  wrong or missing text noticeably degrades the clone. The UI requires it when
+  the engine is Miso.
 - Prefer a clip that demonstrates the *prosody you want* (warmth, energy,
   cadence). Miso reproduces emotion well, so give it emotion to copy.
 - You can still upload several clips and **Score** them — the highest-ranked

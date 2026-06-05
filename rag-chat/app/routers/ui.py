@@ -3490,6 +3490,8 @@ def voice_clone_ui():
           <div class="row" style="margin:8px 0;">
             <input class="vc-field" id="voiceName" placeholder="Voice name — e.g. &quot;Narrator (Alex)&quot;" />
           </div>
+          <textarea class="tts-text" id="refText" style="min-height:60px;margin-bottom:8px;" placeholder="Reference transcript — the exact words spoken in the clip(s)."></textarea>
+          <p class="hint" id="refTextHint">Required for Miso (it aligns the clone to this transcript — wrong text hurts quality). Optional for XTTS, which ignores it. If you used several clips, paste their words in order.</p>
           <button id="createBtn">Create voice clone</button>
           <div class="vc-status" id="createStatus"></div>
           <div id="createReport" class="clip-list"></div>
@@ -3542,6 +3544,7 @@ def voice_clone_ui():
       const totalBar = document.getElementById("totalBar");
       const totalLabel = document.getElementById("totalLabel");
       const voiceName = document.getElementById("voiceName");
+      const refText = document.getElementById("refText");
       const createBtn = document.getElementById("createBtn");
       const createStatus = document.getElementById("createStatus");
       const createReport = document.getElementById("createReport");
@@ -3861,8 +3864,15 @@ def voice_clone_ui():
         const total = chosen.reduce((a, c) => a + (c.seconds || 0), 0);
         if (total && total < 6) { createStatus.textContent = "Note: under 6s total — cloning will run but quality may suffer."; }
 
+        const transcript = refText.value.trim();
+        if (currentEngine() === "miso" && !transcript) {
+          createStatus.textContent = "Miso needs the reference transcript — type the exact words spoken in the clip.";
+          return;
+        }
+
         const fd = new FormData();
         fd.append("voice_name", name);
+        fd.append("reference_text", transcript);
         chosen.forEach(c => fd.append("audio", c.blob, c.name));
 
         createBtn.disabled = true;
