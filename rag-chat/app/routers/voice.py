@@ -2,8 +2,14 @@
 
 Endpoints:
   POST /api/voice/transcribe        — proxy audio to Whisper STT
-  POST /api/voice/synthesise        — proxy text to Qwen3-TTS
-  POST /api/voice/synthesise/stream — SSE: sentence-chunked TTS
+  POST /api/voice/synthesise        — proxy text to the TTS sidecar
+  POST /api/voice/synthesise/stream — SSE: sentence-chunked TTS (one WAV/sentence)
+  POST /api/voice/synthesise/pcm    — raw PCM passthrough for live playback (XTTS)
+  POST /api/voice/analyze           — score candidate clips, recommend subset + order
+  POST /api/voice/clone             — create a voice clone from one or more clips
+  GET  /api/voice/clones            — list stored voice clones
+  GET  /api/voice/clones/{id}/download — download a clone (prompt.pt + meta.json) as a zip
+  POST /api/voice/clones/import     — import a downloaded voice archive (zip)
   GET  /api/voice/speakers          — list available TTS speakers
   GET  /api/voice/health            — fan-out health check
 """
@@ -16,8 +22,8 @@ import time
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.config import TTS_URL, VOICE_TIMEOUT, WHISPER_URL, log
@@ -52,6 +58,7 @@ class SynthesiseRequest(BaseModel):
 class SynthesiseStreamRequest(BaseModel):
     """Same as SynthesiseRequest but explicitly for streaming."""
     text: str
+    voice_clone_id: Optional[str] = None
     speaker: Optional[str] = None
     voice_description: Optional[str] = None
     instruction: Optional[str] = None
@@ -152,6 +159,60 @@ async def synthesise_stream(req: SynthesiseStreamRequest):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+@router.post("/synthesise/pcm")
+async def synthesise_pcm(req: SynthesiseRequest):
+    """Low-latency passthrough of the TTS sidecar's raw PCM stream.
+
+    Proxies `{TTS_URL}/synthesise/stream` byte-for-byte (24 kHz mono float32,
+    `pcm_f32le`) so the browser can begin playback on the first chunk (~0.2 s)
+    instead of waiting for whole-sentence WAVs. Forwards the upstream audio
+    layout headers. Only the XTTS-v2 sidecar implements this; the legacy Qwen
+    sidecar returns 404, which surfaces here as an upstream error.
+    """
+    _require_tts()
+
+    payload = req.model_dump(exclude_none=True)
+    client = httpx.AsyncClient(timeout=VOICE_TIMEOUT)
+    try:
+        upstream_req = client.build_request(
+            "POST", f"{TTS_URL}/synthesise/stream", json=payload
+        )
+        upstream = await client.send(upstream_req, stream=True)
+    except httpx.ConnectError:
+        await client.aclose()
+        raise HTTPException(503, detail="TTS server unreachable")
+    except Exception:
+        await client.aclose()
+        raise
+
+    if upstream.status_code != 200:
+        body = await upstream.aread()
+        await upstream.aclose()
+        await client.aclose()
+        detail = body.decode(errors="ignore") or "TTS stream error"
+        raise HTTPException(upstream.status_code, detail=detail)
+
+    headers = {
+        "X-Sample-Rate": upstream.headers.get("x-sample-rate", "24000"),
+        "X-Audio-Format": upstream.headers.get("x-audio-format", "pcm_f32le"),
+        "X-Channels": upstream.headers.get("x-channels", "1"),
+        "Cache-Control": "no-store",
+    }
+
+    t0 = time.monotonic()
+
+    async def body_iter():
+        try:
+            async for chunk in upstream.aiter_bytes():
+                yield chunk
+        finally:
+            await upstream.aclose()
+            await client.aclose()
+            log.info("voice: synthesise/pcm streamed elapsed=%dms", int((time.monotonic() - t0) * 1000))
+
+    return StreamingResponse(body_iter(), media_type="application/octet-stream", headers=headers)
+
+
 @router.get("/speakers")
 async def speakers():
     """List available TTS speakers."""
@@ -167,6 +228,156 @@ async def speakers():
         raise HTTPException(exc.response.status_code, detail=exc.response.text)
 
     return r.json()
+
+
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _slugify(name: str) -> str:
+    slug = _SLUG_RE.sub("-", (name or "").strip().lower()).strip("-")
+    return slug or f"voice-{int(time.time())}"
+
+
+@router.post("/clone")
+async def clone_voice(
+    audio: list[UploadFile] = File(...),
+    voice_name: str = Form(...),
+    companion_id: Optional[str] = Form(default=None),
+    reference_text: str = Form(default=""),
+):
+    """Create a voice clone from one or more reference clips.
+
+    Forwards every uploaded clip to the TTS sidecar's `/clone-voice`, which
+    averages the speaker embedding across clips for a more robust clone than a
+    single short take. `companion_id` defaults to a slug of `voice_name`.
+    """
+    _require_tts()
+
+    if not audio:
+        raise HTTPException(422, detail="At least one reference clip is required")
+
+    cid = (companion_id or "").strip() or _slugify(voice_name)
+
+    files = []
+    for i, clip in enumerate(audio):
+        data = await clip.read()
+        files.append(
+            ("audio", (clip.filename or f"clip-{i}.wav", data, clip.content_type or "audio/wav"))
+        )
+    form = {"companion_id": cid, "voice_name": voice_name, "reference_text": reference_text}
+
+    t0 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
+            r = await client.post(f"{TTS_URL}/clone-voice", files=files, data=form)
+            r.raise_for_status()
+    except httpx.ConnectError:
+        raise HTTPException(503, detail="TTS server unreachable")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(exc.response.status_code, detail=exc.response.text)
+
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    data = r.json()
+    log.info(
+        "voice: clone elapsed=%dms id=%s clips=%d", elapsed_ms, cid, len(audio)
+    )
+    return data
+
+
+@router.post("/analyze")
+async def analyze_clips(audio: list[UploadFile] = File(...)):
+    """Score candidate reference clips (no clone created).
+
+    Forwards clips to the TTS sidecar's `/analyze-clips`, which returns a per-clip
+    quality/consistency score, a recommended subset, and an optimal ordering.
+    """
+    _require_tts()
+
+    if not audio:
+        raise HTTPException(422, detail="No clips provided")
+
+    files = []
+    for i, clip in enumerate(audio):
+        data = await clip.read()
+        files.append(
+            ("audio", (clip.filename or f"clip-{i}.wav", data, clip.content_type or "audio/wav"))
+        )
+
+    t0 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
+            r = await client.post(f"{TTS_URL}/analyze-clips", files=files)
+            r.raise_for_status()
+    except httpx.ConnectError:
+        raise HTTPException(503, detail="TTS server unreachable")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(exc.response.status_code, detail=exc.response.text)
+
+    log.info("voice: analyze elapsed=%dms clips=%d", int((time.monotonic() - t0) * 1000), len(audio))
+    return r.json()
+
+
+@router.get("/clones")
+async def clones():
+    """List stored voice clones from the TTS sidecar."""
+    _require_tts()
+
+    try:
+        async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
+            r = await client.get(f"{TTS_URL}/clones")
+            r.raise_for_status()
+    except httpx.ConnectError:
+        raise HTTPException(503, detail="TTS server unreachable")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(exc.response.status_code, detail=exc.response.text)
+
+    return r.json()
+
+
+@router.post("/clones/import")
+async def import_clone(
+    archive: UploadFile = File(...),
+    voice_name: str = Form(default=""),
+    companion_id: Optional[str] = Form(default=None),
+):
+    """Import a previously downloaded voice archive (zip) into the TTS sidecar."""
+    _require_tts()
+
+    data = await archive.read()
+    files = {"archive": (archive.filename or "voice.zip", data, archive.content_type or "application/zip")}
+    form = {"voice_name": voice_name or "", "companion_id": companion_id or ""}
+
+    try:
+        async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
+            r = await client.post(f"{TTS_URL}/clones/import", files=files, data=form)
+            r.raise_for_status()
+    except httpx.ConnectError:
+        raise HTTPException(503, detail="TTS server unreachable")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(exc.response.status_code, detail=exc.response.text)
+
+    return r.json()
+
+
+@router.get("/clones/{companion_id}/download")
+async def download_clone(companion_id: str):
+    """Download a clone's latents + metadata sidecar as a zip."""
+    _require_tts()
+
+    try:
+        async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
+            r = await client.get(f"{TTS_URL}/clones/{companion_id}/download")
+            r.raise_for_status()
+    except httpx.ConnectError:
+        raise HTTPException(503, detail="TTS server unreachable")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(exc.response.status_code, detail=exc.response.text)
+
+    return Response(
+        content=r.content,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{companion_id}.zip"'},
+    )
 
 
 @router.get("/health")

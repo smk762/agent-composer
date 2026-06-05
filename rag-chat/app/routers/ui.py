@@ -241,7 +241,7 @@ def nav_html() -> str:
         '<div style="position:fixed; top:0; z-index:10; width:100%; margin:0 auto 8px; '
         'background:rgba(15,23,42,0.85); backdrop-filter: blur(8px); border:1px solid var(--border); '
         'padding:10px 14px; display:flex; gap:12px; align-items:center; box-sizing:border-box;">'
-        '<strong style="color:var(--text);">rag-chat</strong>'
+        '<a href="/" style="color:var(--text); text-decoration:none; font-weight:700;">rag-chat</a>'
         '<a href="/ui/chat" style="color:var(--text); text-decoration:none;">Chat</a>'
         '<a href="/ui/history" style="color:var(--text); text-decoration:none;">History</a>'
         '<a href="/ui/generate" style="color:var(--text); text-decoration:none;">Generate</a>'
@@ -251,6 +251,10 @@ def nav_html() -> str:
         + (
             '<a href="/ui/voice" style="color:var(--text); text-decoration:none;">Voice</a>'
             if (WHISPER_URL or TTS_URL) else ""
+        )
+        + (
+            '<a href="/ui/voice-clone" style="color:var(--text); text-decoration:none;">Voice Clone</a>'
+            if TTS_URL else ""
         )
         + f'<span style="margin-left:auto; color:var(--muted); font-size:13px;">{bypass}</span>'
         "</div>"
@@ -992,6 +996,90 @@ def generate_ui():
 
 
 @router.get("/", response_class=HTMLResponse)
+@router.get("/ui", response_class=HTMLResponse)
+def index_ui():
+    voice_enabled = bool(WHISPER_URL or TTS_URL)
+    tts_enabled = bool(TTS_URL)
+
+    pages = [
+        ("Chat", "/ui/chat", "Stream local LLMs with optional RAG context.", True),
+        ("History", "/ui/history", "Browse and revisit past conversations.", True),
+        ("Generate", "/ui/generate", "Text-to-image generation.", True),
+        ("API keys", "/ui/api-keys", "Issue and manage API keys.", True),
+        ("Pipeline Lab", "/ui/pipeline", "ModernBERT classify → overlay → brain → prose.", True),
+        ("Guard", "/ui/guard", "LlamaGuard content-safety tester.", True),
+        ("Voice", "/ui/voice", "Speech-to-text and text-to-speech.", voice_enabled),
+        ("Voice Clone", "/ui/voice-clone", "Clone a voice from a few reference clips.", tts_enabled),
+    ]
+
+    page_cards = "".join(
+        f'<a class="idx-card" href="{href}"><div class="idx-name">{name}</div>'
+        f'<div class="idx-desc">{desc}</div></a>'
+        for name, href, desc, enabled in pages if enabled
+    )
+
+    # Other service UIs/dashboards. Built client-side from the current hostname
+    # so the links work over LAN as well as localhost. Ports are compose defaults.
+    services = [
+        {"name": "Qdrant", "port": 6333, "path": "/dashboard", "desc": "Vector store dashboard."},
+        {"name": "MinIO Console", "port": 9001, "path": "/", "desc": "Object storage (audio, uploads)."},
+        {"name": "rag-ingest API", "port": 9050, "path": "/docs", "desc": "Signed ingestion API docs."},
+        {"name": "Infinity", "port": 7997, "path": "/docs", "desc": "Code embedder + reranker."},
+        {"name": "ModernBERT", "port": 7998, "path": "/docs", "desc": "Classifier sidecar."},
+        {"name": "Whisper STT", "port": 8032, "path": "/docs", "desc": "faster-whisper sidecar."},
+        {"name": "XTTS", "port": 8033, "path": "/docs", "desc": "XTTS-v2 TTS / cloning sidecar."},
+    ]
+    services_json = json.dumps(services)
+
+    extra_css = """
+    .idx-wrap { display: grid; gap: 22px; }
+    .idx-section h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); margin: 0 0 12px; }
+    .idx-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+    .idx-card { display: block; text-decoration: none; background: var(--card); border: 1px solid var(--border);
+                border-radius: 12px; padding: 14px 16px; transition: transform 120ms ease, border-color 120ms ease; }
+    .idx-card:hover { transform: translateY(-2px); border-color: var(--accent); }
+    .idx-name { font-weight: 700; color: var(--text); font-size: 15px; margin-bottom: 4px; }
+    .idx-name .ext { color: var(--muted); font-weight: 400; font-size: 12px; }
+    .idx-desc { color: var(--muted); font-size: 13px; line-height: 1.4; }
+    """
+
+    body = f"""
+    <div class="card" style="max-width:1000px; height:auto; min-height:0;">
+      <h1>agent-composer</h1>
+      <p class="sub">Local RAG + chat stack. Jump to an app page or a service dashboard.</p>
+      <div class="idx-wrap">
+        <div class="idx-section">
+          <h2>App pages</h2>
+          <div class="idx-grid">{page_cards}</div>
+        </div>
+        <div class="idx-section">
+          <h2>Services &amp; dashboards</h2>
+          <div class="idx-grid" id="svcGrid"></div>
+        </div>
+      </div>
+    </div>
+    <script>
+    (function() {{
+      const services = {services_json};
+      const host = window.location.hostname || "localhost";
+      const grid = document.getElementById("svcGrid");
+      services.forEach(s => {{
+        const a = document.createElement("a");
+        a.className = "idx-card";
+        a.href = window.location.protocol + "//" + host + ":" + s.port + s.path;
+        a.target = "_blank";
+        a.rel = "noopener";
+        a.innerHTML = '<div class="idx-name">' + s.name + ' <span class="ext">:' + s.port + ' &#8599;</span></div>'
+          + '<div class="idx-desc">' + s.desc + '</div>';
+        grid.appendChild(a);
+      }});
+    }})();
+    </script>
+    """
+
+    return render_page("agent-composer", body, extra_css)
+
+
 @router.get("/ui/chat", response_class=HTMLResponse)
 def chat_ui():
     guide_rules_json = json.dumps(CHAT_MODEL_GUIDE_RULES)
@@ -2806,7 +2894,7 @@ def voice_ui():
     body = """
     <div class="card" style="max-width:1000px;">
       <h1>Voice</h1>
-      <p class="sub">Speech-to-text (Whisper) and text-to-speech (Qwen3-TTS) via Dragon.</p>
+      <p class="sub">Speech-to-text (Whisper) and text-to-speech (XTTS-v2) via Dragon.</p>
       <div id="healthBanner" style="margin-bottom:12px;"></div>
 
       <div class="voice-grid">
@@ -2834,10 +2922,11 @@ def voice_ui():
           <h2>Text to Speech</h2>
           <textarea class="tts-text" id="ttsText" placeholder="Type or paste text to synthesise..."></textarea>
 
+
           <input id="ttsVoiceDesign" placeholder="Voice design — e.g. &quot;female, warm, young, light British accent&quot; (overrides speaker)" style="width:100%;margin-bottom:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:6px 10px;font-size:13px;box-sizing:border-box;" />
           <div class="tts-controls">
             <select id="ttsSpeaker"><option value="">Loading speakers...</option></select>
-            <input id="ttsInstruction" placeholder="Style instruction (optional)" style="flex:1;min-width:120px;" />
+            <input id="ttsInstruction" placeholder="Style: e.g. &quot;speak warmly and slowly&quot;" style="flex:1;min-width:120px;" />
             <select id="ttsLang">
               <option value="en">English</option>
               <option value="zh">Chinese</option>
@@ -2849,9 +2938,10 @@ def voice_ui():
               <option value="ru">Russian</option>
             </select>
           </div>
-          <div style="display:flex; gap:8px;">
+          <div style="display:flex; gap:8px; flex-wrap:wrap;">
             <button id="synthBtn">Synthesise</button>
-            <button id="synthStreamBtn">Synthesise (streaming)</button>
+            <button id="synthLiveBtn">Synthesise (live)</button>
+            <button id="synthStreamBtn">Synthesise (chunked)</button>
           </div>
           <div class="voice-status" id="ttsStatus"></div>
           <div class="audio-list" id="audioList"></div>
@@ -2875,6 +2965,7 @@ def voice_ui():
       const ttsInstruction = document.getElementById("ttsInstruction");
       const ttsLang = document.getElementById("ttsLang");
       const synthBtn = document.getElementById("synthBtn");
+      const synthLiveBtn = document.getElementById("synthLiveBtn");
       const synthStreamBtn = document.getElementById("synthStreamBtn");
       const ttsStatus = document.getElementById("ttsStatus");
       const audioList = document.getElementById("audioList");
@@ -2918,7 +3009,26 @@ def voice_ui():
           });
           if (!list.length) sel.innerHTML = '<option value="">No speakers available</option>';
         })
-        .catch(() => { ttsSpeaker.innerHTML = '<option value="">Failed to load speakers</option>'; });
+        .catch(() => { ttsSpeaker.innerHTML = '<option value="">Failed to load speakers</option>'; })
+        .finally(() => {
+          // Prepend any cloned voices (value prefixed "clone:" → sent as voice_clone_id).
+          fetch("/api/voice/clones")
+            .then(r => r.json())
+            .then(d => {
+              const clones = d.clones || [];
+              if (!clones.length) return;
+              const grp = document.createElement("optgroup");
+              grp.label = "Cloned voices";
+              clones.forEach(c => {
+                const o = document.createElement("option");
+                o.value = "clone:" + c.voice_clone_id;
+                o.textContent = (c.name || c.companion_id) + " (clone)";
+                grp.appendChild(o);
+              });
+              ttsSpeaker.insertBefore(grp, ttsSpeaker.firstChild);
+            })
+            .catch(() => {});
+        });
 
       // ── Recording ──
       function startRecording() {
@@ -3004,16 +3114,18 @@ def voice_ui():
       // ── TTS ──
       function buildPayload() {
         const p = { text: ttsText.value.trim(), language: ttsLang.value };
-        const design = ttsVoiceDesign.value.trim();
-        if (design) {
-          p.voice_description = design;
+        if (ttsSpeaker.value.startsWith("clone:")) {
+          p.voice_clone_id = ttsSpeaker.value.slice("clone:".length);
         } else if (ttsSpeaker.value) {
           p.speaker = ttsSpeaker.value;
-        } else {
+        }
+        const design = ttsVoiceDesign.value.trim();
+        if (design) p.voice_description = design;
+        if (ttsInstruction.value.trim()) p.instruction = ttsInstruction.value.trim();
+        if (!p.speaker && !p.voice_description && !p.voice_clone_id) {
           ttsStatus.textContent = "Select a speaker or enter a voice design";
           return null;
         }
-        if (ttsInstruction.value.trim()) p.instruction = ttsInstruction.value.trim();
         return p;
       }
 
@@ -3075,6 +3187,107 @@ def voice_ui():
           })
           .catch(err => { ttsStatus.textContent = "Error: " + err.message; })
           .finally(() => { synthBtn.disabled = false; });
+      });
+
+      // Assemble streamed float32 PCM chunks into a 16-bit WAV blob for replay/download.
+      function floatChunksToWav(chunks, sampleRate) {
+        let total = 0;
+        chunks.forEach(c => total += c.length);
+        const dataBytes = total * 2;
+        const buf = new ArrayBuffer(44 + dataBytes);
+        const dv = new DataView(buf);
+        const ws = (off, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(off + i, s.charCodeAt(i)); };
+        ws(0, "RIFF"); dv.setUint32(4, 36 + dataBytes, true); ws(8, "WAVE");
+        ws(12, "fmt "); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+        dv.setUint32(24, sampleRate, true); dv.setUint32(28, sampleRate * 2, true);
+        dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+        ws(36, "data"); dv.setUint32(40, dataBytes, true);
+        let off = 44;
+        chunks.forEach(c => {
+          for (let i = 0; i < c.length; i++) {
+            let s = Math.max(-1, Math.min(1, c[i]));
+            dv.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+            off += 2;
+          }
+        });
+        return new Blob([buf], { type: "audio/wav" });
+      }
+
+      // Live playback: schedule raw PCM chunks back-to-back as they arrive
+      // (~0.2s to first audio with XTTS), then build a downloadable WAV.
+      synthLiveBtn.addEventListener("click", async () => {
+        const payload = buildPayload();
+        if (!payload || !payload.text) return;
+        synthLiveBtn.disabled = true;
+        ttsStatus.textContent = "Connecting...";
+        audioList.innerHTML = "";
+
+        const AC = window.AudioContext || window.webkitAudioContext;
+        const ctx = new AC();
+        try { await ctx.resume(); } catch (e) {}
+
+        const t0 = performance.now();
+        let firstAt = null;
+        const collected = [];
+        let leftover = new Uint8Array(0);
+        let nextTime = ctx.currentTime + 0.08;
+        let sr = 24000;
+
+        try {
+          const resp = await fetch("/api/voice/synthesise/pcm", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(payload),
+          });
+          if (!resp.ok) {
+            let msg = "HTTP " + resp.status;
+            try { msg = (await resp.text()) || msg; } catch (e) {}
+            throw new Error(msg);
+          }
+          sr = parseInt(resp.headers.get("X-Sample-Rate") || "24000", 10) || 24000;
+          const reader = resp.body.getReader();
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const merged = new Uint8Array(leftover.length + value.length);
+            merged.set(leftover, 0);
+            merged.set(value, leftover.length);
+            const usable = merged.length - (merged.length % 4);
+            if (usable <= 0) { leftover = merged; continue; }
+            const floats = new Float32Array(merged.buffer.slice(0, usable));
+            leftover = merged.slice(usable);
+            if (!floats.length) continue;
+            if (firstAt === null) {
+              firstAt = ((performance.now() - t0) / 1000).toFixed(2);
+              ttsStatus.textContent = "First audio in " + firstAt + "s — playing live...";
+            }
+            collected.push(floats);
+            const ab = ctx.createBuffer(1, floats.length, sr);
+            ab.copyToChannel(floats, 0);
+            const node = ctx.createBufferSource();
+            node.buffer = ab;
+            node.connect(ctx.destination);
+            const startAt = Math.max(ctx.currentTime, nextTime);
+            node.start(startAt);
+            nextTime = startAt + ab.duration;
+          }
+
+          let totalSamples = 0;
+          collected.forEach(c => totalSamples += c.length);
+          const dur = (totalSamples / sr).toFixed(1);
+          ttsStatus.textContent = "Live complete — first audio " + (firstAt || "?") + "s, " + dur + "s total";
+          if (collected.length) {
+            const url = URL.createObjectURL(floatChunksToWav(collected, sr));
+            addAudioItem(url, "Live stream (" + dur + "s)", null);
+          }
+        } catch (err) {
+          ttsStatus.textContent = "Error: " + err.message;
+        } finally {
+          synthLiveBtn.disabled = false;
+          const remainMs = Math.max(0, (nextTime - ctx.currentTime) * 1000 + 500);
+          setTimeout(() => { try { ctx.close(); } catch (e) {} }, remainMs);
+        }
       });
 
       synthStreamBtn.addEventListener("click", () => {
@@ -3146,3 +3359,613 @@ def voice_ui():
     """
 
     return render_page("Voice", body, extra_css)
+
+
+@router.get("/ui/voice-clone", response_class=HTMLResponse)
+def voice_clone_ui():
+    if not TTS_URL:
+        return render_page(
+            "Voice Cloning",
+            "<div class='card'><h1>Voice Cloning</h1><p>TTS service not configured. Set TTS_URL.</p></div>",
+        )
+
+    extra_css = """
+    .vc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+    @media (max-width: 980px) { .vc-grid { grid-template-columns: 1fr; } }
+    .vc-panel { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 18px; }
+    .vc-panel h2 { margin: 0 0 4px; font-size: 16px; color: var(--accent); }
+    .vc-panel .hint { font-size: 12px; color: var(--muted); margin: 0 0 12px; }
+    .rec-btn { width: 56px; height: 56px; border-radius: 50%; border: 3px solid var(--border);
+               background: var(--bg); color: var(--text); font-size: 22px; cursor: pointer;
+               display: flex; align-items: center; justify-content: center; transition: all 0.2s; }
+    .rec-btn:hover { border-color: var(--accent); }
+    .rec-btn.recording { border-color: #ef4444; background: rgba(239,68,68,0.15); animation: pulse-rec 1.2s ease-in-out infinite; }
+    @keyframes pulse-rec { 0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.3); } 50% { box-shadow: 0 0 0 12px rgba(239,68,68,0); } }
+    .clip-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+    .clip-item { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+                 display: flex; align-items: center; gap: 10px; }
+    .clip-item audio { height: 30px; flex: 1; }
+    .clip-item .clip-meta { font-size: 12px; color: var(--muted); min-width: 56px; }
+    .clip-item .rm { font-size: 11px; padding: 3px 8px; border-radius: 4px; cursor: pointer; height: auto;
+                     background: var(--card); border: 1px solid rgba(239,68,68,0.5); color: #f87171; box-shadow: none; }
+    .vc-field { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+                color: var(--text); padding: 8px 10px; font-size: 13px; box-sizing: border-box; }
+    .total-bar { height: 6px; border-radius: 999px; background: #1f2937; overflow: hidden; margin: 8px 0 4px; }
+    .total-bar > div { height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent-2)); width: 0%; transition: width 0.2s; }
+    .vc-status { font-size: 12px; color: var(--muted); margin-top: 8px; min-height: 16px; }
+    .clone-row { display: flex; align-items: center; gap: 10px; background: var(--bg); border: 1px solid var(--border);
+                 border-radius: 8px; padding: 8px 10px; margin-bottom: 6px; }
+    .clone-row .nm { font-weight: 600; }
+    .clone-row .sub { font-size: 12px; color: var(--muted); }
+    .clone-row button { height: auto; padding: 5px 10px; font-size: 12px; }
+    .tts-text { width: 100%; min-height: 70px; background: var(--bg); border: 1px solid var(--border);
+                border-radius: 8px; color: var(--text); font: inherit; font-size: 14px; padding: 10px;
+                resize: vertical; box-sizing: border-box; }
+    .audio-list { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+    .audio-item { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px; }
+    .audio-item audio { width: 100%; margin-top: 6px; }
+    .clip-item.excluded { opacity: 0.5; }
+    .clip-item input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); cursor: pointer; flex: 0 0 auto; }
+    .clip-col { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+    .clip-name { font-size: 12px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .clip-detail { font-size: 11px; color: var(--muted); }
+    .clip-detail .flag { color: #fbbf24; }
+    .score-badge { font-size: 12px; font-weight: 700; border-radius: 6px; padding: 2px 7px; min-width: 34px; text-align: center; flex: 0 0 auto; }
+    .score-good { background: rgba(34,197,94,0.15); color: #22c55e; }
+    .score-mid { background: rgba(251,191,36,0.15); color: #fbbf24; }
+    .score-bad { background: rgba(239,68,68,0.15); color: #f87171; }
+    .vc-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+    .secondary { background: var(--card); color: var(--text); border: 1px solid var(--border); box-shadow: none; }
+    .secondary:hover { border-color: var(--accent); color: var(--accent); }
+    """
+
+    body = """
+    <div class="card" style="max-width:1040px;">
+      <h1>Voice Cloning</h1>
+      <p class="sub">Clone a voice with XTTS-v2. One clean 6&nbsp;s clip works; several varied clips (different sentences, consistent mic) average out noise for a more robust voice.</p>
+      <div id="healthBanner" style="margin-bottom:12px;"></div>
+
+      <div class="vc-grid">
+        <!-- Capture + create -->
+        <div class="vc-panel">
+          <h2>1 &middot; Reference clips</h2>
+          <p class="hint">Record short clips of natural speech, and/or upload existing WAV/FLAC/MP3 files. Aim for 6&ndash;60&nbsp;s total of clean, single-speaker audio. Hit <em>Score clips</em> to rank them — low scorers (noisy, clipped, too short, or off-voice) are auto-deselected and you can cull them. Clips are auto-standardised (mono, high-pass, silence-trim, HVAC-hum reduction, loudness-match) and ordered best-first before cloning.</p>
+          <div style="display:flex; align-items:center; gap:16px;">
+            <button class="rec-btn" id="recBtn" title="Click to record a clip">&#9679;</button>
+            <div>
+              <div style="font-size:13px;" id="recLabel">Click to record a clip</div>
+              <div class="clip-meta" id="recTimer"></div>
+            </div>
+            <label class="note" style="margin-left:auto; cursor:pointer;">
+              <input type="file" id="fileInput" accept="audio/*" multiple style="display:none;" />
+              <span class="pill" style="cursor:pointer;">+ Upload files</span>
+            </label>
+          </div>
+
+          <div class="total-bar"><div id="totalBar"></div></div>
+          <div class="clip-meta" id="totalLabel">0 clips &middot; 0.0s total</div>
+          <div class="vc-actions">
+            <button id="scoreBtn" class="secondary">Score clips</button>
+            <span class="clip-meta" id="scoreSummary"></span>
+          </div>
+          <div class="clip-list" id="clipList"></div>
+
+          <h2 style="margin-top:16px;">2 &middot; Name &amp; create</h2>
+          <div class="row" style="margin:8px 0;">
+            <input class="vc-field" id="voiceName" placeholder="Voice name — e.g. &quot;Narrator (Alex)&quot;" />
+          </div>
+          <button id="createBtn">Create voice clone</button>
+          <div class="vc-status" id="createStatus"></div>
+          <div id="createReport" class="clip-list"></div>
+        </div>
+
+        <!-- Existing clones + test -->
+        <div class="vc-panel">
+          <h2>Saved voices</h2>
+          <p class="hint">Stored clones. Pick one to load into the tester, download an archive, or import one.</p>
+          <div class="vc-actions" style="margin:0 0 10px;">
+            <label class="note" style="cursor:pointer; margin:0;">
+              <input type="file" id="importInput" accept=".zip,application/zip" style="display:none;" />
+              <span class="pill" style="cursor:pointer;">&#8623; Import voice (.zip)</span>
+            </label>
+            <span class="clip-meta" id="importStatus"></span>
+          </div>
+          <div id="cloneList"><div class="clip-meta">Loading…</div></div>
+
+          <h2 style="margin-top:16px;">Test a voice</h2>
+          <select class="vc-field" id="testClone" style="margin-bottom:8px;"><option value="">Select a saved voice…</option></select>
+          <textarea class="tts-text" id="testText" placeholder="Type a line to hear this voice…">Hello! This is a quick test of my cloned voice.</textarea>
+          <div style="display:flex; gap:10px; align-items:center; margin:10px 0; flex-wrap:wrap;">
+            <select class="vc-field" id="testLang" style="width:auto;">
+              <option value="en">English</option>
+              <option value="es">Spanish</option>
+              <option value="fr">French</option>
+              <option value="de">German</option>
+              <option value="it">Italian</option>
+              <option value="pt">Portuguese</option>
+              <option value="ja">Japanese</option>
+              <option value="ko">Korean</option>
+              <option value="zh">Chinese</option>
+            </select>
+            <button id="testLiveBtn">Speak (live)</button>
+            <button id="testBtn">Speak</button>
+          </div>
+          <div class="vc-status" id="testStatus"></div>
+          <div class="audio-list" id="testAudio"></div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+    (function() {
+      const recBtn = document.getElementById("recBtn");
+      const recLabel = document.getElementById("recLabel");
+      const recTimer = document.getElementById("recTimer");
+      const fileInput = document.getElementById("fileInput");
+      const clipList = document.getElementById("clipList");
+      const totalBar = document.getElementById("totalBar");
+      const totalLabel = document.getElementById("totalLabel");
+      const voiceName = document.getElementById("voiceName");
+      const createBtn = document.getElementById("createBtn");
+      const createStatus = document.getElementById("createStatus");
+      const createReport = document.getElementById("createReport");
+      const cloneList = document.getElementById("cloneList");
+      const testClone = document.getElementById("testClone");
+      const testText = document.getElementById("testText");
+      const testLang = document.getElementById("testLang");
+      const testBtn = document.getElementById("testBtn");
+      const testLiveBtn = document.getElementById("testLiveBtn");
+      const testStatus = document.getElementById("testStatus");
+      const testAudio = document.getElementById("testAudio");
+      const healthBanner = document.getElementById("healthBanner");
+      const scoreBtn = document.getElementById("scoreBtn");
+      const scoreSummary = document.getElementById("scoreSummary");
+      const importInput = document.getElementById("importInput");
+      const importStatus = document.getElementById("importStatus");
+
+      // clips: { blob, url, seconds, name, selected, scored, score, rank, snr_db, speech_seconds, clip_ratio, consistency, flags }
+      const clips = [];
+      let scoreThreshold = 60;
+
+      // ── Health ──
+      fetch("/api/voice/health").then(r => r.json()).then(d => {
+        const tts = d.tts || {};
+        const ok = tts.status === "ok";
+        const state = tts.model_state ? (" (" + tts.model_state + ")") : "";
+        healthBanner.innerHTML = '<div style="padding:8px 12px;border-radius:8px;font-size:12px;'
+          + 'background:' + (ok ? 'rgba(34,197,94,0.1);color:#22c55e;border:1px solid rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.2)')
+          + ';">TTS: ' + (tts.status || "?") + state + '</div>';
+      }).catch(() => {
+        healthBanner.innerHTML = '<div style="padding:8px 12px;border-radius:8px;font-size:12px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.2);">TTS service unreachable</div>';
+      });
+
+      // ── WAV encoding (float32 → 16-bit PCM WAV) ──
+      function floatToWav(samples, sampleRate) {
+        const dataBytes = samples.length * 2;
+        const buf = new ArrayBuffer(44 + dataBytes);
+        const dv = new DataView(buf);
+        const ws = (off, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(off + i, s.charCodeAt(i)); };
+        ws(0, "RIFF"); dv.setUint32(4, 36 + dataBytes, true); ws(8, "WAVE");
+        ws(12, "fmt "); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+        dv.setUint32(24, sampleRate, true); dv.setUint32(28, sampleRate * 2, true);
+        dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+        ws(36, "data"); dv.setUint32(40, dataBytes, true);
+        let off = 44;
+        for (let i = 0; i < samples.length; i++) {
+          let s = Math.max(-1, Math.min(1, samples[i]));
+          dv.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+          off += 2;
+        }
+        return new Blob([buf], { type: "audio/wav" });
+      }
+
+      function scoreClass(s) { return s >= scoreThreshold ? "score-good" : (s >= scoreThreshold - 15 ? "score-mid" : "score-bad"); }
+
+      function renderClips() {
+        clipList.innerHTML = "";
+        let total = 0, selTotal = 0, selCount = 0;
+        const anyScored = clips.some(c => c.scored);
+        clips.forEach((c, i) => {
+          total += c.seconds || 0;
+          if (c.selected !== false) { selTotal += c.seconds || 0; selCount++; }
+          const div = document.createElement("div");
+          div.className = "clip-item" + (c.selected === false ? " excluded" : "");
+
+          const cb = document.createElement("input");
+          cb.type = "checkbox";
+          cb.checked = c.selected !== false;
+          cb.title = "Include in clone";
+          cb.addEventListener("change", () => { c.selected = cb.checked; renderClips(); });
+          div.appendChild(cb);
+
+          if (anyScored) {
+            const badge = document.createElement("span");
+            badge.className = "score-badge " + (c.scored ? scoreClass(c.score) : "score-mid");
+            badge.textContent = c.scored ? c.score : "–";
+            div.appendChild(badge);
+          }
+
+          const col = document.createElement("div");
+          col.className = "clip-col";
+          const details = [];
+          if (c.scored) {
+            if (c.speech_seconds != null) details.push(c.speech_seconds.toFixed(1) + "s speech");
+            if (c.snr_db != null) details.push("SNR " + c.snr_db + "dB");
+            if (c.consistency != null) details.push("match " + Math.round(c.consistency * 100) + "%");
+          } else {
+            details.push((c.seconds ? c.seconds.toFixed(1) + "s" : "?"));
+          }
+          const flags = (c.flags || []).filter(f => ["clipping", "noisy", "very_short", "outlier"].includes(f));
+          let detailHtml = '<span class="clip-detail">' + details.join(" · ");
+          if (flags.length) detailHtml += ' · <span class="flag">⚠ ' + flags.join(", ") + '</span>';
+          detailHtml += '</span>';
+          col.innerHTML = '<span class="clip-name">' + (c.name || "clip").replace(/</g, "&lt;") + '</span>' + detailHtml;
+          div.appendChild(col);
+
+          const audio = document.createElement("audio");
+          audio.controls = true; audio.preload = "none"; audio.src = c.url;
+          audio.style.height = "30px"; audio.style.width = "150px";
+          div.appendChild(audio);
+
+          const rm = document.createElement("button");
+          rm.className = "rm"; rm.textContent = "Remove";
+          rm.addEventListener("click", () => { URL.revokeObjectURL(c.url); clips.splice(i, 1); renderClips(); });
+          div.appendChild(rm);
+
+          clipList.appendChild(div);
+        });
+        totalLabel.textContent = clips.length + " clip" + (clips.length === 1 ? "" : "s") + " · " + total.toFixed(1) + "s total"
+          + (anyScored ? "  (" + selCount + " selected · " + selTotal.toFixed(1) + "s)" : "");
+        totalBar.style.width = Math.min(100, (selTotal || total) / 30 * 100) + "%";
+      }
+
+      // ── Recording via Web Audio (capture PCM → WAV so the sidecar can read it) ──
+      let recording = false;
+      let audioCtx = null, mediaStream = null, processor = null, srcNode = null, sink = null;
+      let recBuffers = [], recSampleRate = 16000, recStart = 0, recTimerInt = null;
+
+      async function startRecording() {
+        try {
+          mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        } catch (err) {
+          recLabel.textContent = "Mic access denied: " + err.message;
+          return;
+        }
+        const AC = window.AudioContext || window.webkitAudioContext;
+        audioCtx = new AC();
+        recSampleRate = audioCtx.sampleRate;
+        srcNode = audioCtx.createMediaStreamSource(mediaStream);
+        processor = audioCtx.createScriptProcessor(4096, 1, 1);
+        recBuffers = [];
+        processor.onaudioprocess = e => {
+          recBuffers.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+        };
+        srcNode.connect(processor);
+        sink = audioCtx.createGain();
+        sink.gain.value = 0;
+        processor.connect(sink);
+        sink.connect(audioCtx.destination);
+
+        recording = true;
+        recBtn.classList.add("recording");
+        recLabel.textContent = "Recording… click to stop";
+        recStart = Date.now();
+        recTimerInt = setInterval(() => {
+          recTimer.textContent = ((Date.now() - recStart) / 1000).toFixed(1) + "s";
+        }, 100);
+      }
+
+      function stopRecording() {
+        recording = false;
+        recBtn.classList.remove("recording");
+        recLabel.textContent = "Click to record a clip";
+        clearInterval(recTimerInt);
+        recTimer.textContent = "";
+        try { processor.disconnect(); srcNode.disconnect(); sink.disconnect(); } catch (e) {}
+        if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+
+        let total = 0;
+        recBuffers.forEach(b => total += b.length);
+        const merged = new Float32Array(total);
+        let off = 0;
+        recBuffers.forEach(b => { merged.set(b, off); off += b.length; });
+        const seconds = total / recSampleRate;
+        try { audioCtx.close(); } catch (e) {}
+        if (seconds < 0.3) { return; }
+        const blob = floatToWav(merged, recSampleRate);
+        clips.push({ blob, url: URL.createObjectURL(blob), seconds, name: "clip-" + (clips.length + 1) + ".wav" });
+        renderClips();
+      }
+
+      recBtn.addEventListener("click", () => { recording ? stopRecording() : startRecording(); });
+
+      // ── File upload ──
+      fileInput.addEventListener("change", () => {
+        Array.from(fileInput.files).forEach(file => {
+          const url = URL.createObjectURL(file);
+          const tmp = new Audio();
+          tmp.preload = "metadata";
+          tmp.onloadedmetadata = () => {
+            clips.push({ blob: file, url, seconds: isFinite(tmp.duration) ? tmp.duration : 0, name: file.name });
+            renderClips();
+          };
+          tmp.onerror = () => {
+            clips.push({ blob: file, url, seconds: 0, name: file.name });
+            renderClips();
+          };
+          tmp.src = url;
+        });
+        fileInput.value = "";
+      });
+
+      // ── Score / rank clips ──
+      scoreBtn.addEventListener("click", async () => {
+        if (!clips.length) { scoreSummary.textContent = "Add clips first."; return; }
+        const fd = new FormData();
+        clips.forEach(c => fd.append("audio", c.blob, c.name));
+        scoreBtn.disabled = true;
+        scoreBtn.textContent = "Scoring…";
+        scoreSummary.textContent = "Scoring " + clips.length + " clip(s) (GPU may need to wake)…";
+        try {
+          const r = await fetch("/api/voice/analyze", { method: "POST", body: fd });
+          if (!r.ok) { let m = "HTTP " + r.status; try { m = (await r.text()) || m; } catch (e) {} throw new Error(m); }
+          const d = await r.json();
+          scoreThreshold = d.threshold != null ? d.threshold : scoreThreshold;
+          (d.clips || []).forEach((rep, i) => {
+            if (!clips[i]) return;
+            clips[i].scored = (rep.score != null);
+            clips[i].score = rep.score;
+            clips[i].rank = rep.rank;
+            clips[i].snr_db = rep.snr_db;
+            clips[i].speech_seconds = rep.speech_seconds;
+            clips[i].clip_ratio = rep.clip_ratio;
+            clips[i].consistency = rep.consistency;
+            clips[i].flags = rep.flags || [];
+            clips[i].selected = !!rep.recommended;  // default-select clips over threshold
+          });
+          const sel = clips.filter(c => c.selected !== false).length;
+          const dropped = clips.length - sel;
+          scoreSummary.textContent = "Scored " + clips.length + " · " + sel + " selected"
+            + (dropped ? ", " + dropped + " below threshold (" + scoreThreshold + ")" : "")
+            + " · best-first order set";
+          renderClips();
+        } catch (err) {
+          scoreSummary.textContent = "Error: " + err.message;
+        } finally {
+          scoreBtn.disabled = false;
+          scoreBtn.textContent = "Score clips";
+        }
+      });
+
+      // ── Per-clip preprocessing report ──
+      function renderReport(reports) {
+        createReport.innerHTML = "";
+        reports.forEach((rep, i) => {
+          const parts = [];
+          if (rep.original_seconds != null && rep.kept_seconds != null) {
+            parts.push("kept " + rep.kept_seconds.toFixed(1) + "s of " + rep.original_seconds.toFixed(1) + "s");
+          }
+          if (rep.snr_db != null) {
+            parts.push("SNR ~" + rep.snr_db + " dB");
+          }
+          const denoised = (rep.applied || []).some(a => a.startsWith("denoise"));
+          if (denoised) {
+            parts.push("hum reduced");
+          }
+          if (rep.lufs_in != null && rep.lufs_out != null) {
+            const g = (rep.gain_db != null) ? (" (" + (rep.gain_db >= 0 ? "+" : "") + rep.gain_db + " dB)") : "";
+            parts.push("loudness " + rep.lufs_in + "\\u2192" + rep.lufs_out + " LUFS" + g);
+          }
+          const warns = rep.warnings || [];
+          const div = document.createElement("div");
+          div.className = "clip-item";
+          let html = '<span style="flex:1; font-size:12px;">'
+            + '<strong>' + (rep.name || ("clip-" + (i + 1))).replace(/</g, "&lt;") + '</strong> · '
+            + (parts.join(" · ") || "processed");
+          if (warns.length) {
+            html += '<br><span style="color:#fbbf24;">⚠ ' + warns.join(", ").replace(/</g, "&lt;") + '</span>';
+          }
+          html += '</span>';
+          div.innerHTML = html;
+          createReport.appendChild(div);
+        });
+      }
+
+      // ── Create clone ──
+      createBtn.addEventListener("click", async () => {
+        if (!clips.length) { createStatus.textContent = "Add at least one reference clip first."; return; }
+        const name = voiceName.value.trim();
+        if (!name) { createStatus.textContent = "Give the voice a name."; return; }
+
+        // Use only selected clips; send in best-first (ranked) order when scored.
+        const chosen = clips.filter(c => c.selected !== false);
+        if (!chosen.length) { createStatus.textContent = "No clips selected."; return; }
+        if (chosen.some(c => c.rank != null)) {
+          chosen.sort((a, b) => (a.rank != null ? a.rank : 1e9) - (b.rank != null ? b.rank : 1e9));
+        }
+        const total = chosen.reduce((a, c) => a + (c.seconds || 0), 0);
+        if (total && total < 6) { createStatus.textContent = "Note: under 6s total — cloning will run but quality may suffer."; }
+
+        const fd = new FormData();
+        fd.append("voice_name", name);
+        chosen.forEach(c => fd.append("audio", c.blob, c.name));
+
+        createBtn.disabled = true;
+        createStatus.textContent = "Cloning voice from " + chosen.length + " clip(s) (GPU may need to wake)…";
+        try {
+          const r = await fetch("/api/voice/clone", { method: "POST", body: fd });
+          if (!r.ok) { let m = "HTTP " + r.status; try { m = (await r.text()) || m; } catch (e) {} throw new Error(m); }
+          const d = await r.json();
+          createStatus.textContent = 'Created "' + (d.name || name) + '" (' + (d.num_clips || chosen.length) + ' clips). Loaded into the tester.';
+          renderReport(d.clips || []);
+          await loadClones(d.voice_clone_id);
+        } catch (err) {
+          createStatus.textContent = "Error: " + err.message;
+        } finally {
+          createBtn.disabled = false;
+        }
+      });
+
+      // ── Saved clones ──
+      async function loadClones(selectId) {
+        try {
+          const r = await fetch("/api/voice/clones");
+          const d = await r.json();
+          const list = d.clones || [];
+          cloneList.innerHTML = "";
+          testClone.innerHTML = '<option value="">Select a saved voice…</option>';
+          if (!list.length) { cloneList.innerHTML = '<div class="clip-meta">No saved voices yet.</div>'; }
+          list.forEach(c => {
+            const row = document.createElement("div");
+            row.className = "clone-row";
+            row.innerHTML = '<div style="flex:1;"><div class="nm">' + (c.name || c.companion_id || "voice").replace(/</g, "&lt;") + '</div>'
+              + '<div class="sub">' + (c.num_clips || 1) + ' clip(s) · ' + (c.total_seconds || 0) + 's</div></div>'
+              + '<button class="test-btn">Test</button>'
+              + '<button class="dl-btn secondary">Download</button>';
+            row.querySelector(".test-btn").addEventListener("click", () => {
+              testClone.value = c.voice_clone_id;
+              testStatus.textContent = 'Loaded "' + (c.name || c.companion_id) + '" — type a line and Speak.';
+              testText.focus();
+            });
+            row.querySelector(".dl-btn").addEventListener("click", () => {
+              const a = document.createElement("a");
+              a.href = "/api/voice/clones/" + encodeURIComponent(c.companion_id) + "/download";
+              a.download = (c.companion_id || "voice") + ".zip";
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+            });
+            cloneList.appendChild(row);
+
+            const opt = document.createElement("option");
+            opt.value = c.voice_clone_id;
+            opt.textContent = (c.name || c.companion_id) + " (" + (c.num_clips || 1) + " clips)";
+            testClone.appendChild(opt);
+          });
+          if (selectId) testClone.value = selectId;
+        } catch (err) {
+          cloneList.innerHTML = '<div class="clip-meta">Failed to load voices: ' + err.message + '</div>';
+        }
+      }
+
+      // ── Import a voice archive ──
+      importInput.addEventListener("change", async () => {
+        const file = importInput.files[0];
+        importInput.value = "";
+        if (!file) return;
+        const fd = new FormData();
+        fd.append("archive", file, file.name);
+        importStatus.textContent = "Importing…";
+        try {
+          const r = await fetch("/api/voice/clones/import", { method: "POST", body: fd });
+          if (!r.ok) { let m = "HTTP " + r.status; try { m = (await r.text()) || m; } catch (e) {} throw new Error(m); }
+          const d = await r.json();
+          importStatus.textContent = 'Imported "' + (d.name || d.companion_id) + '"';
+          await loadClones(d.voice_clone_id);
+        } catch (err) {
+          importStatus.textContent = "Error: " + err.message;
+        }
+      });
+
+      function testPayload() {
+        const id = testClone.value;
+        if (!id) { testStatus.textContent = "Select a saved voice."; return null; }
+        const text = testText.value.trim();
+        if (!text) { testStatus.textContent = "Type something to say."; return null; }
+        return { text, language: testLang.value, voice_clone_id: id };
+      }
+
+      testBtn.addEventListener("click", async () => {
+        const p = testPayload();
+        if (!p) return;
+        testBtn.disabled = true;
+        testStatus.textContent = "Synthesising…";
+        testAudio.innerHTML = "";
+        try {
+          const r = await fetch("/api/voice/synthesise", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p),
+          });
+          if (!r.ok) { let m = "HTTP " + r.status; try { m = (await r.text()) || m; } catch (e) {} throw new Error(m); }
+          const d = await r.json();
+          testStatus.textContent = "Duration: " + (d.duration || 0).toFixed(1) + "s";
+          const div = document.createElement("div");
+          div.className = "audio-item";
+          div.innerHTML = '<audio controls autoplay src="' + d.audio_url + '"></audio>';
+          testAudio.prepend(div);
+        } catch (err) {
+          testStatus.textContent = "Error: " + err.message;
+        } finally {
+          testBtn.disabled = false;
+        }
+      });
+
+      function floatChunksToWav(chunks, sampleRate) {
+        let total = 0; chunks.forEach(c => total += c.length);
+        const merged = new Float32Array(total);
+        let off = 0; chunks.forEach(c => { merged.set(c, off); off += c.length; });
+        return floatToWav(merged, sampleRate);
+      }
+
+      testLiveBtn.addEventListener("click", async () => {
+        const p = testPayload();
+        if (!p) return;
+        testLiveBtn.disabled = true;
+        testStatus.textContent = "Connecting…";
+        testAudio.innerHTML = "";
+        const AC = window.AudioContext || window.webkitAudioContext;
+        const ctx = new AC();
+        try { await ctx.resume(); } catch (e) {}
+        const t0 = performance.now();
+        let firstAt = null, leftover = new Uint8Array(0), nextTime = ctx.currentTime + 0.08, sr = 24000;
+        const collected = [];
+        try {
+          const resp = await fetch("/api/voice/synthesise/pcm", {
+            method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p),
+          });
+          if (!resp.ok) { let m = "HTTP " + resp.status; try { m = (await resp.text()) || m; } catch (e) {} throw new Error(m); }
+          sr = parseInt(resp.headers.get("X-Sample-Rate") || "24000", 10) || 24000;
+          const reader = resp.body.getReader();
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            const merged = new Uint8Array(leftover.length + value.length);
+            merged.set(leftover, 0); merged.set(value, leftover.length);
+            const usable = merged.length - (merged.length % 4);
+            if (usable <= 0) { leftover = merged; continue; }
+            const floats = new Float32Array(merged.buffer.slice(0, usable));
+            leftover = merged.slice(usable);
+            if (!floats.length) continue;
+            if (firstAt === null) { firstAt = ((performance.now() - t0) / 1000).toFixed(2); testStatus.textContent = "First audio in " + firstAt + "s — playing…"; }
+            collected.push(floats);
+            const ab = ctx.createBuffer(1, floats.length, sr);
+            ab.copyToChannel(floats, 0);
+            const node = ctx.createBufferSource();
+            node.buffer = ab; node.connect(ctx.destination);
+            const startAt = Math.max(ctx.currentTime, nextTime);
+            node.start(startAt); nextTime = startAt + ab.duration;
+          }
+          let totalSamples = 0; collected.forEach(c => totalSamples += c.length);
+          const dur = (totalSamples / sr).toFixed(1);
+          testStatus.textContent = "Live done — first audio " + (firstAt || "?") + "s, " + dur + "s total";
+          if (collected.length) {
+            const div = document.createElement("div");
+            div.className = "audio-item";
+            div.innerHTML = '<audio controls src="' + URL.createObjectURL(floatChunksToWav(collected, sr)) + '"></audio>';
+            testAudio.prepend(div);
+          }
+        } catch (err) {
+          testStatus.textContent = "Error: " + err.message;
+        } finally {
+          testLiveBtn.disabled = false;
+          const remainMs = Math.max(0, (nextTime - ctx.currentTime) * 1000 + 500);
+          setTimeout(() => { try { ctx.close(); } catch (e) {} }, remainMs);
+        }
+      });
+
+      renderClips();
+      loadClones();
+    })();
+    </script>
+    """
+
+    return render_page("Voice Cloning", body, extra_css)

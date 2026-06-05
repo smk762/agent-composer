@@ -3,21 +3,28 @@ faster-whisper STT server — FastAPI, port 8030.
 
 GPU-accelerated speech-to-text using CTranslate2 via faster-whisper.
 
+GPU memory lifecycle:
+  Model is loaded on first request (lazy) and evicted after
+  STT_KEEP_ALIVE_GPU seconds of inactivity, freeing VRAM for other
+  services.  Set to -1 to keep resident forever (original behaviour).
+
 Endpoints:
   POST /transcribe      — multipart file upload (playact-engine, rag-chat)
   POST /transcriptions   — JSON body with audio_url or audio_base64 (kimini-api)
   GET  /health           — readiness check
 
 Env vars:
-  STT_MODEL        — model id (default "large-v3-turbo")
-  STT_DEVICE       — "cuda" (default) or "cpu"
-  STT_COMPUTE_TYPE — "float16" (default), "int8", "int8_float16", "float32"
-  STT_VAD_FILTER   — "1" (default) to enable Silero VAD pre-filter
-  STT_BEAM_SIZE    — beam size for decoding (default 5)
+  STT_MODEL           — model id (default "large-v3-turbo")
+  STT_DEVICE          — "cuda" (default) or "cpu"
+  STT_COMPUTE_TYPE    — "float16" (default), "int8", "int8_float16", "float32"
+  STT_VAD_FILTER      — "1" (default) to enable Silero VAD pre-filter
+  STT_BEAM_SIZE       — beam size for decoding (default 5)
+  STT_KEEP_ALIVE_GPU  — seconds on GPU before eviction. -1 = forever. Default 120.
 """
 
 import asyncio
 import base64
+import gc
 import os
 import tempfile
 import time
@@ -37,36 +44,79 @@ STT_COMPUTE_TYPE = os.getenv("STT_COMPUTE_TYPE", "float16")
 STT_VAD_FILTER = os.getenv("STT_VAD_FILTER", "1") == "1"
 STT_BEAM_SIZE = int(os.getenv("STT_BEAM_SIZE", "5"))
 STT_DOWNLOAD_TIMEOUT = int(os.getenv("STT_DOWNLOAD_TIMEOUT", "30"))
+STT_KEEP_ALIVE_GPU: float = float(os.getenv("STT_KEEP_ALIVE_GPU", "120"))
 
 _model = None
+_last_used: float = 0.0
+_lock = asyncio.Lock()
+_evict_task: Optional[asyncio.Task] = None
 
 
-def _get_model():
+def _load_model():
+    from faster_whisper import WhisperModel
+
+    logger.info(
+        "loading_whisper",
+        model=STT_MODEL,
+        device=STT_DEVICE,
+        compute_type=STT_COMPUTE_TYPE,
+    )
+    model = WhisperModel(
+        STT_MODEL,
+        device=STT_DEVICE,
+        compute_type=STT_COMPUTE_TYPE,
+    )
+    logger.info("whisper_loaded")
+    return model
+
+
+def _unload_model():
     global _model
-    if _model is None:
-        from faster_whisper import WhisperModel
+    if _model is not None:
+        del _model
+        _model = None
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
+        logger.info("whisper_unloaded")
 
-        logger.info(
-            "loading_whisper",
-            model=STT_MODEL,
-            device=STT_DEVICE,
-            compute_type=STT_COMPUTE_TYPE,
-        )
-        _model = WhisperModel(
-            STT_MODEL,
-            device=STT_DEVICE,
-            compute_type=STT_COMPUTE_TYPE,
-        )
-        logger.info("whisper_loaded")
+
+async def _ensure_model():
+    global _model, _last_used, _evict_task
+    async with _lock:
+        if _model is None:
+            _model = await asyncio.to_thread(_load_model)
+        _last_used = time.time()
+        if _evict_task and not _evict_task.done():
+            _evict_task.cancel()
+        if STT_KEEP_ALIVE_GPU >= 0:
+            _evict_task = asyncio.create_task(_eviction_loop())
     return _model
 
 
-def _transcribe_sync(path: str, language: str | None) -> dict:
+async def _eviction_loop():
+    try:
+        if STT_KEEP_ALIVE_GPU == 0:
+            async with _lock:
+                _unload_model()
+            return
+        await asyncio.sleep(STT_KEEP_ALIVE_GPU)
+        async with _lock:
+            if time.time() - _last_used >= STT_KEEP_ALIVE_GPU:
+                _unload_model()
+    except asyncio.CancelledError:
+        pass
+
+
+def _transcribe_sync(path: str, language: str | None, model) -> dict:
     """Run transcription in a thread — faster-whisper is not async.
 
     Returns extended result with all fields needed by both endpoints.
     """
-    model = _get_model()
 
     kwargs: dict = {
         "beam_size": STT_BEAM_SIZE,
@@ -108,9 +158,10 @@ def _gpu_memory_info() -> dict | None:
 
 async def _run_transcription(tmp_path: str, language: str | None, endpoint: str) -> dict:
     """Shared transcription runner with GPU error handling."""
+    model = await _ensure_model()
     t0 = time.monotonic()
     try:
-        result = await asyncio.to_thread(_transcribe_sync, tmp_path, language)
+        result = await asyncio.to_thread(_transcribe_sync, tmp_path, language, model)
     except RuntimeError as exc:
         err_str = str(exc).lower()
         if "out of memory" in err_str or "cuda" in err_str:
@@ -252,4 +303,21 @@ async def health():
         "device": STT_DEVICE,
         "compute_type": STT_COMPUTE_TYPE,
         "model_loaded": loaded,
+        "model_state": "gpu" if loaded else "unloaded",
+        "keep_alive_gpu": STT_KEEP_ALIVE_GPU,
     }
+
+
+@app.post("/admin/evict")
+async def admin_evict():
+    """Force-unload model, freeing VRAM immediately."""
+    async with _lock:
+        _unload_model()
+    return {"status": "evicted", "model_state": "unloaded"}
+
+
+@app.post("/admin/wake")
+async def admin_wake():
+    """Pre-load model onto GPU."""
+    await _ensure_model()
+    return {"status": "ready", "model_state": "gpu"}
