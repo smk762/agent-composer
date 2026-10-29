@@ -355,13 +355,22 @@ async def synthesise(req: SynthesiseRequest):
     if gap_ms and gap_ms > 0 and len(sentences) > 1 and VOICE_S3_REHOST:
         gap_ms = min(int(gap_ms), MAX_SENTENCE_PAUSE_MS)
         base_payload = {k: v for k, v in payload.items() if k != "text"}
-        data = await _synthesise_paced(chain, base_payload, sentences, gap_ms)
-        log.info(
-            "voice: synthesise paced engine=%s sentences=%d gap=%dms elapsed=%dms duration=%.1fs",
-            data.get("engine"), len(sentences), gap_ms,
-            int((time.monotonic() - t0) * 1000), data.get("duration", 0),
-        )
-        return data
+        try:
+            data = await _synthesise_paced(chain, base_payload, sentences, gap_ms)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            # Pacing is cosmetic. A non-PCM WAV, a failed audio fetch, or a bucket
+            # that is down must not turn a working synth into a 500, so fall back
+            # to a single-shot render (as re-hosting already does).
+            log.warning("voice: paced synthesis failed (%s); using single-shot render", exc)
+        else:
+            log.info(
+                "voice: synthesise paced engine=%s sentences=%d gap=%dms elapsed=%dms duration=%.1fs",
+                data.get("engine"), len(sentences), gap_ms,
+                int((time.monotonic() - t0) * 1000), data.get("duration", 0),
+            )
+            return data
 
     last_exc: Optional[Exception] = None
     for name, base in chain:

@@ -45,7 +45,7 @@ services:
     # Remove `gpus` and NVIDIA_* env vars to run CPU-only.
     gpus: all
     ports:
-      - "${BIND_ADDR:-127.0.0.1}:${OLLAMA_PORT:-11434}:11434"
+      - "${OLLAMA_BIND_IP:-${BIND_ADDR:-127.0.0.1}}:${OLLAMA_PORT:-11434}:11434"
     volumes:
       - ollama:/root/.ollama
     environment:
@@ -113,7 +113,7 @@ services:
       - INGEST_REDIS_URL=${INGEST_REDIS_URL:-}
       - INGEST_NONCE_KEY_PREFIX=${INGEST_NONCE_KEY_PREFIX:-ingest:nonce:}
       - INGEST_MAX_SKEW_S=${INGEST_MAX_SKEW_S:-300}
-      - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
+      - QDRANT_URL=${QDRANT_URL:-http://192.168.1.109:6333}
       - OLLAMA_URL=http://ollama:11434
       - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-15m}
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-project_docs}
@@ -135,7 +135,7 @@ services:
     command: /app/init.sh
     # LAN-exposed: the remote signed-write ingestion entrypoint.
     ports:
-      - "${BIND_ADDR:-127.0.0.1}:${RAG_INGEST_PORT:-9050}:9050"
+      - "${RAG_INGEST_BIND_IP:-${BIND_ADDR:-127.0.0.1}}:${RAG_INGEST_PORT:-9050}:9050"
     depends_on: [ollama]
     healthcheck:
       test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:9050/health >/dev/null 2>&1 || exit 1"]
@@ -162,7 +162,7 @@ services:
       - GUARD_MODEL=${GUARD_MODEL:-hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M}
       - GUARD_THINKING=${GUARD_THINKING:-fast-slow}
       - CHAT_SYSTEM_PROMPT=${CHAT_SYSTEM_PROMPT:-You are a helpful assistant.}
-      - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
+      - QDRANT_URL=${QDRANT_URL:-http://192.168.1.109:6333}
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-project_docs}
       - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
       - RAG_ENABLED=${RAG_ENABLED:-1}
@@ -213,17 +213,17 @@ services:
       # Shared "voice" MinIO bucket — lets the proxy re-host rendered audio from
       # remote engines (e.g. Miso on another subnet) so browsers always fetch it
       # from the LAN-reachable S3_PUBLIC_URL. Same creds the tts/xtts sidecars use.
-      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://minio:9000}
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://192.168.1.109:9000}
       - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
       - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
       - S3_BUCKET_NAME=${S3_BUCKET_NAME:-voice}
-      - S3_PUBLIC_URL=${S3_PUBLIC_URL:-http://192.168.1.198:9000/voice}
+      - S3_PUBLIC_URL=${S3_PUBLIC_URL:-http://192.168.1.109:9000/voice}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: /app/init.sh
     # LAN-exposed: chat UI + API (browser-facing).
     ports:
-      - "${BIND_ADDR:-127.0.0.1}:${RAG_CHAT_PORT:-9150}:9150"
+      - "${RAG_CHAT_BIND_IP:-${BIND_ADDR:-127.0.0.1}}:${RAG_CHAT_PORT:-9150}:9150"
     depends_on:
       ollama:
         condition: service_started
@@ -339,11 +339,11 @@ services:
       - TTS_KEEP_ALIVE_CPU=${TTS_KEEP_ALIVE_CPU:-600}
       # Upload endpoint is internal (container → container); S3_PUBLIC_URL is the
       # host-reachable URL handed back to the browser to fetch the rendered audio.
-      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://minio:9000}
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://192.168.1.109:9000}
       - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
       - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
       - S3_BUCKET_NAME=${S3_BUCKET_NAME:-voice}
-      - S3_PUBLIC_URL=${S3_PUBLIC_URL:-http://192.168.1.198:9000/voice}
+      - S3_PUBLIC_URL=${S3_PUBLIC_URL:-http://192.168.1.109:9000/voice}
       - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     depends_on:
@@ -394,11 +394,11 @@ services:
       - COQUI_TOS_AGREED=1
       # Upload endpoint is internal (container → container); S3_PUBLIC_URL is the
       # host-reachable URL handed back to the browser to fetch the rendered audio.
-      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://minio:9000}
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://192.168.1.109:9000}
       - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
       - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
       - S3_BUCKET_NAME=${S3_BUCKET_NAME:-voice}
-      - S3_PUBLIC_URL=${S3_PUBLIC_URL:-http://192.168.1.198:9000/voice}
+      - S3_PUBLIC_URL=${S3_PUBLIC_URL:-http://192.168.1.109:9000/voice}
       - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     volumes:
@@ -447,7 +447,7 @@ services:
     depends_on: [xtts]
     # LAN-exposed: Home Assistant connects to this as a Wyoming tts engine.
     ports:
-      - "${BIND_ADDR:-127.0.0.1}:${WYOMING_TTS_PORT:-10200}:10200"
+      - "${WYOMING_TTS_BIND_IP:-${BIND_ADDR:-127.0.0.1}}:${WYOMING_TTS_PORT:-10200}:10200"
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 10200), 3).close()"]
       interval: 30s
@@ -484,7 +484,7 @@ services:
       - "host.docker.internal:host-gateway"
     # LAN-exposed: Home Assistant connects to this as a second Wyoming tts engine.
     ports:
-      - "${BIND_ADDR:-127.0.0.1}:${WYOMING_MISO_PORT:-10201}:10200"
+      - "${WYOMING_MISO_BIND_IP:-${BIND_ADDR:-127.0.0.1}}:${WYOMING_MISO_PORT:-10201}:10200"
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 10200), 3).close()"]
       interval: 30s
@@ -511,7 +511,7 @@ services:
     depends_on: [whisper]
     # LAN-exposed: Home Assistant connects to this as a Wyoming stt engine.
     ports:
-      - "${BIND_ADDR:-127.0.0.1}:${WYOMING_STT_PORT:-10300}:10300"
+      - "${WYOMING_STT_BIND_IP:-${BIND_ADDR:-127.0.0.1}}:${WYOMING_STT_PORT:-10300}:10300"
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 10300), 3).close()"]
       interval: 30s
