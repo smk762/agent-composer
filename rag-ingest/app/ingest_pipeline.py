@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -42,6 +43,8 @@ def _env_int(name: str, default: int) -> int:
     except ValueError:
         return default
 
+
+log = logging.getLogger("rag-ingest.ingest")
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "project_docs")
@@ -170,6 +173,37 @@ async def ensure_hybrid_collection(
         vectors_config={"dense": qm.VectorParams(size=dense_dim, distance=qm.Distance.COSINE)},
         sparse_vectors_config=sparse_cfg,
     )
+
+
+async def ensure_collections_on_startup() -> None:
+    """Idempotently create the active Qdrant collection(s) at launch.
+
+    Vector dimensionality is derived from a one-shot sample embedding so it
+    always matches the live model rather than a hardcoded constant. Best-effort:
+    callers must not let a failure here block startup — the per-upsert lazy
+    creation in the ingest path remains the fallback if the embedding backend
+    (Ollama/Infinity) or Qdrant isn't ready yet.
+    """
+    client = AsyncQdrantClient(url=QDRANT_URL)
+    try:
+        if RETRIEVAL_PROFILE == "code":
+            sample = await _get_code_client().embed(["def _ping():\n    return 1\n"], profile="code")
+            await ensure_hybrid_collection(
+                client, dense_dim=sample.dim, name=QDRANT_COLLECTION_CODE, with_sparse=HYBRID_SPARSE
+            )
+            log.info(
+                "qdrant bootstrap: ensured code collection %r (dim=%d, sparse=%s) @ %s",
+                QDRANT_COLLECTION_CODE, sample.dim, HYBRID_SPARSE, QDRANT_URL,
+            )
+        else:
+            sample = await _text_client.embed(["ping"], profile="text")
+            await ensure_legacy_collection(client, vector_size=sample.dim)
+            log.info(
+                "qdrant bootstrap: ensured text collection %r (dim=%d) @ %s",
+                QDRANT_COLLECTION, sample.dim, QDRANT_URL,
+            )
+    finally:
+        await client.close()
 
 
 # ---- Per-doc ingest helpers --------------------------------------------------

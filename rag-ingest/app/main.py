@@ -2,8 +2,10 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from textwrap import dedent
 from typing import Any, Dict, Optional
 
@@ -13,7 +15,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from app.inference_retry import RetryableOomError
-from app.ingest_pipeline import ingest_docs
+from app.ingest_pipeline import ensure_collections_on_startup, ingest_docs
 from app.metrics import MetricsMiddleware, metrics_router
 from app.nonce_store import (
     NonceStore,
@@ -22,7 +24,22 @@ from app.nonce_store import (
     RedisNonceStoreConfig,
 )
 
-app = FastAPI(title="RAG Ingestion API")
+log = logging.getLogger("rag-ingest")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Provision the Qdrant collection(s) on launch if missing. Best-effort:
+    # never block startup if the embedding backend or Qdrant isn't ready yet —
+    # the ingest path lazily creates them on first upsert as a fallback.
+    try:
+        await ensure_collections_on_startup()
+    except Exception as e:
+        log.warning("startup qdrant collection ensure skipped: %s", e)
+    yield
+
+
+app = FastAPI(title="RAG Ingestion API", lifespan=lifespan)
 app.add_middleware(MetricsMiddleware)
 app.include_router(metrics_router)
 
@@ -38,23 +55,63 @@ EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
 if not SHARED_SECRET:
     raise RuntimeError("INGEST_SHARED_SECRET is required")
 
-if NONCE_STORE_BACKEND == "redis":
+_NONCE_TTL_S = max(600, MAX_SKEW_S + 120)
+
+
+def _redacted(url: str) -> str:
+    """Strip the password from a redis URL for safe logging."""
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+
+        parts = urlsplit(url)
+        if parts.password:
+            netloc = parts.hostname or ""
+            if parts.username:
+                netloc = f"{parts.username}:***@{netloc}"
+            else:
+                netloc = f":***@{netloc}"
+            if parts.port:
+                netloc = f"{netloc}:{parts.port}"
+            return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+    except Exception:
+        pass
+    return url
+
+
+def _build_nonce_store():
+    """Select the nonce backend. With INGEST_NONCE_STORE=redis we probe the
+    server at startup and fall back to the local SQLite store if it's
+    unreachable, so replay protection degrades gracefully rather than 500-ing
+    every ingest when the stateful node's Redis is down."""
+    sqlite_cfg = NonceStoreConfig(db_path=NONCE_DB_PATH, nonce_ttl_s=_NONCE_TTL_S)
+
+    if NONCE_STORE_BACKEND != "redis":
+        return NonceStore(sqlite_cfg), "sqlite"
+
     if not INGEST_REDIS_URL:
         raise RuntimeError("INGEST_REDIS_URL is required when INGEST_NONCE_STORE=redis")
-    _nonce_store = RedisNonceStore(
-        RedisNonceStoreConfig(
-            redis_url=INGEST_REDIS_URL,
-            nonce_ttl_s=max(600, MAX_SKEW_S + 120),
-            key_prefix=INGEST_NONCE_KEY_PREFIX,
+
+    try:
+        store = RedisNonceStore(
+            RedisNonceStoreConfig(
+                redis_url=INGEST_REDIS_URL,
+                nonce_ttl_s=_NONCE_TTL_S,
+                key_prefix=INGEST_NONCE_KEY_PREFIX,
+            )
         )
-    )
-else:
-    _nonce_store = NonceStore(
-        NonceStoreConfig(
-            db_path=NONCE_DB_PATH,
-            nonce_ttl_s=max(600, MAX_SKEW_S + 120),
+        store.ping()
+        log.info("nonce store: redis @ %s", _redacted(INGEST_REDIS_URL))
+        return store, "redis"
+    except Exception as e:
+        log.warning(
+            "nonce store: redis unreachable (%s); falling back to sqlite at %s",
+            e,
+            NONCE_DB_PATH,
         )
-    )
+        return NonceStore(sqlite_cfg), "sqlite-fallback"
+
+
+_nonce_store, NONCE_BACKEND = _build_nonce_store()
 
 def _hmac_key() -> bytes:
     return hashlib.sha256(SHARED_SECRET.encode("utf-8")).digest()
@@ -108,7 +165,7 @@ class IngestDoc(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {"ok": True, "nonce_store": NONCE_BACKEND}
 
 
 @app.get("/ui/ingest", response_class=HTMLResponse)
