@@ -3,4 +3,4 @@ services:
   # Internal Docker access via http://ollama:11434 remains unchanged.
   ollama:
     ports:
-      - "${OLLAMA_BIND_IP:-127.0.0.1}:${OLLAMA_PORT:-11434}:11434"
+      - "${BIND_ADDR:-127.0.0.1}:${OLLAMA_PORT:-11434}:11434"

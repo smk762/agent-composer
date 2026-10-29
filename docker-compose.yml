@@ -1,75 +1,26 @@
 services:
-  # Chat database — dedicated PostgreSQL for rag-chat
-  postgres:
-    image: postgres:16-alpine
-    container_name: rag-postgres
-    restart: unless-stopped
-    environment:
-      - POSTGRES_USER=${PG_USER:-ragchat}
-      - POSTGRES_PASSWORD=${PG_PASSWORD:-ragchat}
-      - POSTGRES_DB=${PG_DB:-ragchat}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${PG_USER:-ragchat}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    networks: [internal]
+  # ── Stateful services live on the dedicated stateful node (192.168.1.109) ──
+  # PostgreSQL (chat history), Qdrant (vector store), and MinIO (object store)
+  # are NOT run in this compose stack any more. They are provided by the remote
+  # stateful node and reached over the LAN via:
+  #   DATABASE_URL  -> postgresql://...@192.168.1.109:5432/ragchat
+  #   QDRANT_URL    -> http://192.168.1.109:6333
+  #   S3_ENDPOINT_URL / MEDIA_S3_ENDPOINT_URL -> http://192.168.1.109:9000
+  # Bucket provisioning is handled at launch by the `minio-setup` one-shot
+  # below; PostgreSQL schema by rag-chat's init (bootstrap_db + alembic); Qdrant
+  # collections by rag-ingest on startup. Credentials live in .env.
 
-  # Vector store — used by rag-ingest (write) and rag-chat (read)
-  qdrant:
-    image: qdrant/qdrant:latest
-    container_name: qdrant
-    restart: unless-stopped
-    ports:
-      - "${QDRANT_BIND_IP:-127.0.0.1}:${QDRANT_HTTP_PORT:-6333}:6333"
-      - "${QDRANT_BIND_IP:-127.0.0.1}:${QDRANT_GRPC_PORT:-6334}:6334"
-    volumes:
-      - qdrant_data:/qdrant/storage
-    healthcheck:
-      test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:6333/readyz >/dev/null 2>&1 || exit 1"]
-      interval: 20s
-      timeout: 5s
-      retries: 10
-    networks: [internal]
-
-  # S3-compatible object store — holds generated media (TTS audio + voice clone
-  # prompts) and rag-chat uploads. Published on the host so browsers can fetch
-  # TTS audio directly via S3_PUBLIC_URL; written internally via http://minio:9000.
-  minio:
-    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
-    container_name: minio
-    restart: unless-stopped
-    command: server /data --console-address ":9001"
-    environment:
-      - MINIO_ROOT_USER=${S3_ACCESS_KEY_ID:-minioadmin}
-      - MINIO_ROOT_PASSWORD=${S3_SECRET_ACCESS_KEY:-minioadmin}
-    volumes:
-      - minio_data:/data
-    ports:
-      - "${MINIO_BIND_IP:-0.0.0.0}:${MINIO_API_PORT:-9000}:9000"
-      - "${MINIO_BIND_IP:-0.0.0.0}:${MINIO_CONSOLE_PORT:-9001}:9001"
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 20s
-      timeout: 5s
-      retries: 10
-      start_period: 15s
-    networks: [internal]
-
-  # One-shot bucket provisioner: creates the TTS + media buckets and grants
-  # anonymous read on the generated-audio prefix so browsers can play TTS output.
+  # One-shot MinIO provisioner (stateful node). Idempotently creates the TTS +
+  # media buckets if missing and grants anonymous read on the generated-audio
+  # prefix so browsers can play TTS output. Safe to re-run on every `up`.
   minio-setup:
     image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
     container_name: minio-setup
     restart: "no"
-    depends_on:
-      minio:
-        condition: service_healthy
     environment:
-      - MINIO_ROOT_USER=${S3_ACCESS_KEY_ID:-minioadmin}
-      - MINIO_ROOT_PASSWORD=${S3_SECRET_ACCESS_KEY:-minioadmin}
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://192.168.1.109:9000}
+      - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
+      - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
       - TTS_BUCKET=${S3_BUCKET_NAME:-voice}
       - MEDIA_BUCKET=${MEDIA_S3_BUCKET:-uploads}
     entrypoint:
@@ -77,11 +28,11 @@ services:
       - -c
       - |
         set -e
-        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
-        mc mb --ignore-existing "local/$$TTS_BUCKET"
-        mc mb --ignore-existing "local/$$MEDIA_BUCKET"
-        mc anonymous set download "local/$$TTS_BUCKET/generated"
-        echo "minio buckets ready: $$TTS_BUCKET (public: generated/), $$MEDIA_BUCKET (private)"
+        mc alias set stateful "$$S3_ENDPOINT_URL" "$$S3_ACCESS_KEY_ID" "$$S3_SECRET_ACCESS_KEY"
+        mc mb --ignore-existing "stateful/$$TTS_BUCKET"
+        mc mb --ignore-existing "stateful/$$MEDIA_BUCKET"
+        mc anonymous set download "stateful/$$TTS_BUCKET/generated"
+        echo "minio ready @ $$S3_ENDPOINT_URL: $$TTS_BUCKET (public: generated/), $$MEDIA_BUCKET (private)"
     networks: [internal]
 
   # Local LLM runtime (kept internal; accessed by rag-ingest and rag-chat only)
@@ -94,7 +45,7 @@ services:
     # Remove `gpus` and NVIDIA_* env vars to run CPU-only.
     gpus: all
     ports:
-      - "${OLLAMA_BIND_IP:-127.0.0.1}:${OLLAMA_PORT:-11434}:11434"
+      - "${BIND_ADDR:-127.0.0.1}:${OLLAMA_PORT:-11434}:11434"
     volumes:
       - ollama:/root/.ollama
     environment:
@@ -132,8 +83,10 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     volumes:
       - infinity_hf_cache:/data/hf
+    # Loopback only: consumed internally via http://infinity:7997, plus the
+    # same-host ai-code-auditor which reaches it on 127.0.0.1:7997. No LAN need.
     ports:
-      - "${INFINITY_BIND_IP:-127.0.0.1}:${INFINITY_PORT:-7997}:7997"
+      - "127.0.0.1:${INFINITY_PORT:-7997}:7997"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7997/health', timeout=5).read()"]
       interval: 30s
@@ -180,9 +133,10 @@ services:
       - HYBRID_SPARSE=${HYBRID_SPARSE:-0}
       - QDRANT_COLLECTION_CODE=${QDRANT_COLLECTION_CODE:-code_audit}
     command: /app/init.sh
+    # LAN-exposed: the remote signed-write ingestion entrypoint.
     ports:
-      - "${RAG_INGEST_BIND_IP:-0.0.0.0}:${RAG_INGEST_PORT:-9050}:9050"
-    depends_on: [ollama, qdrant]
+      - "${BIND_ADDR:-127.0.0.1}:${RAG_INGEST_PORT:-9050}:9050"
+    depends_on: [ollama]
     healthcheck:
       test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:9050/health >/dev/null 2>&1 || exit 1"]
       interval: 20s
@@ -214,7 +168,8 @@ services:
       - RAG_ENABLED=${RAG_ENABLED:-1}
       - RAG_TOP_K=${RAG_TOP_K:-5}
       - RAG_MAX_CONTEXT_CHARS=${RAG_MAX_CONTEXT_CHARS:-4000}
-      - DATABASE_URL=postgresql://${PG_USER:-ragchat}:${PG_PASSWORD:-ragchat}@postgres:5432/${PG_DB:-ragchat}
+      # Remote PostgreSQL on the stateful node — full DSN supplied via .env.
+      - DATABASE_URL=${DATABASE_URL:-postgresql://ragchat:ragchat@192.168.1.109:5432/ragchat}
       - CHAT_HISTORY_MAX_MSGS=${CHAT_HISTORY_MAX_MSGS:-100}
       - DEV_AUTH_BYPASS=${DEV_AUTH_BYPASS:-0}
       - DEV_DEFAULT_USER=${DEV_DEFAULT_USER:-dev@example.com}
@@ -255,17 +210,22 @@ services:
       - TTS_FALLBACK_ENGINE=${TTS_FALLBACK_ENGINE:-}
       - TTS_URL=${TTS_URL:-http://xtts:8031}
       - VOICE_TIMEOUT=${VOICE_TIMEOUT:-180}
+      # Shared "voice" MinIO bucket — lets the proxy re-host rendered audio from
+      # remote engines (e.g. Miso on another subnet) so browsers always fetch it
+      # from the LAN-reachable S3_PUBLIC_URL. Same creds the tts/xtts sidecars use.
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://minio:9000}
+      - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
+      - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-voice}
+      - S3_PUBLIC_URL=${S3_PUBLIC_URL:-http://192.168.1.198:9000/voice}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: /app/init.sh
+    # LAN-exposed: chat UI + API (browser-facing).
     ports:
-      - "${RAG_CHAT_BIND_IP:-0.0.0.0}:${RAG_CHAT_PORT:-9150}:9150"
+      - "${BIND_ADDR:-127.0.0.1}:${RAG_CHAT_PORT:-9150}:9150"
     depends_on:
-      postgres:
-        condition: service_healthy
       ollama:
-        condition: service_started
-      qdrant:
         condition: service_started
       minio-setup:
         condition: service_completed_successfully
@@ -304,8 +264,10 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     volumes:
       - modernbert_data:/data
+    # Loopback only: real access is via rag-chat's /api/pipeline/* proxy
+    # (http://modernbert:7998 on the internal net). Host port is for debugging.
     ports:
-      - "${MODERNBERT_BIND_IP:-127.0.0.1}:${MODERNBERT_PORT:-7998}:7998"
+      - "127.0.0.1:${MODERNBERT_PORT:-7998}:7998"
     healthcheck:
       test: ["CMD", "sh", "-lc", "wget -qO- http://127.0.0.1:7998/health >/dev/null 2>&1 || exit 1"]
       interval: 30s
@@ -335,8 +297,10 @@ services:
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     volumes:
       - whisper_cache:/root/.cache
+    # Loopback only: browser STT goes through rag-chat (/api/voice/transcribe)
+    # and Home Assistant through wyoming-whisper. Host port is for debugging.
     ports:
-      - "${WHISPER_BIND_IP:-127.0.0.1}:${WHISPER_PORT:-8032}:8030"
+      - "127.0.0.1:${WHISPER_PORT:-8032}:8030"
     deploy:
       resources:
         reservations:
@@ -385,8 +349,10 @@ services:
     depends_on:
       minio-setup:
         condition: service_completed_successfully
+    # Loopback only: legacy rollback engine, consumed by rag-chat via
+    # http://tts:8031 on the internal net. Host port is for debugging.
     ports:
-      - "${TTS_BIND_IP:-127.0.0.1}:${TTS_PORT:-8031}:8031"
+      - "127.0.0.1:${TTS_PORT:-8031}:8031"
     deploy:
       resources:
         reservations:
@@ -440,8 +406,11 @@ services:
     depends_on:
       minio-setup:
         condition: service_completed_successfully
+    # Loopback only: browser TTS goes through rag-chat (/api/voice/*) and Home
+    # Assistant through wyoming-xtts. Host port is for debugging. Rendered audio
+    # is served to browsers from MinIO via S3_PUBLIC_URL, not from this port.
     ports:
-      - "${XTTS_BIND_IP:-127.0.0.1}:${XTTS_PORT:-8033}:8031"
+      - "127.0.0.1:${XTTS_PORT:-8033}:8031"
     deploy:
       resources:
         reservations:
@@ -476,8 +445,9 @@ services:
       - WYOMING_URI=tcp://0.0.0.0:10200
       - LOG_LEVEL=${WYOMING_LOG_LEVEL:-INFO}
     depends_on: [xtts]
+    # LAN-exposed: Home Assistant connects to this as a Wyoming tts engine.
     ports:
-      - "${WYOMING_TTS_BIND_IP:-0.0.0.0}:${WYOMING_TTS_PORT:-10200}:10200"
+      - "${BIND_ADDR:-127.0.0.1}:${WYOMING_TTS_PORT:-10200}:10200"
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 10200), 3).close()"]
       interval: 30s
@@ -512,8 +482,9 @@ services:
       - LOG_LEVEL=${WYOMING_LOG_LEVEL:-INFO}
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # LAN-exposed: Home Assistant connects to this as a second Wyoming tts engine.
     ports:
-      - "${WYOMING_MISO_BIND_IP:-0.0.0.0}:${WYOMING_MISO_PORT:-10201}:10200"
+      - "${BIND_ADDR:-127.0.0.1}:${WYOMING_MISO_PORT:-10201}:10200"
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 10200), 3).close()"]
       interval: 30s
@@ -538,8 +509,9 @@ services:
       - WYOMING_URI=tcp://0.0.0.0:10300
       - LOG_LEVEL=${WYOMING_LOG_LEVEL:-INFO}
     depends_on: [whisper]
+    # LAN-exposed: Home Assistant connects to this as a Wyoming stt engine.
     ports:
-      - "${WYOMING_STT_BIND_IP:-0.0.0.0}:${WYOMING_STT_PORT:-10300}:10300"
+      - "${BIND_ADDR:-127.0.0.1}:${WYOMING_STT_PORT:-10300}:10300"
     healthcheck:
       test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 10300), 3).close()"]
       interval: 30s
@@ -566,10 +538,7 @@ networks:
     driver: bridge
 
 volumes:
-  postgres_data:
   ollama:
-  qdrant_data:
-  minio_data:
   rag_ingest_data:
   rag_chat_data:
   rag_chat_media:
