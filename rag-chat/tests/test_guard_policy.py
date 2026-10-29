@@ -226,6 +226,30 @@ class ParseTests(unittest.TestCase):
         self.assertTrue(verdict.safe)
         self.assertEqual(verdict.rule, "Safe")
 
+    def test_slow_output_cut_off_before_answer_is_unsafe(self) -> None:
+        # Token cap hit mid-reasoning: the lone "safe" line is not a final verdict.
+        raw = (
+            "[Step 1] Content Summary\n"
+            "A request that is hard to place.\n"
+            "[Step 2] Check Risk Categories\n"
+            "safe\n"
+            "Looking at rule B more closely,"
+        )
+        verdict = parse_singguard_output(raw)
+        self.assertFalse(verdict.safe)
+        self.assertEqual(verdict.verdict, "unsafe")
+        self.assertIn("cut off", verdict.explanation)
+
+    def test_slow_reasoning_line_starting_with_safe_is_not_a_verdict(self) -> None:
+        raw = (
+            "[Step 1] Content Summary\n"
+            "A request.\n"
+            "[Step 2] Check Risk Categories\n"
+            "Safe topics only if no rule applies, but rule B may apply because"
+        )
+        verdict = parse_singguard_output(raw)
+        self.assertFalse(verdict.safe)
+
     def test_first_line_still_wins_over_a_later_revision(self) -> None:
         raw = (
             "unsafe\n"

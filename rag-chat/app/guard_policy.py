@@ -141,6 +141,10 @@ _ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.IGNORECASE | re.DOTA
 _THINK_RE = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
 _HEADING_RE = re.compile(r"^###\s+(.+?)\s*$", re.MULTILINE)
 _LINE_VERDICT = re.compile(r"^\s*(safe|unsafe)\b", re.IGNORECASE)
+# A verdict that follows reasoning must stand alone on its line. Reasoning
+# lines such as "Safe: no rule matches" or "Unsafe content would include..."
+# are discussion, not the label, so they must not read as one.
+_LATE_VERDICT_LINE = re.compile(r"^\s*\**\s*(safe|unsafe)\s*\**\s*[.!]?\s*$", re.IGNORECASE)
 _STEP3_HEADING = re.compile(r"^\[step 3\]", re.IGNORECASE)
 _CONCLUDE_RE = re.compile(
     r"\b(?:conclude(?:s|d)?|classified as|final judgment[:\s]+)\s+(safe|unsafe)\b",
@@ -370,7 +374,7 @@ def _first_verdict(lines: list[str]) -> str | None:
 
 
 def _late_verdict(lines: list[str]) -> str | None:
-    """Verdict after reasoning: last line that starts with safe/unsafe, else Step 3."""
+    """Verdict after reasoning: last line that is only safe/unsafe, else Step 3."""
     found = None
     step3_hit = None
     in_step3 = False
@@ -378,9 +382,9 @@ def _late_verdict(lines: list[str]) -> str | None:
         if _STEP3_HEADING.match(line):
             in_step3 = True
             continue
-        token = _verdict_token(line)
-        if token:
-            found = token
+        late = _LATE_VERDICT_LINE.match(line)
+        if late:
+            found = late.group(1).lower()
             continue
         if in_step3:
             conclude = _CONCLUDE_RE.search(line)
@@ -401,9 +405,14 @@ def parse_singguard_output(raw: str, policy: str | None = None) -> GuardVerdict:
     rules = policy_rules(policy)
     lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
     first_line_is_verdict = _first_verdict(lines) is not None
-    verdict = _first_verdict(lines) or _late_verdict(lines)
-
     answer_match = _ANSWER_RE.search(cleaned)
+    late = None if first_line_is_verdict else _late_verdict(lines)
+    # A slow reply is only complete once it reaches <answer>. A reply cut off
+    # mid-reasoning (token cap) can still contain a line that looks like a
+    # verdict, so without <answer> it is unreadable, never safe.
+    truncated = late is not None and answer_match is None
+    verdict = _first_verdict(lines) or (None if truncated else late)
+
     rule_title = answer_match.group(1).strip() if answer_match else ""
     rule_title = " ".join(rule_title.split())
     matched = _lookup_rule(rule_title, rules)
@@ -417,10 +426,16 @@ def parse_singguard_output(raw: str, policy: str | None = None) -> GuardVerdict:
     if verdict is None:
         safe = False
         verdict_out = "unsafe"
-        notes.append(
-            "SingGuard did not give a safe or unsafe verdict. "
-            "The check is unsafe so an unreadable result is not treated as safe."
-        )
+        if truncated:
+            notes.append(
+                "SingGuard's reply ended before its <answer>, so it may have been "
+                "cut off. The check is unsafe so an incomplete result is not treated as safe."
+            )
+        else:
+            notes.append(
+                "SingGuard did not give a safe or unsafe verdict. "
+                "The check is unsafe so an unreadable result is not treated as safe."
+            )
     elif verdict == "safe" and (not rule_title or is_safe_rule):
         safe = True
         verdict_out = "safe"

@@ -52,7 +52,7 @@ docker exec -it ollama ollama pull qwen2.5-coder:32b
 Copy `env.example` → `.env`. Key variables:
 
 - `INGEST_SHARED_SECRET` — required for rag-ingest HMAC signing
-- `QDRANT_URL` — defaults to `http://qdrant:6333` (container name)
+- `QDRANT_URL` — defaults to `http://192.168.1.109:6333` (Qdrant, Postgres and MinIO run on the stateful node, not in this compose file; `S3_ENDPOINT_URL` / `S3_PUBLIC_URL` default there too)
 - `DATABASE_URL` — set automatically by compose to the internal postgres container
 - `RETRIEVAL_PROFILE` — `text` (default, Ollama) or `code` (tree-sitter + Infinity)
 - `MODERNBERT_URL` — defaults to `http://modernbert:7998`
@@ -100,4 +100,4 @@ See `scripts/example_tool_calling_client.py` and `scripts/test_endpoints.py` for
 
 ## Cloudflare
 
-`cloudflared` is on the `cloud` compose profile and only starts with `docker compose --profile cloud up`. For LAN-only dev, omit the profile. Set bind IPs via `RAG_INGEST_BIND_IP` / `RAG_CHAT_BIND_IP`.
+`cloudflared` is on the `cloud` compose profile and only starts with `docker compose --profile cloud up`. For LAN-only dev, omit the profile. Published ports bind to loopback by default; set `BIND_ADDR` (all services) or a per-service `RAG_INGEST_BIND_IP` / `RAG_CHAT_BIND_IP` / `OLLAMA_BIND_IP` / `WYOMING_{TTS,MISO,STT}_BIND_IP` to expose them on the LAN.
