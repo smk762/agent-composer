@@ -48,13 +48,13 @@ services:
       - TTS_MODEL_SIZE=${TTS_MODEL_SIZE:-0.6b}
       - TTS_DEVICE=${TTS_DEVICE:-cuda:0}
       - TTS_LOAD_MODELS=${TTS_LOAD_MODELS:-both}
-      # Standalone voice-stack has no in-stack minio; point at the main stack's
-      # published MinIO on the host (192.168.1.198:9000).
-      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://192.168.1.198:9000}
+      # Standalone voice-stack has no in-stack minio; point at MinIO on the
+      # stateful node (192.168.1.109:9000), same default as the main stack.
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://192.168.1.109:9000}
       - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
       - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
       - S3_BUCKET_NAME=${S3_BUCKET_NAME:-voice}
-      - S3_PUBLIC_URL=${S3_PUBLIC_URL:-http://192.168.1.198:9000/voice}
+      - S3_PUBLIC_URL=${S3_PUBLIC_URL:-http://192.168.1.109:9000/voice}
       - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     deploy:
@@ -90,13 +90,13 @@ services:
       - XTTS_KEEP_ALIVE_GPU=${XTTS_KEEP_ALIVE_GPU:-120}
       - XTTS_KEEP_ALIVE_CPU=${XTTS_KEEP_ALIVE_CPU:-600}
       - COQUI_TOS_AGREED=1
-      # Standalone voice-stack has no in-stack minio; point at the main stack's
-      # published MinIO on the host (192.168.1.198:9000).
-      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://192.168.1.198:9000}
+      # Standalone voice-stack has no in-stack minio; point at MinIO on the
+      # stateful node (192.168.1.109:9000), same default as the main stack.
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://192.168.1.109:9000}
       - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
       - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
       - S3_BUCKET_NAME=${S3_BUCKET_NAME:-voice}
-      - S3_PUBLIC_URL=${S3_PUBLIC_URL:-http://192.168.1.198:9000/voice}
+      - S3_PUBLIC_URL=${S3_PUBLIC_URL:-http://192.168.1.109:9000/voice}
       - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     volumes:
