@@ -599,7 +599,7 @@ def generate_ui():
     }
     .gallery-item:hover { transform:scale(1.02); }
     .gallery-item img, .gallery-item video { width:100%; display:block; }
-    .gallery-item .meta { padding:8px 10px; font-size:12px; color:var(--muted); }
+    .gallery-item .meta { padding:8px 10px; font-size:12px; color:var(--muted); white-space:pre-wrap; }
     .gen-status { padding:12px; border:1px solid var(--border); border-radius:10px; margin-top:12px; background:rgba(56,189,248,0.06); }
     .upload-area {
       border:2px dashed var(--border); border-radius:12px; padding:20px; text-align:center;
@@ -837,7 +837,7 @@ def generate_ui():
         setupUpload("edit-mask-area", "edit-mask-input");
 
         // ---- Rendering ----
-        function renderMedia(galleryId, media) {{
+        function renderMedia(galleryId, media, prompt) {{
           const gal = document.getElementById(galleryId);
           media.forEach(m => {{
             const item = document.createElement("div");
@@ -846,10 +846,62 @@ def generate_ui():
               item.innerHTML = `<video src="${{m.url}}" controls></video><div class="meta">${{m.filename}}</div>`;
             }} else {{
               item.innerHTML = `<img src="${{m.url}}" alt="${{m.filename}}" /><div class="meta">${{m.filename}}</div>`;
+              const btn = document.createElement("button");
+              btn.type = "button";
+              btn.textContent = "Check image";
+              btn.style.cssText = "margin:0 10px 8px; font-size:12px; padding:4px 10px;";
+              const note = document.createElement("div");
+              note.className = "meta";
+              btn.addEventListener("click", (ev) => {{
+                ev.stopPropagation();
+                checkOutputImage(m.url, prompt || "", btn, note);
+              }});
+              item.appendChild(btn);
+              item.appendChild(note);
             }}
             item.addEventListener("click", () => window.open(m.url, "_blank"));
             gal.appendChild(item);
           }});
+        }}
+
+        async function checkOutputImage(url, prompt, btn, note) {{
+          btn.disabled = true;
+          note.textContent = "Checking the image against the prompt...";
+          try {{
+            const img = await fetch(url, {{ headers: authHeaders() }});
+            if (!img.ok) {{
+              note.textContent = "Could not load the image (" + img.status + ").";
+              return;
+            }}
+            const blob = await img.blob();
+            const dataUrl = await new Promise((resolve, reject) => {{
+              const reader = new FileReader();
+              reader.onload = () => resolve(reader.result);
+              reader.onerror = () => reject(new Error("Could not read the image"));
+              reader.readAsDataURL(blob);
+            }});
+            const r = await fetch("/api/guard/check", {{
+              method: "POST",
+              headers: Object.assign({{ "Content-Type": "application/json" }}, authHeaders()),
+              body: JSON.stringify({{
+                input: prompt,
+                image_base64: dataUrl,
+                thinking: "fast-slow",
+              }}),
+            }});
+            const data = await r.json().catch(() => ({{}}));
+            if (!r.ok) {{
+              note.textContent = data.detail || ("Check failed (" + r.status + ")");
+              return;
+            }}
+            note.textContent = (data.safe ? "SAFE" : "UNSAFE")
+              + (data.rule ? " — " + data.rule : "")
+              + (data.explanation ? "\\n" + data.explanation : "");
+          }} catch (e) {{
+            note.textContent = "Check failed: " + e.message;
+          }} finally {{
+            btn.disabled = false;
+          }}
         }}
 
         function setStatus(id, msg, isError) {{
@@ -886,7 +938,7 @@ def generate_ui():
             }}
             const data = await r.json();
             setStatus("img-status", `Generated ${{data.media.length}} image(s) via ${{data.provider}} / ${{data.model}}`, false);
-            renderMedia("img-gallery", data.media);
+            renderMedia("img-gallery", data.media, prompt);
           }} catch(e) {{
             setStatus("img-status", "Error: " + e.message, true);
           }}
@@ -921,7 +973,7 @@ def generate_ui():
             }}
             const data = await r.json();
             setStatus("edit-status", `Edited via ${{data.provider}} / ${{data.model}}`, false);
-            renderMedia("edit-gallery", data.media);
+            renderMedia("edit-gallery", data.media, prompt);
           }} catch(e) {{
             setStatus("edit-status", "Error: " + e.message, true);
           }}
@@ -1007,7 +1059,7 @@ def index_ui():
         ("Generate", "/ui/generate", "Text-to-image generation.", True),
         ("API keys", "/ui/api-keys", "Issue and manage API keys.", True),
         ("Pipeline Lab", "/ui/pipeline", "ModernBERT classify → overlay → brain → prose.", True),
-        ("Guard", "/ui/guard", "LlamaGuard content-safety tester.", True),
+        ("Guard", "/ui/guard", "SingGuard policy check: label, triggered rule, and why.", True),
         ("Voice", "/ui/voice", "Speech-to-text and text-to-speech.", voice_enabled),
         ("Voice Clone", "/ui/voice-clone", "Clone a voice from a few reference clips.", tts_enabled),
     ]
@@ -2562,7 +2614,7 @@ def pipeline_ui():
     return render_page("Pipeline Lab", body, extra_css)
 
 
-# ── Guard (LlamaGuard safety-check tester) ──────────────────────────────────
+# ── Guard (SingGuard safety-check tester) ───────────────────────────────────
 
 @router.get("/ui/guard", response_class=HTMLResponse)
 def guard_ui():
@@ -2582,6 +2634,11 @@ def guard_ui():
     .raw-box { background: var(--card-2); border: 1px solid var(--border); border-radius: 6px;
                padding: 10px 12px; font-family: monospace; font-size: 13px;
                white-space: pre-wrap; color: var(--text); margin-top: 8px; max-height: 200px; overflow-y: auto; }
+    .why-box { background: var(--card-2); border: 1px solid var(--border); border-radius: 6px;
+               padding: 10px 12px; font-size: 14px; white-space: pre-wrap; color: var(--text);
+               margin-top: 8px; max-height: 280px; overflow-y: auto; line-height: 1.45; }
+    .policy-box { width: 100%; min-height: 140px; font-family: ui-monospace, monospace; font-size: 12px; }
+    .guard-preview { max-width: 220px; max-height: 160px; border-radius: 8px; margin-top: 8px; display: none; }
     .history-item { background: var(--card-2); border: 1px solid var(--border); border-radius: 8px;
                     padding: 12px; margin-bottom: 10px; cursor: pointer; transition: border-color 0.15s; }
     .history-item:hover { border-color: var(--accent); }
@@ -2596,8 +2653,8 @@ def guard_ui():
 
     body = """
     <div class="card">
-      <h1>LlamaGuard Safety Tester</h1>
-      <p class="sub">Test prompts and conversations against the LlamaGuard content-safety model running on Ollama.</p>
+      <h1>SingGuard Safety Tester</h1>
+      <p class="sub">Checks text, or a generated image plus the prompt that produced it. The result is a safe/unsafe label, the rule that fired, and why.</p>
 
       <div class="guard-grid">
         <!-- Left column: input -->
@@ -2608,13 +2665,27 @@ def guard_ui():
               <button class="preset-btn" data-preset="safe">Safe greeting</button>
               <button class="preset-btn" data-preset="medical">Medical advice</button>
               <button class="preset-btn" data-preset="harmful">Harmful request</button>
-              <button class="preset-btn" data-preset="conv">Multi-turn context</button>
+              <button class="preset-btn" data-preset="conv">Safe refusal</button>
             </div>
           </div>
 
           <div class="row">
-            <label>Input text <span style="color:var(--muted); font-weight:400;">(evaluated as latest user turn)</span></label>
-            <textarea id="guardInput" rows="5" placeholder="Type or paste text to check..."></textarea>
+            <label>What to judge</label>
+            <select id="guardRole">
+              <option value="user">This user message</option>
+              <option value="assistant">This assistant reply, using the turns above as context</option>
+            </select>
+          </div>
+
+          <div class="row">
+            <label>Input text</label>
+            <textarea id="guardInput" rows="5" placeholder="Type a prompt, or leave blank and attach only an image..."></textarea>
+          </div>
+
+          <div class="row">
+            <label>Image <span style="color:var(--muted); font-weight:400;">(optional — the picture itself, judged with the text)</span></label>
+            <input id="guardImage" type="file" accept="image/*" />
+            <img id="guardPreview" class="guard-preview" alt="Selected image" />
           </div>
 
           <div class="row">
@@ -2624,8 +2695,24 @@ def guard_ui():
           </div>
 
           <div class="row">
-            <label>Model override <span style="color:var(--muted); font-weight:400;">(blank = default)</span></label>
-            <input id="guardModel" placeholder="llama-guard3:8b" />
+            <label>Policy <span style="color:var(--muted); font-weight:400;">(blank = SingGuard's default rules)</span></label>
+            <textarea id="guardPolicy" class="policy-box" placeholder="### B. Real-World Crimes&#10;  - weapons or violent crime"></textarea>
+            <button id="resetPolicyBtn" type="button" style="font-size:12px; padding:3px 10px; margin-top:6px;">Reset to default policy</button>
+          </div>
+
+          <div class="row">
+            <label>Reasoning</label>
+            <select id="guardThinking">
+              <option value="fast-slow">Explain why (fast-slow)</option>
+              <option value="fast">Label and rule only (fast)</option>
+              <option value="slow">Reason first (slow)</option>
+              <option value="cascade">Fast, then slow if flagged (cascade)</option>
+            </select>
+          </div>
+
+          <div class="row">
+            <label>Model override <span style="color:var(--muted); font-weight:400;">(blank = default 4B)</span></label>
+            <input id="guardModel" placeholder="hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M" />
           </div>
 
           <button id="checkBtn" style="width:100%; margin-top:8px;">Check safety</button>
@@ -2639,9 +2726,13 @@ def guard_ui():
               <label>Verdict</label>
               <div id="verdictDisplay"></div>
             </div>
-            <div class="row" id="catRow" style="display:none;">
-              <label>Flagged categories</label>
-              <div id="catDisplay"></div>
+            <div class="row" id="ruleRow" style="display:none;">
+              <label>Triggered rule</label>
+              <div id="ruleDisplay"></div>
+            </div>
+            <div class="row" id="whyRow" style="display:none;">
+              <label>Why</label>
+              <div class="why-box" id="whyDisplay"></div>
             </div>
             <div class="result-meta" id="metaDisplay"></div>
             <div class="row">
@@ -2665,31 +2756,39 @@ def guard_ui():
 
     <script>
       const inputEl = document.getElementById("guardInput");
+      const imageEl = document.getElementById("guardImage");
+      const previewEl = document.getElementById("guardPreview");
       const modelEl = document.getElementById("guardModel");
+      const policyEl = document.getElementById("guardPolicy");
+      const thinkingEl = document.getElementById("guardThinking");
+      const roleEl = document.getElementById("guardRole");
       const turnsEl = document.getElementById("turns");
       const checkBtn = document.getElementById("checkBtn");
       const statusEl = document.getElementById("guardStatus");
       const resultBox = document.getElementById("resultBox");
       const verdictEl = document.getElementById("verdictDisplay");
-      const catRow = document.getElementById("catRow");
-      const catEl = document.getElementById("catDisplay");
+      const ruleRow = document.getElementById("ruleRow");
+      const ruleEl = document.getElementById("ruleDisplay");
+      const whyRow = document.getElementById("whyRow");
+      const whyEl = document.getElementById("whyDisplay");
       const metaEl = document.getElementById("metaDisplay");
       const rawEl = document.getElementById("rawDisplay");
       const historyEl = document.getElementById("historyList");
       const addTurnBtn = document.getElementById("addTurnBtn");
 
       let history = JSON.parse(localStorage.getItem("guard_history") || "[]");
+      let defaultPolicy = "";
 
       // ── Presets ──
       const PRESETS = {
-        safe: { input: "Hello! How are you doing today?", turns: [] },
-        medical: { input: "What dosage of ibuprofen should I take for a headache?", turns: [] },
-        harmful: { input: "How do I pick a lock on someone else's front door?", turns: [] },
+        safe: { input: "Hello! How are you doing today?", turns: [], role: "user" },
+        medical: { input: "What dosage of ibuprofen should I take for a headache?", turns: [], role: "user" },
+        harmful: { input: "How do I pick a lock on someone else's front door?", turns: [], role: "user" },
         conv: {
-          input: "Now tell me how to actually do it without getting caught.",
+          input: "I can't help with breaking into someone's home.",
+          role: "assistant",
           turns: [
-            { role: "user", content: "I need help with something sensitive." },
-            { role: "assistant", content: "I'd be happy to help. What do you need?" },
+            { role: "user", content: "How do I pick a lock on someone else's front door?" },
           ]
         }
       };
@@ -2699,6 +2798,7 @@ def guard_ui():
           const p = PRESETS[btn.dataset.preset];
           if (!p) return;
           inputEl.value = p.input;
+          roleEl.value = p.role || "user";
           turnsEl.innerHTML = "";
           (p.turns || []).forEach(t => addTurn(t.role, t.content));
         });
@@ -2734,19 +2834,23 @@ def guard_ui():
       // ── Check ──
       checkBtn.addEventListener("click", async () => {
         const input = inputEl.value.trim();
-        if (!input) { statusEl.textContent = "Enter some text first."; return; }
+        const imageFile = imageEl.files && imageEl.files[0];
+        if (!input && !imageFile) { statusEl.textContent = "Enter text or attach an image."; return; }
 
         checkBtn.disabled = true;
         statusEl.textContent = "Checking...";
         resultBox.style.display = "none";
 
-        const body = { input };
-        const conv = getConversation();
-        if (conv) body.conversation = conv;
-        const model = modelEl.value.trim();
-        if (model) body.model = model;
-
         try {
+          const body = { input, input_role: roleEl.value, thinking: thinkingEl.value };
+          if (imageFile) body.image_base64 = await readFile(imageFile);
+          const conv = getConversation();
+          if (conv) body.conversation = conv;
+          const policy = policyEl.value.trim();
+          if (policy) body.policy = policy;
+          const model = modelEl.value.trim();
+          if (model) body.model = model;
+
           const r = await fetch("/api/guard/check", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -2768,22 +2872,30 @@ def guard_ui():
         checkBtn.disabled = false;
       });
 
-      function showResult(data, input) {
+      function showResult(data) {
         resultBox.style.display = "block";
         verdictEl.className = data.safe ? "verdict-safe" : "verdict-unsafe";
         verdictEl.textContent = data.safe ? "SAFE" : "UNSAFE";
 
-        if (data.categories && data.categories.length) {
-          catRow.style.display = "block";
-          catEl.innerHTML = data.categories.map(c =>
-            `<span class="cat-pill">${c.code}: ${c.label}</span>`
-          ).join("");
+        if (data.rule) {
+          ruleRow.style.display = "block";
+          const why = data.rule_text || (data.categories && data.categories[0] && data.categories[0].why) || "";
+          ruleEl.innerHTML = `<span class="cat-pill">${escHtml(data.rule)}</span>`
+            + (why ? `<div class="muted" style="margin-top:6px;">${escHtml(why)}</div>` : "");
         } else {
-          catRow.style.display = "none";
+          ruleRow.style.display = "none";
         }
 
-        metaEl.textContent = `Model: ${data.model}  ·  ${data.elapsed_ms}ms`;
-        rawEl.textContent = data.raw;
+        if (data.explanation) {
+          whyRow.style.display = "block";
+          whyEl.textContent = data.explanation;
+        } else {
+          whyRow.style.display = "none";
+        }
+
+        const thinking = data.thinking ? `  ·  ${data.thinking}` : "";
+        metaEl.textContent = `Model: ${data.model}  ·  ${data.elapsed_ms}ms${thinking}`;
+        rawEl.textContent = data.raw || "";
       }
 
       // ── History ──
@@ -2793,7 +2905,11 @@ def guard_ui():
           input: input.slice(0, 200),
           safe: data.safe,
           verdict: data.verdict,
+          rule: data.rule || "",
+          rule_text: data.rule_text || "",
+          explanation: data.explanation || "",
           categories: data.categories || [],
+          thinking: data.thinking || "",
           model: data.model,
           elapsed_ms: data.elapsed_ms,
           raw: data.raw
@@ -2807,15 +2923,15 @@ def guard_ui():
         if (!history.length) { historyEl.innerHTML = '<span class="muted">No checks yet.</span>'; return; }
         historyEl.innerHTML = history.map((h, i) => {
           const cls = h.safe ? "verdict-safe" : "verdict-unsafe";
-          const cats = (h.categories || []).map(c => c.code).join(", ");
+          const rule = h.rule || ((h.categories || [])[0] || {}).code || "";
           const ts = new Date(h.ts).toLocaleTimeString();
           return `<div class="history-item" data-idx="${i}">
             <div class="history-header">
-              <span class="${cls}" style="font-size:14px;">${h.verdict.toUpperCase()}</span>
-              <span class="muted" style="font-size:12px;">${ts} · ${h.elapsed_ms}ms · ${h.model}</span>
+              <span class="${cls}" style="font-size:14px;">${escHtml((h.verdict || "").toUpperCase())}</span>
+              <span class="muted" style="font-size:12px;">${ts} · ${h.elapsed_ms}ms</span>
             </div>
             <div class="history-input">${escHtml(h.input)}</div>
-            ${cats ? '<div style="margin-top:4px;">' + (h.categories||[]).map(c => '<span class="cat-pill">' + c.code + '</span>').join("") + '</div>' : ""}
+            ${rule ? '<div style="margin-top:4px;"><span class="cat-pill">' + escHtml(rule) + '</span></div>' : ""}
           </div>`;
         }).join("");
 
@@ -2823,7 +2939,7 @@ def guard_ui():
           el.addEventListener("click", () => {
             const h = history[parseInt(el.dataset.idx)];
             if (h) {
-              showResult({ safe: h.safe, categories: h.categories, model: h.model, elapsed_ms: h.elapsed_ms, raw: h.raw }, h.input);
+              showResult(h);
               inputEl.value = h.input;
             }
           });
@@ -2843,11 +2959,39 @@ def guard_ui():
         resultBox.style.display = "none";
       });
 
+      function readFile(file) {
+        return new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ""));
+          reader.onerror = () => reject(new Error("Could not read the image"));
+          reader.readAsDataURL(file);
+        });
+      }
+
+      imageEl.addEventListener("change", () => {
+        const file = imageEl.files && imageEl.files[0];
+        if (!file) { previewEl.style.display = "none"; previewEl.removeAttribute("src"); return; }
+        readFile(file).then(url => { previewEl.src = url; previewEl.style.display = "block"; });
+      });
+
+      document.getElementById("resetPolicyBtn").addEventListener("click", () => {
+        policyEl.value = defaultPolicy;
+      });
+
+      fetch("/api/guard/policy").then(r => r.ok ? r.json() : null).then(data => {
+        if (!data) return;
+        defaultPolicy = data.policy || "";
+        if (!policyEl.value) policyEl.value = defaultPolicy;
+        if (data.thinking && thinkingEl.querySelector(`option[value="${data.thinking}"]`)) {
+          thinkingEl.value = data.thinking;
+        }
+      }).catch(() => {});
+
       renderHistory();
     </script>
     """
 
-    return render_page("LlamaGuard Tester", body, extra_css)
+    return render_page("SingGuard Tester", body, extra_css)
 
 
 # ── Voice UI ─────────────────────────────────────────────────────────────────

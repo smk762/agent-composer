@@ -205,7 +205,8 @@ services:
       - MODERNBERT_URL=${MODERNBERT_URL:-http://modernbert:7998}
       - INFINITY_URL=${INFINITY_URL:-http://infinity:7997}
       - CHAT_MODEL=${CHAT_MODEL:-llama3.2:3b}
-      - GUARD_MODEL=${GUARD_MODEL:-llama-guard3:8b}
+      - GUARD_MODEL=${GUARD_MODEL:-hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M}
+      - GUARD_THINKING=${GUARD_THINKING:-fast-slow}
       - CHAT_SYSTEM_PROMPT=${CHAT_SYSTEM_PROMPT:-You are a helpful assistant.}
       - QDRANT_URL=${QDRANT_URL:-http://qdrant:6333}
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-project_docs}

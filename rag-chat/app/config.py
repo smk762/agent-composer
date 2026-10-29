@@ -19,7 +19,22 @@ for _quiet in ("aiosqlite", "sqlalchemy.engine", "httpcore", "httpx", "hpack"):
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "15m").strip()
 CHAT_MODEL = os.getenv("CHAT_MODEL", "llama3.2:3b")
-GUARD_MODEL = os.getenv("GUARD_MODEL", "llama-guard3:8b")
+# SingGuard 4B. The 4B is the image-safety sweet spot in the model card;
+# the 8B does not beat it there. Q4_K_M is the default pull; Q8_0 and F16
+# are on the same repo. Override with GUARD_MODEL to pick another size.
+GUARD_MODEL = os.getenv(
+    "GUARD_MODEL",
+    "hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M",
+)
+# fast-slow asks the model to write why the rule fired. fast is the label only.
+# slow reasons first (no first-line verdict). cascade is fast, then slow if flagged.
+# Keep in sync with guard_policy.THINKING_MODES.
+_GUARD_THINKING = os.getenv("GUARD_THINKING", "fast-slow").strip().lower()
+GUARD_THINKING = (
+    _GUARD_THINKING
+    if _GUARD_THINKING in ("fast", "fast-slow", "slow", "cascade")
+    else "fast-slow"
+)
 SYSTEM_PROMPT = os.getenv("CHAT_SYSTEM_PROMPT", "You are a helpful assistant.")
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
