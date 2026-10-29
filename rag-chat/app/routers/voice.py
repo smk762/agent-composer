@@ -14,6 +14,7 @@ Endpoints:
   POST /api/voice/analyze           — score candidate clips, recommend subset + order
   POST /api/voice/clone             — create a voice clone from one or more clips
   GET  /api/voice/clones            — list stored voice clones
+  DELETE /api/voice/clones/{id}     — permanently delete a stored voice clone
   GET  /api/voice/clones/{id}/download — download a clone (prompt.pt + meta.json) as a zip
   POST /api/voice/clones/import     — import a downloaded voice archive (zip)
   GET  /api/voice/speakers          — list available TTS speakers
@@ -22,9 +23,11 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
+import uuid
 from typing import Optional
 
 import httpx
@@ -33,12 +36,20 @@ from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.config import (
+    MAX_SENTENCE_PAUSE_MS,
     TTS_DEFAULT_ENGINE,
     TTS_ENGINE_LABELS,
     TTS_ENGINES,
     TTS_FALLBACK_ENGINE,
+    VOICE_S3_ACCESS_KEY_ID,
+    VOICE_S3_BUCKET,
+    VOICE_S3_ENDPOINT_URL,
+    VOICE_S3_PUBLIC_URL,
+    VOICE_S3_REHOST,
+    VOICE_S3_SECRET_ACCESS_KEY,
     VOICE_TIMEOUT,
     WHISPER_URL,
+    default_sentence_pause_ms,
     log,
     tts_engine_chain,
     tts_engine_url,
@@ -54,8 +65,9 @@ router = APIRouter(prefix="/api/voice", tags=["voice"])
 _SENTENCE_RE = re.compile(r"(?<=[.!?])\s+")
 
 # Fields that are routing hints for *this* proxy, not part of the sidecar
-# contract — stripped before forwarding the JSON body upstream.
-_PROXY_ONLY_FIELDS = {"engine"}
+# contract — stripped before forwarding the JSON body upstream. ``pause_ms`` is
+# handled here (sentence pacing), never sent to the engine.
+_PROXY_ONLY_FIELDS = {"engine", "pause_ms"}
 
 
 def _require_whisper():
@@ -76,6 +88,165 @@ def _tts_base(engine: Optional[str]) -> str:
     return base
 
 
+# ── Rendered-audio re-hosting ────────────────────────────────────────────────
+# A remote engine (e.g. Miso on another subnet) returns an audio_url on its own
+# host, which a LAN browser may not reach. When the shared voice bucket is
+# configured, re-host such audio into MinIO so playback always comes from the
+# same S3_PUBLIC_URL origin the XTTS sidecar uses.
+
+_voice_s3_client = None
+
+
+def _voice_s3():
+    global _voice_s3_client
+    if _voice_s3_client is None:
+        import boto3
+
+        _voice_s3_client = boto3.client(
+            "s3",
+            endpoint_url=VOICE_S3_ENDPOINT_URL,
+            aws_access_key_id=VOICE_S3_ACCESS_KEY_ID,
+            aws_secret_access_key=VOICE_S3_SECRET_ACCESS_KEY,
+        )
+    return _voice_s3_client
+
+
+async def _rehost_audio_url(audio_url: Optional[str]) -> Optional[str]:
+    """Return a browser-reachable URL for a rendered clip.
+
+    If re-hosting is disabled, the URL is empty, or it's already served from the
+    shared voice bucket (S3_PUBLIC_URL), the URL is returned untouched. Otherwise
+    the clip is downloaded and re-uploaded to the voice bucket under the same
+    ``generated/voice/`` prefix the XTTS sidecar uses, and the S3_PUBLIC_URL is
+    returned. Best-effort: any failure falls back to the original URL so
+    synthesis never breaks on a re-host hiccup.
+    """
+    if not VOICE_S3_REHOST or not audio_url:
+        return audio_url
+    if audio_url.startswith(VOICE_S3_PUBLIC_URL):
+        return audio_url
+    try:
+        async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
+            r = await client.get(audio_url)
+            r.raise_for_status()
+            data = r.content
+            content_type = r.headers.get("content-type", "audio/wav")
+        key = f"generated/voice/{uuid.uuid4().hex}.wav"
+        await asyncio.to_thread(
+            lambda: _voice_s3().put_object(
+                Bucket=VOICE_S3_BUCKET, Key=key, Body=data, ContentType=content_type
+            )
+        )
+        new_url = f"{VOICE_S3_PUBLIC_URL}/{key}"
+        log.info("voice: rehosted audio (%d bytes) %s -> %s", len(data), audio_url, new_url)
+        return new_url
+    except Exception as exc:
+        log.warning("voice: audio re-host failed (%s); serving original url %s", exc, audio_url)
+        return audio_url
+
+
+# ── Sentence pacing (inter-sentence breath) ──────────────────────────────────
+# CSM-style engines (Miso) run multi-sentence text as one fast utterance with no
+# gap between sentences, and ignore emotion/speed. To add a "breath", the proxy
+# can synthesise each sentence separately and stitch the clips with a silence
+# gap, then re-host the combined WAV in the shared voice bucket.
+
+def _concat_wavs_with_gaps(wav_blobs: list[bytes], gap_ms: int) -> tuple[bytes, float]:
+    """Concatenate same-format PCM WAV blobs with ``gap_ms`` silence between them.
+
+    Returns ``(combined_wav_bytes, total_seconds)``. All blobs must share sample
+    rate / width / channels (they do — same engine renders every sentence).
+    """
+    import io
+    import wave
+
+    frames: list[bytes] = []
+    params = None
+    for blob in wav_blobs:
+        with wave.open(io.BytesIO(blob), "rb") as w:
+            if params is None:
+                params = w.getparams()
+            frames.append(w.readframes(w.getnframes()))
+
+    if params is None:
+        raise ValueError("no audio to concatenate")
+
+    gap_frames = max(0, int(params.framerate * gap_ms / 1000))
+    silence = b"\x00" * (gap_frames * params.sampwidth * params.nchannels)
+
+    out = io.BytesIO()
+    with wave.open(out, "wb") as w:
+        w.setnchannels(params.nchannels)
+        w.setsampwidth(params.sampwidth)
+        w.setframerate(params.framerate)
+        for i, fr in enumerate(frames):
+            if i > 0 and silence:
+                w.writeframes(silence)
+            w.writeframes(fr)
+
+    frame_bytes = params.sampwidth * params.nchannels
+    total_frames = sum(len(f) // frame_bytes for f in frames) + gap_frames * max(0, len(frames) - 1)
+    return out.getvalue(), total_frames / params.framerate
+
+
+async def _synthesise_paced(chain, base_payload: dict, sentences: list[str], gap_ms: int) -> dict:
+    """Render each sentence on a single resolved engine, stitch with silence.
+
+    Resolves a reachable engine on the first sentence (walking the fallback
+    chain) and stays on it, so the whole utterance keeps one voice. Uploads the
+    combined WAV to the voice bucket and returns the standard synth response.
+    """
+    resolved: Optional[tuple] = None
+    wav_blobs: list[bytes] = []
+    last_exc: Optional[Exception] = None
+
+    async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
+        for sentence in sentences:
+            payload = {**base_payload, "text": sentence}
+            candidates = [resolved] if resolved else list(chain)
+            blob = None
+            for name, base in candidates:
+                try:
+                    r = await client.post(f"{base}/synthesise", json=payload)
+                    r.raise_for_status()
+                except _UNREACHABLE as exc:
+                    last_exc = exc
+                    log.warning("voice: paced engine=%s unreachable, trying next: %s", name, exc)
+                    continue
+                except httpx.HTTPStatusError as exc:
+                    raise HTTPException(exc.response.status_code, detail=exc.response.text)
+                data = r.json()
+                url = data.get("audio_url")
+                if not url:
+                    raise HTTPException(502, detail="engine returned no audio_url to pace")
+                ar = await client.get(url)
+                ar.raise_for_status()
+                resolved = (name, base)
+                blob = ar.content
+                break
+            if blob is None:
+                raise HTTPException(503, detail=f"No reachable TTS engine ({last_exc})")
+            wav_blobs.append(blob)
+
+    combined, total_seconds = await asyncio.to_thread(_concat_wavs_with_gaps, wav_blobs, gap_ms)
+    key = f"generated/voice/{uuid.uuid4().hex}.wav"
+    await asyncio.to_thread(
+        lambda: _voice_s3().put_object(
+            Bucket=VOICE_S3_BUCKET, Key=key, Body=combined, ContentType="audio/wav"
+        )
+    )
+    return {
+        "audio_url": f"{VOICE_S3_PUBLIC_URL}/{key}",
+        "duration": round(total_seconds, 3),
+        "duration_seconds": round(total_seconds, 3),
+        "format": "wav",
+        "engine": resolved[0] if resolved else None,
+        "paced": True,
+        "pause_ms": gap_ms,
+        "sentences": len(sentences),
+    }
+
+
 # ── Request / response models ────────────────────────────────────────────────
 
 class SynthesiseRequest(BaseModel):
@@ -87,6 +258,13 @@ class SynthesiseRequest(BaseModel):
     instruction: Optional[str] = None
     emotion: str = "neutral"
     language: str = Field(default="en")
+    # Playback rate hint forwarded to the engine (reliable on XTTS; Miso accepts
+    # it but doesn't honour it reliably). None → engine default.
+    speed: Optional[float] = None
+    # Proxy-side sentence pacing: silence (ms) inserted between sentences so
+    # multi-sentence text gets a breath. None → per-engine default (Miso on).
+    # 0 disables. Requires the shared voice bucket to store the stitched result.
+    pause_ms: Optional[int] = None
 
 
 class SynthesiseStreamRequest(BaseModel):
@@ -99,6 +277,7 @@ class SynthesiseStreamRequest(BaseModel):
     instruction: Optional[str] = None
     emotion: str = "neutral"
     language: str = Field(default="en")
+    speed: Optional[float] = None
 
 
 # ── Endpoints ────────────────────────────────────────────────────────────────
@@ -166,6 +345,24 @@ async def synthesise(req: SynthesiseRequest):
     payload = req.model_dump(exclude_none=True, exclude=_PROXY_ONLY_FIELDS)
 
     t0 = time.monotonic()
+
+    # Sentence pacing: when a per-sentence breath is wanted (explicit pause_ms or
+    # the engine's default, e.g. Miso), render sentences separately and stitch
+    # them with silence. Needs the voice bucket to host the combined clip and
+    # only helps when there's more than one sentence.
+    sentences = [s.strip() for s in _SENTENCE_RE.split(req.text) if s.strip()]
+    gap_ms = req.pause_ms if req.pause_ms is not None else default_sentence_pause_ms(chain[0][0])
+    if gap_ms and gap_ms > 0 and len(sentences) > 1 and VOICE_S3_REHOST:
+        gap_ms = min(int(gap_ms), MAX_SENTENCE_PAUSE_MS)
+        base_payload = {k: v for k, v in payload.items() if k != "text"}
+        data = await _synthesise_paced(chain, base_payload, sentences, gap_ms)
+        log.info(
+            "voice: synthesise paced engine=%s sentences=%d gap=%dms elapsed=%dms duration=%.1fs",
+            data.get("engine"), len(sentences), gap_ms,
+            int((time.monotonic() - t0) * 1000), data.get("duration", 0),
+        )
+        return data
+
     last_exc: Optional[Exception] = None
     for name, base in chain:
         try:
@@ -181,6 +378,8 @@ async def synthesise(req: SynthesiseRequest):
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         data = r.json()
+        if data.get("audio_url"):
+            data["audio_url"] = await _rehost_audio_url(data["audio_url"])
         log.info(
             "voice: synthesise engine=%s elapsed=%dms duration=%.1fs",
             name, elapsed_ms, data.get("duration", 0),
@@ -224,6 +423,8 @@ async def synthesise_stream(req: SynthesiseStreamRequest):
                         r.raise_for_status()
                     resolved = (name, base)
                     data = r.json()
+                    if data.get("audio_url"):
+                        data["audio_url"] = await _rehost_audio_url(data["audio_url"])
                     data["chunk_index"] = i
                     data["text"] = sentence
                     data["engine"] = name
@@ -492,16 +693,50 @@ async def download_clone(companion_id: str, engine: Optional[str] = Query(defaul
     )
 
 
+@router.delete("/clones/{companion_id}")
+async def delete_clone(companion_id: str, engine: Optional[str] = Query(default=None)):
+    """Permanently delete a stored voice clone from the selected TTS engine.
+
+    Engine-specific (like the other clone ops): the request goes only to the
+    named engine, never the fallback chain. An engine whose sidecar has no
+    delete route surfaces its upstream 404/405 to the caller.
+    """
+    _require_tts()
+    base = _tts_base(engine)
+
+    try:
+        async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
+            r = await client.delete(f"{base}/clones/{companion_id}")
+            r.raise_for_status()
+    except httpx.ConnectError:
+        raise HTTPException(503, detail="TTS server unreachable")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(exc.response.status_code, detail=exc.response.text)
+
+    log.info("voice: delete engine=%s id=%s", engine or TTS_DEFAULT_ENGINE, companion_id)
+    return r.json()
+
+
 @router.get("/health")
 async def voice_health():
     """Fan-out health check to Whisper and every configured TTS engine.
 
     ``engines`` carries each engine's health individually; ``tts`` mirrors the
     default engine for back-compat with older UI code. Overall status is OK when
-    Whisper (if configured) and the default engine are both healthy — a
-    non-default engine being down only degrades that engine, not the page.
+    Whisper (if configured) is healthy *and* at least one engine in the default
+    fallback chain (default → fallback) is reachable. This mirrors the actual
+    synth path (``tts_engine_chain``): a request only fails when every engine in
+    the chain is down, so a reachable fallback keeps the page healthy even while
+    the preferred engine's host is offline. ``serving_engine`` reports which
+    chain engine would currently handle a default-routed request.
     """
-    results: dict = {"whisper": None, "tts": None, "engines": {}, "default_engine": TTS_DEFAULT_ENGINE}
+    results: dict = {
+        "whisper": None,
+        "tts": None,
+        "engines": {},
+        "default_engine": TTS_DEFAULT_ENGINE,
+        "serving_engine": None,
+    }
 
     async with httpx.AsyncClient(timeout=5) as client:
         if WHISPER_URL:
@@ -520,15 +755,24 @@ async def voice_health():
             except Exception as exc:
                 results["engines"][name] = {"status": "unreachable", "error": str(exc)}
 
-    if not TTS_ENGINES:
-        results["tts"] = {"status": "not_configured"}
-    else:
-        results["tts"] = results["engines"].get(TTS_DEFAULT_ENGINE, {"status": "not_configured"})
-
     def _ok(entry) -> bool:
         return isinstance(entry, dict) and entry.get("status") in ("ok", "not_configured")
 
-    all_ok = _ok(results["whisper"]) and _ok(results["tts"])
+    if not TTS_ENGINES:
+        results["tts"] = {"status": "not_configured"}
+        tts_ok = True
+    else:
+        results["tts"] = results["engines"].get(TTS_DEFAULT_ENGINE, {"status": "not_configured"})
+        # Healthy if any engine in the default routing chain is reachable —
+        # a live fallback keeps synthesis working, so the page isn't degraded.
+        tts_ok = False
+        for name, _base in tts_engine_chain(None):
+            if _ok(results["engines"].get(name)):
+                tts_ok = True
+                results["serving_engine"] = name
+                break
+
+    all_ok = _ok(results["whisper"]) and tts_ok
 
     return JSONResponse(
         status_code=200 if all_ok else 503,

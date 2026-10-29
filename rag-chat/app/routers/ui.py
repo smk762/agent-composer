@@ -3573,6 +3573,8 @@ def voice_clone_ui():
     .clone-row .nm { font-weight: 600; }
     .clone-row .sub { font-size: 12px; color: var(--muted); }
     .clone-row button { height: auto; padding: 5px 10px; font-size: 12px; }
+    .clone-row .del-btn { background: rgba(239,68,68,0.12); color: #ef4444; border: 1px solid rgba(239,68,68,0.3); }
+    .clone-row .del-btn:hover { background: rgba(239,68,68,0.2); }
     .tts-text { width: 100%; min-height: 70px; background: var(--bg); border: 1px solid var(--border);
                 border-radius: 8px; color: var(--text); font: inherit; font-size: 14px; padding: 10px;
                 resize: vertical; box-sizing: border-box; }
@@ -3669,6 +3671,13 @@ def voice_clone_ui():
               <option value="ko">Korean</option>
               <option value="zh">Chinese</option>
             </select>
+            <label class="clip-meta" style="display:flex; align-items:center; gap:4px;">Breath
+              <input id="testPause" type="number" min="0" max="2000" step="50" placeholder="auto"
+                     title="Silence inserted between sentences (ms). Blank = per-engine default (Miso on)."
+                     style="width:70px;" class="vc-field"> ms</label>
+            <label class="clip-meta" style="display:flex; align-items:center; gap:4px;">Speed
+              <input id="testSpeed" type="number" min="0.5" max="1.5" step="0.05" placeholder="1.0"
+                     title="Playback rate. Reliable on XTTS; Miso ignores it." style="width:64px;" class="vc-field"></label>
             <button id="testLiveBtn">Speak (live)</button>
             <button id="testBtn">Speak</button>
           </div>
@@ -4050,7 +4059,8 @@ def voice_clone_ui():
             row.innerHTML = '<div style="flex:1;"><div class="nm">' + (c.name || c.companion_id || "voice").replace(/</g, "&lt;") + '</div>'
               + '<div class="sub">' + (c.num_clips || 1) + ' clip(s) · ' + (c.total_seconds || 0) + 's</div></div>'
               + '<button class="test-btn">Test</button>'
-              + '<button class="dl-btn secondary">Download</button>';
+              + '<button class="dl-btn secondary">Download</button>'
+              + '<button class="del-btn">Delete</button>';
             row.querySelector(".test-btn").addEventListener("click", () => {
               testClone.value = c.voice_clone_id;
               testStatus.textContent = 'Loaded "' + (c.name || c.companion_id) + '" — type a line and Speak.';
@@ -4063,6 +4073,20 @@ def voice_clone_ui():
               document.body.appendChild(a);
               a.click();
               a.remove();
+            });
+            row.querySelector(".del-btn").addEventListener("click", async () => {
+              const label = c.name || c.companion_id;
+              if (!confirm('Delete voice "' + label + '"? This permanently removes it from the ' + (currentEngine() || "default") + ' engine and cannot be undone.')) return;
+              const btn = row.querySelector(".del-btn");
+              btn.disabled = true; btn.textContent = "Deleting…";
+              try {
+                const r = await fetch("/api/voice/clones/" + encodeURIComponent(c.companion_id) + engineQuery(), { method: "DELETE" });
+                if (!r.ok) { let m = "HTTP " + r.status; try { m = (await r.text()) || m; } catch (e) {} throw new Error(m); }
+                await loadClones();
+              } catch (err) {
+                btn.disabled = false; btn.textContent = "Delete";
+                alert('Delete failed: ' + err.message);
+              }
             });
             cloneList.appendChild(row);
 
@@ -4103,6 +4127,10 @@ def voice_clone_ui():
         if (!text) { testStatus.textContent = "Type something to say."; return null; }
         const p = { text, language: testLang.value, voice_clone_id: id };
         if (currentEngine()) p.engine = currentEngine();
+        const pause = document.getElementById("testPause").value.trim();
+        if (pause !== "") p.pause_ms = parseInt(pause, 10);
+        const speed = document.getElementById("testSpeed").value.trim();
+        if (speed !== "") p.speed = parseFloat(speed);
         return p;
       }
 

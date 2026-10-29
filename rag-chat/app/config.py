@@ -133,6 +133,34 @@ elif not _requested_fallback and TTS_DEFAULT_ENGINE != "xtts" and "xtts" in TTS_
 else:
     TTS_FALLBACK_ENGINE = ""
 
+# Rendered-audio re-hosting. Some engines (e.g. a remote Miso host) return an
+# ``audio_url`` on their *own* host, which LAN browsers on a different subnet may
+# not be able to reach. When the shared "voice" MinIO bucket is configured here,
+# the voice proxy downloads such audio and re-uploads it under the same
+# bucket/prefix the XTTS sidecar uses, returning the browser-reachable
+# S3_PUBLIC_URL so playback always comes from one origin. Reuses the same S3_*
+# vars the sidecars use. Empty S3_PUBLIC_URL/S3_ENDPOINT_URL disables re-hosting
+# (URLs are passed through untouched).
+VOICE_S3_ENDPOINT_URL = _clean_url(os.getenv("S3_ENDPOINT_URL", ""))
+VOICE_S3_BUCKET = os.getenv("S3_BUCKET_NAME", "voice").strip()
+VOICE_S3_PUBLIC_URL = _clean_url(os.getenv("S3_PUBLIC_URL", ""))
+VOICE_S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", "").strip()
+VOICE_S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "").strip()
+VOICE_S3_REHOST = bool(VOICE_S3_ENDPOINT_URL and VOICE_S3_PUBLIC_URL and VOICE_S3_BUCKET)
+
+# Sentence pacing. Miso (CSM-style) reads multi-sentence text as one fast
+# generation with no breath between sentences, and ignores emotion/speed. When a
+# request doesn't set an explicit pause, the proxy inserts this much silence
+# between sentences for the given engine (0 = off). Miso defaults on; other
+# engines off. Any request can override via ``pause_ms`` (capped at MAX).
+MISO_SENTENCE_PAUSE_MS = _env_int("MISO_SENTENCE_PAUSE_MS", 300)
+MAX_SENTENCE_PAUSE_MS = _env_int("MAX_SENTENCE_PAUSE_MS", 2000)
+
+
+def default_sentence_pause_ms(engine: Optional[str]) -> int:
+    """Per-engine default inter-sentence silence when a request omits pause_ms."""
+    return MISO_SENTENCE_PAUSE_MS if (engine or "").strip().lower() == "miso" else 0
+
 
 def tts_engine_url(engine: Optional[str] = None) -> str:
     """Resolve a TTS engine name to its base URL.

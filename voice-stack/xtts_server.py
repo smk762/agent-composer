@@ -12,6 +12,7 @@ rag-chat's voice proxy, the `voice` MinIO bucket, and the UI need no changes:
   POST /clone-voice        — one or more reference clips → conditioning latents in S3
   GET  /clones             — list stored voice clones (from meta.json sidecars)
   GET  /clones/{id}/download — download a clone's prompt.pt + meta.json as a zip
+  DELETE /clones/{id}      — permanently delete a stored clone from S3
   POST /clones/import      — import a downloaded voice archive (zip) back into S3
   GET  /speakers           — built-in XTTS studio speakers
   GET  /health             — status + GPU memory
@@ -1213,6 +1214,52 @@ async def download_clone(companion_id: str):
 
     headers = {"Content-Disposition": f'attachment; filename="{companion_id}.zip"'}
     return Response(content=data, media_type="application/zip", headers=headers)
+
+
+def _delete_clone(companion_id: str) -> int:
+    """Delete every S3 object under ``voice_clones/{companion_id}/``.
+
+    Returns the number of objects removed and evicts the clone's cached latents.
+    Raises ``FileNotFoundError`` when nothing exists under the prefix.
+    """
+    from botocore.exceptions import ClientError  # noqa: F401  (parity w/ helpers)
+
+    client = _get_s3_client()
+    prefix = f"voice_clones/{companion_id}/"
+    keys: list[dict] = []
+    paginator = client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=S3_BUCKET_NAME, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            keys.append({"Key": obj["Key"]})
+
+    if not keys:
+        raise FileNotFoundError(f"Voice clone not found: {companion_id}")
+
+    deleted = 0
+    for i in range(0, len(keys), 1000):  # S3 delete_objects caps at 1000/call
+        batch = keys[i : i + 1000]
+        client.delete_objects(Bucket=S3_BUCKET_NAME, Delete={"Objects": batch})
+        deleted += len(batch)
+
+    with _clone_cache_lock:
+        _clone_cache.pop(f"{prefix}prompt.pt", None)
+    return deleted
+
+
+@app.delete("/clones/{companion_id}")
+async def delete_clone(companion_id: str):
+    """Permanently delete a stored voice clone (prompt.pt + meta.json) from S3."""
+    if not companion_id.strip():
+        return JSONResponse(status_code=422, content={"error": "companion_id required"})
+    try:
+        objects = await asyncio.to_thread(_delete_clone, companion_id)
+    except FileNotFoundError as exc:
+        return JSONResponse(status_code=404, content={"error": str(exc)})
+    except Exception as exc:
+        logger.error("clone_delete_error", companion_id=companion_id, error=str(exc))
+        return JSONResponse(status_code=500, content={"error": f"Failed to delete clone: {exc}"})
+    logger.info("voice_deleted", companion_id=companion_id, objects=objects)
+    return {"status": "deleted", "companion_id": companion_id, "objects": objects}
 
 
 def _slug_id(value: str) -> str:
