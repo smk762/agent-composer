@@ -96,7 +96,17 @@ class RedisNonceStore:
 
     def __init__(self, cfg: RedisNonceStoreConfig):
         self._cfg = cfg
-        self._r = redis.Redis.from_url(cfg.redis_url)
+        # Bounded timeouts so an unreachable host fails fast (startup ping +
+        # per-request claims) instead of hanging the ingest worker.
+        self._r = redis.Redis.from_url(
+            cfg.redis_url,
+            socket_connect_timeout=3,
+            socket_timeout=3,
+        )
+
+    def ping(self) -> None:
+        """Raise if the Redis server is unreachable (used for startup probing)."""
+        self._r.ping()
 
     def _key(self, nonce: str) -> str:
         return f"{self._cfg.key_prefix}{nonce}"
