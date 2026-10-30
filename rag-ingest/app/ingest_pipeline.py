@@ -46,7 +46,7 @@ def _env_int(name: str, default: int) -> int:
 
 log = logging.getLogger("rag-ingest.ingest")
 
-QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
+QDRANT_URL = os.getenv("QDRANT_URL", "http://192.168.1.109:6333")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "project_docs")
 QDRANT_COLLECTION_CODE = os.getenv("QDRANT_COLLECTION_CODE", "code_audit")
 RETRIEVAL_PROFILE = os.getenv("RETRIEVAL_PROFILE", "text").strip().lower()

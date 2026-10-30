@@ -28,9 +28,11 @@ import json
 import re
 import time
 import uuid
+import wave
 from typing import Optional
 
 import httpx
+from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
@@ -59,6 +61,11 @@ from app.config import (
 # on the next engine in the fallback chain. HTTP error *responses* (4xx/5xx) are
 # not retried: the engine is up and deliberately rejected the request.
 _UNREACHABLE = (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.PoolTimeout)
+
+# Failures of the *pacing* step that are safe to degrade from: a failed audio
+# fetch (httpx), a WAV the stitcher can't read (wave/EOF/Value), or the voice
+# bucket being down (botocore). Anything else is a bug and should surface.
+_PACING_FAILURES = (httpx.HTTPError, wave.Error, EOFError, ValueError, BotoCoreError, ClientError)
 
 router = APIRouter(prefix="/api/voice", tags=["voice"])
 
@@ -155,17 +162,29 @@ def _concat_wavs_with_gaps(wav_blobs: list[bytes], gap_ms: int) -> tuple[bytes, 
     """Concatenate same-format PCM WAV blobs with ``gap_ms`` silence between them.
 
     Returns ``(combined_wav_bytes, total_seconds)``. All blobs must share sample
-    rate / width / channels (they do — same engine renders every sentence).
+    rate / width / channels; a mismatch raises ``ValueError`` so the caller can
+    fall back to a single-shot render instead of emitting a garbled WAV.
     """
     import io
-    import wave
 
     frames: list[bytes] = []
     params = None
     for blob in wav_blobs:
         with wave.open(io.BytesIO(blob), "rb") as w:
+            got = w.getparams()
             if params is None:
-                params = w.getparams()
+                params = got
+            elif (got.nchannels, got.sampwidth, got.framerate, got.comptype) != (
+                params.nchannels,
+                params.sampwidth,
+                params.framerate,
+                params.comptype,
+            ):
+                raise ValueError(
+                    "WAV format mismatch: "
+                    f"{got.nchannels}ch/{got.sampwidth}B/{got.framerate}Hz "
+                    f"vs {params.nchannels}ch/{params.sampwidth}B/{params.framerate}Hz"
+                )
             frames.append(w.readframes(w.getnframes()))
 
     if params is None:
@@ -359,7 +378,7 @@ async def synthesise(req: SynthesiseRequest):
             data = await _synthesise_paced(chain, base_payload, sentences, gap_ms)
         except HTTPException:
             raise
-        except Exception as exc:
+        except _PACING_FAILURES as exc:
             # Pacing is cosmetic. A non-PCM WAV, a failed audio fetch, or a bucket
             # that is down must not turn a working synth into a 500, so fall back
             # to a single-shot render (as re-hosting already does).

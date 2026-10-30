@@ -13,8 +13,6 @@ slow only when fast flags the content.
 
 from __future__ import annotations
 
-import base64
-import binascii
 import time
 from typing import List, Optional
 
@@ -25,11 +23,14 @@ from pydantic import BaseModel, Field
 from app.config import (
     GUARD_MODEL,
     GUARD_THINKING,
+    GUARD_WORKER_CONCURRENCY,
     OLLAMA_KEEP_ALIVE,
     OLLAMA_TIMEOUT,
     OLLAMA_URL,
     log,
 )
+from app.guard_image import image_b64
+from app.inference_retry import InferenceWorkers
 from app.guard_policy import (
     DEFAULT_POLICY,
     THINKING_CASCADE,
@@ -47,9 +48,8 @@ from app.guard_policy import (
     policy_rules,
 )
 
-_MAX_IMAGE_BYTES = 12 * 1024 * 1024
-
 router = APIRouter(prefix="/api/guard", tags=["guard"])
+_guard_workers = InferenceWorkers(GUARD_WORKER_CONCURRENCY)
 
 
 class GuardMessage(BaseModel):
@@ -140,24 +140,6 @@ def _ollama_options(thinking: str) -> dict:
     }
 
 
-def _image_b64(value: str) -> str:
-    raw = value.strip()
-    if not raw:
-        return ""
-    if raw.startswith("data:"):
-        _, _, raw = raw.partition(",")
-    raw = "".join(raw.split())
-    try:
-        data = base64.b64decode(raw, validate=True)
-    except binascii.Error as exc:
-        raise ValueError("image is not valid base64") from exc
-    if not data:
-        raise ValueError("image is empty")
-    if len(data) > _MAX_IMAGE_BYTES:
-        raise ValueError("image is larger than 12 MB")
-    return base64.b64encode(data).decode("ascii")
-
-
 def _categories(verdict: GuardVerdict) -> list[GuardCategory]:
     if verdict.safe or not verdict.rule or verdict.rule.casefold() == "safe":
         return []
@@ -238,7 +220,7 @@ async def guard_check(req: GuardCheckRequest):
     model = req.model or GUARD_MODEL
     try:
         requested = normalize_thinking(req.thinking or GUARD_THINKING)
-        image = _image_b64(req.image_base64)
+        image = image_b64(req.image_base64)
         turns = _turns(req)
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc)) from exc
@@ -246,7 +228,19 @@ async def guard_check(req: GuardCheckRequest):
     t0 = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
-            if requested == THINKING_CASCADE:
+            # One Ollama guard at a time by default: cull scans and darkroom
+            # pre-flights share the model, and a pile-up is a timeout, not speed.
+            async def _run() -> tuple[str, GuardVerdict]:
+                if requested != THINKING_CASCADE:
+                    raw = await _generate(
+                        client,
+                        model=model,
+                        turns=turns,
+                        policy=req.policy,
+                        thinking=requested,
+                        image=image,
+                    )
+                    return requested, parse_singguard_output(raw, req.policy)
                 raw_fast = await _generate(
                     client,
                     model=model,
@@ -256,31 +250,19 @@ async def guard_check(req: GuardCheckRequest):
                     image=image,
                 )
                 fast = parse_singguard_output(raw_fast, req.policy)
-                if needs_slow_pass(fast):
-                    raw_slow = await _generate(
-                        client,
-                        model=model,
-                        turns=turns,
-                        policy=req.policy,
-                        thinking=THINKING_SLOW,
-                        image=image,
-                    )
-                    used = THINKING_SLOW
-                    verdict = finish_cascade(fast, parse_singguard_output(raw_slow, req.policy))
-                else:
-                    used = THINKING_FAST
-                    verdict = fast
-            else:
-                raw = await _generate(
+                if not needs_slow_pass(fast):
+                    return THINKING_FAST, fast
+                raw_slow = await _generate(
                     client,
                     model=model,
                     turns=turns,
                     policy=req.policy,
-                    thinking=requested,
+                    thinking=THINKING_SLOW,
                     image=image,
                 )
-                used = requested
-                verdict = parse_singguard_output(raw, req.policy)
+                return THINKING_SLOW, finish_cascade(fast, parse_singguard_output(raw_slow, req.policy))
+
+            used, verdict = await _guard_workers.run(_run)
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc)) from exc
     except httpx.ConnectError:

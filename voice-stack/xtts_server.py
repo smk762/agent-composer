@@ -101,11 +101,11 @@ MAX_REF_LEN: int = int(os.getenv("XTTS_MAX_REF_LEN", "30"))
 # Score (0–100) below which a clip is excluded from the default selection.
 ANALYZE_SCORE_THRESHOLD: float = float(os.getenv("XTTS_ANALYZE_THRESHOLD", "60"))
 
-S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "http://minio:9000")
+S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "http://192.168.1.109:9000")
 S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", "minioadmin")
 S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "minioadmin")
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "voice")
-S3_PUBLIC_URL = os.getenv("S3_PUBLIC_URL", "http://localhost:9000/voice")
+S3_PUBLIC_URL = os.getenv("S3_PUBLIC_URL", "http://192.168.1.109:9000/voice")
 
 SAMPLE_RATE = 24000  # XTTS-v2 output sample rate
 
