@@ -162,17 +162,29 @@ def _concat_wavs_with_gaps(wav_blobs: list[bytes], gap_ms: int) -> tuple[bytes, 
     """Concatenate same-format PCM WAV blobs with ``gap_ms`` silence between them.
 
     Returns ``(combined_wav_bytes, total_seconds)``. All blobs must share sample
-    rate / width / channels (they do — same engine renders every sentence).
+    rate / width / channels; a mismatch raises ``ValueError`` so the caller can
+    fall back to a single-shot render instead of emitting a garbled WAV.
     """
     import io
-    import wave
 
     frames: list[bytes] = []
     params = None
     for blob in wav_blobs:
         with wave.open(io.BytesIO(blob), "rb") as w:
+            got = w.getparams()
             if params is None:
-                params = w.getparams()
+                params = got
+            elif (got.nchannels, got.sampwidth, got.framerate, got.comptype) != (
+                params.nchannels,
+                params.sampwidth,
+                params.framerate,
+                params.comptype,
+            ):
+                raise ValueError(
+                    "WAV format mismatch: "
+                    f"{got.nchannels}ch/{got.sampwidth}B/{got.framerate}Hz "
+                    f"vs {params.nchannels}ch/{params.sampwidth}B/{params.framerate}Hz"
+                )
             frames.append(w.readframes(w.getnframes()))
 
     if params is None:

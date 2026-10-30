@@ -11,8 +11,8 @@ Three FastAPI services plus sidecars, all wired together in `docker-compose.yml`
 | `rag-ingest` | 9050 | Signed ingestion API → chunk → embed → upsert Qdrant |
 | `rag-chat` | 9150 | Chat gateway (Ollama + optional RAG), history, UI, pipeline proxy |
 | `modernbert` | 7998 | ModernBERT classifier sidecar (lazy-load GPU, zero-shot or fine-tuned) |
-| `qdrant` | 6333/6334 | Vector store (internal; written by rag-ingest, read by rag-chat) |
-| `postgres` | 5432 | Chat history DB for rag-chat (AsyncSQLAlchemy + Alembic) |
+| `qdrant` | 6333/6334 | Vector store on the stateful node (`192.168.1.109`; not in this compose) |
+| `postgres` | 5432 | Chat history DB on the stateful node (AsyncSQLAlchemy + Alembic; not in this compose) |
 | `infinity` | 7997 | Infinity sidecar serving CodeRankEmbed + bge-reranker (code-audit path) |
 | `ollama` | 11434 | Local LLM runtime (internal only) |
 | `whisper` | 8030 | faster-whisper STT sidecar (GPU, CTranslate2, large-v3-turbo) |
@@ -53,7 +53,7 @@ Copy `env.example` → `.env`. Key variables:
 
 - `INGEST_SHARED_SECRET` — required for rag-ingest HMAC signing
 - `QDRANT_URL` — defaults to `http://192.168.1.109:6333` (Qdrant, Postgres and MinIO run on the stateful node, not in this compose file; `S3_ENDPOINT_URL` / `S3_PUBLIC_URL` default there too)
-- `DATABASE_URL` — set automatically by compose to the internal postgres container
+- `DATABASE_URL` — Postgres on the stateful node (compose default `postgresql://ragchat:ragchat@192.168.1.109:5432/ragchat`)
 - `RETRIEVAL_PROFILE` — `text` (default, Ollama) or `code` (tree-sitter + Infinity)
 - `MODERNBERT_URL` — defaults to `http://modernbert:7998`
 - `AUDIT_API_URL` — ai-code-auditor audit API for diff-audit validation between repair iterations (default `http://127.0.0.1:8765`)
