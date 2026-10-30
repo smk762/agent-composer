@@ -37,7 +37,7 @@ GUARD_THINKING = (
 )
 SYSTEM_PROMPT = os.getenv("CHAT_SYSTEM_PROMPT", "You are a helpful assistant.")
 
-QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
+QDRANT_URL = os.getenv("QDRANT_URL", "http://192.168.1.109:6333")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "project_docs")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
 RAG_ENABLED = os.getenv("RAG_ENABLED", "1") == "1"

@@ -337,8 +337,8 @@ services:
       - TTS_PRELOAD=${TTS_PRELOAD:-0}
       - TTS_KEEP_ALIVE_GPU=${TTS_KEEP_ALIVE_GPU:-120}
       - TTS_KEEP_ALIVE_CPU=${TTS_KEEP_ALIVE_CPU:-600}
-      # Upload endpoint is internal (container → container); S3_PUBLIC_URL is the
-      # host-reachable URL handed back to the browser to fetch the rendered audio.
+      # MinIO is on the stateful node (LAN), not an in-stack service.
+      # S3_PUBLIC_URL is the host-reachable URL handed back to the browser.
       - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://192.168.1.109:9000}
       - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
       - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
@@ -392,8 +392,8 @@ services:
       - XTTS_TEMPERATURE=${XTTS_TEMPERATURE:-0.7}
       - XTTS_STREAM_CHUNK_SIZE=${XTTS_STREAM_CHUNK_SIZE:-20}
       - COQUI_TOS_AGREED=1
-      # Upload endpoint is internal (container → container); S3_PUBLIC_URL is the
-      # host-reachable URL handed back to the browser to fetch the rendered audio.
+      # MinIO is on the stateful node (LAN), not an in-stack service.
+      # S3_PUBLIC_URL is the host-reachable URL handed back to the browser.
       - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://192.168.1.109:9000}
       - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
       - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
