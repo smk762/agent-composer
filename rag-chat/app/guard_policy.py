@@ -145,9 +145,14 @@ _LINE_VERDICT = re.compile(r"^\s*(safe|unsafe)\b", re.IGNORECASE)
 # lines such as "Safe: no rule matches" or "Unsafe content would include..."
 # are discussion, not the label, so they must not read as one.
 _LATE_VERDICT_LINE = re.compile(r"^\s*\**\s*(safe|unsafe)\s*\**\s*[.!]?\s*$", re.IGNORECASE)
+_STEP_HEADING = re.compile(r"^\[step \d+\]", re.IGNORECASE)
 _STEP3_HEADING = re.compile(r"^\[step 3\]", re.IGNORECASE)
+# Step 3 prose: "conclude safe", "classified as unsafe", or the model's
+# usual wrap-up, "Therefore, the content is safe".
 _CONCLUDE_RE = re.compile(
-    r"\b(?:conclude(?:s|d)?|classified as|final judgment[:\s]+)\s+(safe|unsafe)\b",
+    r"\b(?:therefore[,:]?\s+)?(?:(?:the\s+)?(?:content|image)\s+is|"
+    r"it\s+is(?:\s+classified\s+as)?|classified\s+as|conclude(?:s|d)?|"
+    r"final judgment[:\s]+)\s+(safe|unsafe)\b",
     re.IGNORECASE,
 )
 _CASCADE_ESCALATED = "Cascade: fast flagged this; the slow pass is the verdict."
@@ -374,7 +379,7 @@ def _first_verdict(lines: list[str]) -> str | None:
 
 
 def _late_verdict(lines: list[str]) -> str | None:
-    """Verdict after reasoning: last line that is only safe/unsafe, else Step 3."""
+    """Verdict after reasoning: a standalone safe/unsafe line in Step 3, else its prose."""
     found = None
     step3_hit = None
     in_step3 = False
@@ -382,36 +387,46 @@ def _late_verdict(lines: list[str]) -> str | None:
         if _STEP3_HEADING.match(line):
             in_step3 = True
             continue
+        if not in_step3:
+            continue
         late = _LATE_VERDICT_LINE.match(line)
         if late:
             found = late.group(1).lower()
             continue
-        if in_step3:
-            conclude = _CONCLUDE_RE.search(line)
-            if conclude:
-                step3_hit = conclude.group(1).lower()
-    return found or step3_hit
+        conclude = _CONCLUDE_RE.search(line)
+        if conclude:
+            step3_hit = conclude.group(1).lower()
+    return found if found is not None else step3_hit
+
+
+def _deeper_verdict(rule_title: str, late: str | None) -> str | None:
+    """The slow/answer result, if the reply reached one.
+
+    Fast is a screen. ``<answer>Safe</answer>`` or a Step 3 conclusion of
+    safe is a pass even when the first line said unsafe.
+    """
+    if rule_title:
+        return "safe" if rule_title.casefold() == "safe" else "unsafe"
+    return late
 
 
 def parse_singguard_output(raw: str, policy: str | None = None) -> GuardVerdict:
     """Turn model text into a label, the triggered rule, and why.
 
     An empty or unreadable result is unsafe. A safety check that treats
-    silence as safe would hide a failed call. Slow-mode replies put the
-    verdict after the reasoning; that is still a verdict, not unreadable.
+    silence as safe would hide a failed call. Fast is a screen: a first-line
+    unsafe is settled by the reasoned ``<answer>`` or Step 3 Final Judgment,
+    and those win when they conclude Safe. Fail closed only when the reply
+    never reaches that conclusion.
     """
     cleaned = raw.replace("<|im_end|>", "").replace("<|im_start|>", "")
     cleaned = _THINK_RE.sub("", cleaned).strip()
     rules = policy_rules(policy)
     lines = [line.strip() for line in cleaned.splitlines() if line.strip()]
-    first_line_is_verdict = _first_verdict(lines) is not None
+    first = _first_verdict(lines)
+    first_line_is_verdict = first is not None
     answer_match = _ANSWER_RE.search(cleaned)
-    late = None if first_line_is_verdict else _late_verdict(lines)
-    # A slow reply is only complete once it reaches <answer>. A reply cut off
-    # mid-reasoning (token cap) can still contain a line that looks like a
-    # verdict, so without <answer> it is unreadable, never safe.
-    truncated = late is not None and answer_match is None
-    verdict = _first_verdict(lines) or (None if truncated else late)
+    late = _late_verdict(lines)
 
     rule_title = answer_match.group(1).strip() if answer_match else ""
     rule_title = " ".join(rule_title.split())
@@ -420,16 +435,20 @@ def parse_singguard_output(raw: str, policy: str | None = None) -> GuardVerdict:
         rule_title = matched.title
     rule_text = matched.text if matched else ""
     is_safe_rule = rule_title.casefold() == "safe"
+    # Answer, then Step 3, then the first-line screen.
+    verdict = _deeper_verdict(rule_title, late) or first
     reasoning = _reasoning_text(cleaned, first_line_is_verdict=first_line_is_verdict)
+    started_slow = any(_STEP_HEADING.match(line) for line in lines)
 
     notes: list[str] = []
     if verdict is None:
         safe = False
         verdict_out = "unsafe"
-        if truncated:
+        if started_slow:
             notes.append(
-                "SingGuard's reply ended before its <answer>, so it may have been "
-                "cut off. The check is unsafe so an incomplete result is not treated as safe."
+                "SingGuard's reply ended before a Final Judgment or <answer>, so it "
+                "may have been cut off. The check is unsafe so an incomplete result "
+                "is not treated as safe."
             )
         else:
             notes.append(
@@ -451,20 +470,10 @@ def parse_singguard_output(raw: str, policy: str | None = None) -> GuardVerdict:
                 f"The triggered rule “{rule_title}” is not a title in the active policy."
             )
     else:
-        # First line and <answer> disagree, or an unsafe call named no rule.
+        # An unsafe call named no rule.
         safe = False
         verdict_out = "unsafe"
-        if verdict == "safe" and rule_title and not is_safe_rule:
-            notes.append(
-                f"The first line says safe, but the answer names “{rule_title}”. "
-                "Those signals disagree, so the check is unsafe."
-            )
-        elif verdict == "unsafe" and is_safe_rule:
-            notes.append(
-                "The first line says unsafe, but the answer is Safe. "
-                "Those signals disagree, so the check is unsafe."
-            )
-        elif verdict == "unsafe" and not rule_title:
+        if verdict == "unsafe" and not rule_title:
             notes.append("The model marked this unsafe but did not name a rule.")
 
     explanation = _compose_explanation(

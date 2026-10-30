@@ -172,11 +172,12 @@ class ParseTests(unittest.TestCase):
         self.assertFalse(verdict.safe)
         self.assertIn("unreadable", verdict.explanation)
 
-    def test_disagreement_is_unsafe(self) -> None:
+    def test_answer_rule_wins_over_first_line_safe(self) -> None:
         raw = "safe\n<answer>B. Real-World Crimes & Public Safety</answer>"
         verdict = parse_singguard_output(raw)
         self.assertFalse(verdict.safe)
-        self.assertIn("disagree", verdict.explanation)
+        self.assertEqual(verdict.rule, "B. Real-World Crimes & Public Safety")
+        self.assertNotIn("disagree", verdict.explanation)
 
     def test_default_rules_cover_the_template_headings(self) -> None:
         titles = [rule.title for rule in policy_rules(None)]
@@ -250,7 +251,7 @@ class ParseTests(unittest.TestCase):
         verdict = parse_singguard_output(raw)
         self.assertFalse(verdict.safe)
 
-    def test_first_line_still_wins_over_a_later_revision(self) -> None:
+    def test_reasoned_safe_wins_over_first_line_unsafe(self) -> None:
         raw = (
             "unsafe\n"
             "[Step 3] Final Judgment\n"
@@ -258,8 +259,58 @@ class ParseTests(unittest.TestCase):
             "<answer>Safe</answer>"
         )
         verdict = parse_singguard_output(raw)
+        self.assertTrue(verdict.safe)
+        self.assertEqual(verdict.verdict, "safe")
+        self.assertEqual(verdict.rule, "Safe")
+        self.assertNotIn("disagree", verdict.explanation)
+
+    def test_step3_therefore_safe_is_a_verdict_without_an_answer_tag(self) -> None:
+        raw = (
+            "[Step 1] Content Summary\n"
+            "A portrait of an adult.\n"
+            "[Step 3] Final Judgment\n"
+            "The subject is an adult. Therefore, the content is safe.\n"
+        )
+        verdict = parse_singguard_output(raw)
+        self.assertTrue(verdict.safe)
+        self.assertEqual(verdict.verdict, "safe")
+        self.assertEqual(verdict.rule, "Safe")
+        self.assertIn("Final Judgment", verdict.explanation)
+        self.assertNotIn("unreadable", verdict.explanation)
+        self.assertNotIn("cut off", verdict.explanation)
+
+    def test_step3_therefore_safe_with_answer_is_safe(self) -> None:
+        raw = (
+            "[Step 1] Content Summary\n"
+            "A greeting.\n"
+            "[Step 3] Final Judgment\n"
+            "The image, when evaluated in isolation and in context, does not "
+            "violate any of the defined risk categories. Therefore, the content is safe.\n"
+            "<answer>Safe</answer>"
+        )
+        verdict = parse_singguard_output(raw)
+        self.assertTrue(verdict.safe)
+        self.assertEqual(verdict.rule, "Safe")
+        self.assertNotIn("unreadable", verdict.explanation)
+
+    def test_first_line_unsafe_and_answer_safe_is_not_a_disagreement(self) -> None:
+        raw = "unsafe\n<answer>Safe</answer>"
+        verdict = parse_singguard_output(raw)
+        self.assertTrue(verdict.safe)
+        self.assertEqual(verdict.rule, "Safe")
+        self.assertNotIn("disagree", verdict.explanation)
+
+    def test_step2_therefore_safe_is_not_a_verdict(self) -> None:
+        raw = (
+            "[Step 1] Content Summary\n"
+            "A request.\n"
+            "[Step 2] Check Risk Categories\n"
+            "A does not apply. Therefore, the content is safe under this rule.\n"
+            "Looking at rule B more closely,"
+        )
+        verdict = parse_singguard_output(raw)
         self.assertFalse(verdict.safe)
-        self.assertIn("disagree", verdict.explanation)
+        self.assertIn("cut off", verdict.explanation)
 
     def test_cascade_keeps_slow_when_fast_flags(self) -> None:
         fast = parse_singguard_output(
