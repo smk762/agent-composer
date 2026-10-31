@@ -9,5 +9,7 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY app /app/app
+COPY init.sh /app/init.sh
+RUN chmod +x /app/init.sh
 
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${APP_PORT}"]
+CMD ["/app/init.sh"]

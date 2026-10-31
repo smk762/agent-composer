@@ -12,7 +12,7 @@
   - `conversations(id uuid, user_id text, model text, created_at, updated_at)`
   - `messages(id uuid, conversation_id uuid, role text, content text, created_at, seq int)`
   - Index on `(user_id, updated_at desc)`.
-- [ ] Add DAL helpers: create convo, list convos by user, fetch messages (ordered), append messages with seq, prune by max messages/TTL.
+- [ ] Add DAL helpers: create convo, list convos by user, fetch  (ordered), append messages with seq, prune by max messages/TTL.
 - [ ] Update `/chat`:
   - Accept `conversation_id` (optional). Require user id from auth (service token/Access).
   - Load messages for convo (if provided) + append incoming user turn; prepend system prompt; insert retrieved RAG context.
@@ -53,3 +53,4 @@
 - [ ] Conversation titles (first user message or user-provided).
 - [ ] Export/download conversation as JSON/markdown.
 - [ ] Streamed chat support with incremental storage.
+messages

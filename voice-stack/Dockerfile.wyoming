@@ -1,0 +1,22 @@
+# Wyoming protocol bridges for the voice stack (TTS → XTTS, STT → Whisper).
+# Thin, CPU-only adapters; no GPU/torch. The same image runs either bridge —
+# pick the entrypoint via the compose `command`.
+#
+# Pinned to Python 3.11: wyoming's audio resampling uses the stdlib `audioop`
+# module, which was removed in Python 3.13.
+FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY wyoming_bridge/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY wyoming_bridge/ ./wyoming_bridge/
+
+ENV PYTHONUNBUFFERED=1
+
+# 10200 = TTS (Wyoming convention), 10300 = STT.
+EXPOSE 10200 10300
+
+# Default to the TTS bridge; override `command` for the STT bridge.
+CMD ["python", "-m", "wyoming_bridge.xtts_tts"]
