@@ -345,11 +345,15 @@ def build_image_chat_messages(
 
 
 def max_new_tokens(thinking: str) -> int:
-    """Fast is a label plus a rule. Slow and fast-slow also write the trace."""
+    """Fast is a label plus a rule. Slow and fast-slow also write the trace.
+
+    1024 cut cascade write-ups before ``<answer>``. Cull's local singguard
+    uses 2048 for the same modes.
+    """
     mode = normalize_thinking(thinking)
     if mode == THINKING_FAST:
         return 128
-    return 1024
+    return 2048
 
 
 def _lookup_rule(title: str, rules: list[PolicyRule]) -> PolicyRule | None:

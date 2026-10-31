@@ -121,8 +121,9 @@ class PromptTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             normalize_thinking("hybrid")
         self.assertEqual(max_new_tokens("fast"), 128)
-        self.assertEqual(max_new_tokens("slow"), 1024)
-        self.assertEqual(max_new_tokens("cascade"), 1024)
+        self.assertEqual(max_new_tokens("slow"), 2048)
+        self.assertEqual(max_new_tokens("fast-slow"), 2048)
+        self.assertEqual(max_new_tokens("cascade"), 2048)
         from app.config import GUARD_THINKING
 
         self.assertIn(GUARD_THINKING, THINKING_MODES)
