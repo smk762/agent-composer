@@ -127,7 +127,11 @@ _OUTPUT_SLOW = (
     "Based on the assessment, conclude safe or unsafe. If unsafe, specify the most relevant category.）\n"
     "\n"
     "safe/unsafe（Assessment Result, after the reasoning）\n"
-    "<answer>XXX</answer>（Final Answer Output the final ## Risk Category.）"
+    "<answer>XXX</answer>（Final Answer Output the final ## Risk Category.）\n"
+    "\n"
+    "There is no prior hint and no first-line verdict to follow. If you start "
+    "weighing a hint against the policy, stop: write [Step 3] Final Judgment "
+    "and the <answer> from the policy assessment alone."
 )
 
 THINKING_FAST = "fast"
@@ -156,6 +160,14 @@ _CONCLUDE_RE = re.compile(
     re.IGNORECASE,
 )
 _CASCADE_ESCALATED = "Cascade: fast flagged this; the slow pass is the verdict."
+_HINT_RE = re.compile(r"\bhint\b", re.IGNORECASE)
+_CONTRADICTION_RE = re.compile(r"contradict", re.IGNORECASE)
+# Whole-image conclusions only. "it is unsafe" matches "I will output unsafe"
+# in a hint loop; "the image is Safe" is the policy walk.
+_IMAGE_CONCLUDE_RE = re.compile(
+    r"\b(?:the\s+)?(?:content|image)\s+is\s+(safe|unsafe)\b",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -403,6 +415,22 @@ def _late_verdict(lines: list[str]) -> str | None:
     return found if found is not None else step3_hit
 
 
+def _hint_loop_verdict(cleaned: str) -> str | None:
+    """Policy conclusion from a cut-off hint-vs-policy loop, if they agree.
+
+    Slow sometimes argues "the image is Safe" against "follow the hint" until
+    the token budget dies, never reaching Step 3 or ``<answer>``. A single
+    Step 2 "therefore this rule is safe" is not this: that needs a hint and
+    a contradiction, and the same whole-image conclusion at least twice.
+    """
+    if not _HINT_RE.search(cleaned) or not _CONTRADICTION_RE.search(cleaned):
+        return None
+    hits = [m.group(1).lower() for m in _IMAGE_CONCLUDE_RE.finditer(cleaned)]
+    if len(hits) < 2 or len(set(hits)) != 1:
+        return None
+    return hits[0]
+
+
 def _deeper_verdict(rule_title: str, late: str | None) -> str | None:
     """The slow/answer result, if the reply reached one.
 
@@ -420,8 +448,10 @@ def parse_singguard_output(raw: str, policy: str | None = None) -> GuardVerdict:
     An empty or unreadable result is unsafe. A safety check that treats
     silence as safe would hide a failed call. Fast is a screen: a first-line
     unsafe is settled by the reasoned ``<answer>`` or Step 3 Final Judgment,
-    and those win when they conclude Safe. Fail closed only when the reply
-    never reaches that conclusion.
+    and those win when they conclude Safe. A cut-off slow pass that looped on
+    a first-line hint still counts if it repeatedly concludes the image is
+    Safe (or unsafe). Fail closed only when the reply never reaches a
+    conclusion.
     """
     cleaned = raw.replace("<|im_end|>", "").replace("<|im_start|>", "")
     cleaned = _THINK_RE.sub("", cleaned).strip()
@@ -439,12 +469,21 @@ def parse_singguard_output(raw: str, policy: str | None = None) -> GuardVerdict:
         rule_title = matched.title
     rule_text = matched.text if matched else ""
     is_safe_rule = rule_title.casefold() == "safe"
-    # Answer, then Step 3, then the first-line screen.
+    started_slow = any(_STEP_HEADING.match(line) for line in lines)
+    looped = None
+    if late is None and not rule_title and started_slow:
+        looped = _hint_loop_verdict(cleaned)
+        late = looped
+    # Answer, then Step 3, then a recovered hint-loop, then the first-line screen.
     verdict = _deeper_verdict(rule_title, late) or first
     reasoning = _reasoning_text(cleaned, first_line_is_verdict=first_line_is_verdict)
-    started_slow = any(_STEP_HEADING.match(line) for line in lines)
 
     notes: list[str] = []
+    if looped is not None:
+        notes.append(
+            "The reply looped on a first-line hint and never wrote <answer>. "
+            "The policy assessment is the verdict."
+        )
     if verdict is None:
         safe = False
         verdict_out = "unsafe"

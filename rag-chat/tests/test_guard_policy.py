@@ -104,6 +104,7 @@ class PromptTests(unittest.TestCase):
         self.assertIn("<thinking_type>slow</thinking_type>", prompt)
         self.assertIn("[Step 1] Content Summary", prompt)
         self.assertIn("Do not write safe or unsafe on line 1", prompt)
+        self.assertIn("no prior hint", prompt)
         self.assertLess(prompt.index("[Step 1]"), prompt.index("safe/unsafe（Assessment Result"))
         self.assertNotIn("safe/unsafe（Line1:", prompt)
 
@@ -300,6 +301,25 @@ class ParseTests(unittest.TestCase):
         self.assertTrue(verdict.safe)
         self.assertEqual(verdict.rule, "Safe")
         self.assertNotIn("disagree", verdict.explanation)
+
+    def test_hint_loop_with_repeated_image_is_safe_is_safe(self) -> None:
+        cycle = (
+            "Given the instruction, I must evaluate strictly by the policy. "
+            "Under the policy, the image is Safe. Therefore, I will output safe. "
+            "But the hint says unsafe. Since the instruction says \"follow the hint\", "
+            "I will output unsafe. This is a contradiction. "
+        )
+        raw = (
+            "[Step 1] Content Summary\n"
+            "An adult still.\n"
+            "[Step 2] Check Risk Categories\n"
+            f"{cycle * 6}"
+        )
+        verdict = parse_singguard_output(raw)
+        self.assertTrue(verdict.safe)
+        self.assertEqual(verdict.rule, "Safe")
+        self.assertIn("looped on a first-line hint", verdict.explanation)
+        self.assertNotIn("cut off", verdict.explanation)
 
     def test_step2_therefore_safe_is_not_a_verdict(self) -> None:
         raw = (
