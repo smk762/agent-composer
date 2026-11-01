@@ -133,11 +133,16 @@ def _turns(req: GuardCheckRequest) -> list[tuple[str, str]]:
 def _ollama_options(thinking: str) -> dict:
     # The GGUF advertises a 262k context. A classifier prompt is a few
     # thousand tokens; reserving the full window wastes VRAM.
-    return {
+    options = {
         "temperature": 0,
         "num_predict": max_new_tokens(thinking),
         "num_ctx": 16384,
     }
+    # Slow write-ups can loop on "follow the hint" vs the policy until the
+    # token budget dies. A mild penalty breaks that without changing fast.
+    if normalize_thinking(thinking) != THINKING_FAST:
+        options["repeat_penalty"] = 1.2
+    return options
 
 
 def _categories(verdict: GuardVerdict) -> list[GuardCategory]:
