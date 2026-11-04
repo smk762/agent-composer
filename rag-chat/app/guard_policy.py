@@ -452,6 +452,11 @@ def parse_singguard_output(raw: str, policy: str | None = None) -> GuardVerdict:
     a first-line hint still counts if it repeatedly concludes the image is
     Safe (or unsafe). Fail closed only when the reply never reaches a
     conclusion.
+
+    An ``<answer>`` that is neither Safe nor a title in the active policy is
+    not stored as ``rule``. The check stays unsafe and the explanation says
+    it is unreadable, so a flagged rule and an unusable answer stay distinct.
+    With no policy text, the titles are SingGuard's own headings.
     """
     cleaned = raw.replace("<|im_end|>", "").replace("<|im_start|>", "")
     cleaned = _THINK_RE.sub("", cleaned).strip()
@@ -509,8 +514,13 @@ def parse_singguard_output(raw: str, policy: str | None = None) -> GuardVerdict:
         safe = False
         verdict_out = "unsafe"
         if matched is None:
+            # Not a rule the caller can act on. Drop it so this stays an
+            # unreadable check, and still fail closed.
+            rule_title = ""
+            rule_text = ""
             notes.append(
-                f"The triggered rule “{rule_title}” is not a title in the active policy."
+                "SingGuard's <answer> is not Safe and not a title in the active policy. "
+                "The check is unsafe so an unreadable result is not treated as safe."
             )
     else:
         # An unsafe call named no rule.
