@@ -333,6 +333,71 @@ class ParseTests(unittest.TestCase):
         self.assertFalse(verdict.safe)
         self.assertIn("cut off", verdict.explanation)
 
+    def test_answer_that_is_not_a_policy_title_is_unreadable(self) -> None:
+        # Cull scan c6e1eea5… under adult-cinematic: the tag was prose, or the
+        # word "Category", and both were stored as the rule that fired.
+        prose = (
+            'from the policy assessment alone", and "Do not assign a risk letter '
+            'because it is the closest heading."'
+        )
+        cinematic = (
+            "## Risk Categories\n"
+            "### A. Illegal Sexual Content\n"
+            "  - Sexual content involving anyone under 18.\n"
+            "### B. Real-World Crimes & Public Safety\n"
+            "  - Instructional assistance for a real-world crime.\n"
+            "### C. Unethical Behavior\n"
+            "  - Hate, harassment, or self-harm.\n"
+            "### Safe\n"
+            "  - If no risk-category bullet matches, the verdict is Safe. "
+            "Do not assign a risk letter because it is the closest heading.\n"
+        )
+        for policy in (None, "", cinematic):
+            for answer in (prose, "Category"):
+                with self.subTest(policy=policy if policy != cinematic else "cinematic", answer=answer[:24]):
+                    verdict = parse_singguard_output(f"unsafe\n<answer>{answer}</answer>", policy)
+                    self.assertFalse(verdict.safe)
+                    self.assertEqual(verdict.verdict, "unsafe")
+                    self.assertEqual(verdict.rule, "")
+                    self.assertEqual(verdict.rule_text, "")
+                    self.assertIn("unreadable", verdict.explanation)
+                    self.assertNotIn("Triggered rule", verdict.explanation)
+                    self.assertNotIn(answer, verdict.rule)
+
+    def test_unreadable_answer_does_not_pass_on_a_safe_line(self) -> None:
+        for raw in (
+            "safe\n<answer>Category</answer>",
+            "[Step 3] Final Judgment\nTherefore, the content is safe.\n<answer>Category</answer>",
+        ):
+            with self.subTest(raw=raw[:24]):
+                verdict = parse_singguard_output(raw)
+                self.assertFalse(verdict.safe)
+                self.assertEqual(verdict.rule, "")
+                self.assertIn("unreadable", verdict.explanation)
+
+    def test_default_headings_still_name_a_rule_when_no_policy_is_sent(self) -> None:
+        # Default sends no policy text. Titles are SingGuard's own headings,
+        # including a shortened one, and a custom policy does not keep them.
+        verdict = parse_singguard_output(
+            "unsafe\n<answer>B. Real-World Crimes</answer>",
+            "",
+        )
+        self.assertFalse(verdict.safe)
+        self.assertEqual(verdict.rule, "B. Real-World Crimes")
+        self.assertNotIn("unreadable", verdict.explanation)
+
+        policy = "### A. Illegal Sexual Content\n  - minors\n\n### Safe\n  - anything else"
+        foreign = parse_singguard_output(
+            "unsafe\n<answer>B. Real-World Crimes & Public Safety</answer>",
+            policy,
+        )
+        self.assertFalse(foreign.safe)
+        self.assertEqual(foreign.rule, "")
+        self.assertIn("unreadable", foreign.explanation)
+        own = parse_singguard_output("unsafe\n<answer>A. Illegal Sexual Content</answer>", policy)
+        self.assertEqual(own.rule, "A. Illegal Sexual Content")
+        self.assertNotIn("unreadable", own.explanation)
+
     def test_cascade_keeps_slow_when_fast_flags(self) -> None:
         fast = parse_singguard_output(
             "unsafe\n<answer>B. Real-World Crimes & Public Safety</answer>"
