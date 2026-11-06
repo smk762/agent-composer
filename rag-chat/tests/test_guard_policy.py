@@ -364,6 +364,23 @@ class ParseTests(unittest.TestCase):
                     self.assertNotIn("Triggered rule", verdict.explanation)
                     self.assertNotIn(answer, verdict.rule)
 
+    def test_prose_opening_with_safe_is_unreadable_not_a_rule(self) -> None:
+        policy = "### A. Illegal Sexual Content\n  - minors\n\n### Safe\n  - anything else"
+        prose = "safe/unsafe...<category>. So if policy does not support unsafe for this image"
+        for active in (None, policy):
+            with self.subTest(policy="default" if active is None else "custom"):
+                verdict = parse_singguard_output(f"unsafe\n<answer>{prose}</answer>", active)
+                self.assertFalse(verdict.safe)
+                self.assertEqual(verdict.rule, "")
+                self.assertIn("not a title in the active policy", verdict.explanation)
+
+    def test_answer_running_on_past_a_title_records_the_title(self) -> None:
+        verdict = parse_singguard_output(
+            "unsafe\n<answer>B. Real-World Crimes & Public Safety, since it shows a robbery</answer>"
+        )
+        self.assertFalse(verdict.safe)
+        self.assertEqual(verdict.rule, "B. Real-World Crimes & Public Safety")
+
     def test_unreadable_answer_does_not_pass_on_a_safe_line(self) -> None:
         for raw in (
             "safe\n<answer>Category</answer>",
