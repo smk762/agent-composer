@@ -376,9 +376,10 @@ def _lookup_rule(title: str, rules: list[PolicyRule]) -> PolicyRule | None:
         if rule.title.casefold() == wanted:
             return rule
     # Accept a shortened title ("B. Real-World Crimes") for the full heading.
+    # Not Safe: any prose opening with "safe" would match it.
     for rule in rules:
         name = rule.title.casefold()
-        if name.startswith(wanted) or wanted.startswith(name):
+        if name != "safe" and (name.startswith(wanted) or wanted.startswith(name)):
             return rule
     return None
 
@@ -470,7 +471,8 @@ def parse_singguard_output(raw: str, policy: str | None = None) -> GuardVerdict:
     rule_title = answer_match.group(1).strip() if answer_match else ""
     rule_title = " ".join(rule_title.split())
     matched = _lookup_rule(rule_title, rules)
-    if matched and matched.title.casefold() == rule_title.casefold():
+    # An answer that runs on past the title keeps the title, so prose is never the rule.
+    if matched and rule_title.casefold().startswith(matched.title.casefold()):
         rule_title = matched.title
     rule_text = matched.text if matched else ""
     is_safe_rule = rule_title.casefold() == "safe"
