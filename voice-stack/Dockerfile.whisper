@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1
+#
+# faster-whisper STT image — GPU-accelerated via CTranslate2.
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# ffmpeg is required by faster-whisper for audio decoding
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ffmpeg && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install faster-whisper fastapi "uvicorn[standard]" structlog python-multipart httpx
+
+# Bake the model into the image so first request is fast.
+# CTranslate2 downloads + converts on first load.
+ARG STT_MODEL=large-v3-turbo
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('${STT_MODEL}')"
+
+COPY whisper_server.py .
+
+EXPOSE 8030
+
+ENV STT_MODEL=${STT_MODEL}
+ENV STT_DEVICE=cuda
+ENV STT_COMPUTE_TYPE=float16
+
+CMD ["uvicorn", "whisper_server:app", "--host", "0.0.0.0", "--port", "8030"]

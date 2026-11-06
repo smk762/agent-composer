@@ -2,8 +2,10 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from textwrap import dedent
 from typing import Any, Dict, Optional
 
@@ -12,26 +14,104 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
-from app.ingest_pipeline import ingest_docs
-from app.nonce_store import NonceStore, NonceStoreConfig
+from app.inference_retry import RetryableOomError
+from app.ingest_pipeline import ensure_collections_on_startup, ingest_docs
+from app.metrics import MetricsMiddleware, metrics_router
+from app.nonce_store import (
+    NonceStore,
+    NonceStoreConfig,
+    RedisNonceStore,
+    RedisNonceStoreConfig,
+)
 
-app = FastAPI(title="RAG Ingestion API")
+log = logging.getLogger("rag-ingest")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Provision the Qdrant collection(s) on launch if missing. Best-effort:
+    # never block startup if the embedding backend or Qdrant isn't ready yet —
+    # the ingest path lazily creates them on first upsert as a fallback.
+    try:
+        await ensure_collections_on_startup()
+    except Exception as e:
+        log.warning("startup qdrant collection ensure skipped: %s", e)
+    yield
+
+
+app = FastAPI(title="RAG Ingestion API", lifespan=lifespan)
+app.add_middleware(MetricsMiddleware)
+app.include_router(metrics_router)
 
 SHARED_SECRET = os.environ.get("INGEST_SHARED_SECRET", "")
 REQUIRE_ENCRYPTION = os.environ.get("INGEST_REQUIRE_ENCRYPTION", "0") == "1"
 NONCE_DB_PATH = os.environ.get("INGEST_NONCE_DB", "/data/nonces.db")
+NONCE_STORE_BACKEND = os.environ.get("INGEST_NONCE_STORE", "sqlite").strip().lower()
+INGEST_REDIS_URL = os.environ.get("INGEST_REDIS_URL", "").strip()
+INGEST_NONCE_KEY_PREFIX = os.environ.get("INGEST_NONCE_KEY_PREFIX", "ingest:nonce:")
 MAX_SKEW_S = int(os.environ.get("INGEST_MAX_SKEW_S", "300"))
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
 
 if not SHARED_SECRET:
     raise RuntimeError("INGEST_SHARED_SECRET is required")
 
-_nonce_store = NonceStore(
-    NonceStoreConfig(
-        db_path=NONCE_DB_PATH,
-        nonce_ttl_s=max(600, MAX_SKEW_S + 120),
-    )
-)
+_NONCE_TTL_S = max(600, MAX_SKEW_S + 120)
+
+
+def _redacted(url: str) -> str:
+    """Strip the password from a redis URL for safe logging."""
+    try:
+        from urllib.parse import urlsplit, urlunsplit
+
+        parts = urlsplit(url)
+        if parts.password:
+            netloc = parts.hostname or ""
+            if parts.username:
+                netloc = f"{parts.username}:***@{netloc}"
+            else:
+                netloc = f":***@{netloc}"
+            if parts.port:
+                netloc = f"{netloc}:{parts.port}"
+            return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+    except Exception:
+        pass
+    return url
+
+
+def _build_nonce_store():
+    """Select the nonce backend. With INGEST_NONCE_STORE=redis we probe the
+    server at startup and fall back to the local SQLite store if it's
+    unreachable, so replay protection degrades gracefully rather than 500-ing
+    every ingest when the stateful node's Redis is down."""
+    sqlite_cfg = NonceStoreConfig(db_path=NONCE_DB_PATH, nonce_ttl_s=_NONCE_TTL_S)
+
+    if NONCE_STORE_BACKEND != "redis":
+        return NonceStore(sqlite_cfg), "sqlite"
+
+    if not INGEST_REDIS_URL:
+        raise RuntimeError("INGEST_REDIS_URL is required when INGEST_NONCE_STORE=redis")
+
+    try:
+        store = RedisNonceStore(
+            RedisNonceStoreConfig(
+                redis_url=INGEST_REDIS_URL,
+                nonce_ttl_s=_NONCE_TTL_S,
+                key_prefix=INGEST_NONCE_KEY_PREFIX,
+            )
+        )
+        store.ping()
+        log.info("nonce store: redis @ %s", _redacted(INGEST_REDIS_URL))
+        return store, "redis"
+    except Exception as e:
+        log.warning(
+            "nonce store: redis unreachable (%s); falling back to sqlite at %s",
+            e,
+            NONCE_DB_PATH,
+        )
+        return NonceStore(sqlite_cfg), "sqlite-fallback"
+
+
+_nonce_store, NONCE_BACKEND = _build_nonce_store()
 
 def _hmac_key() -> bytes:
     return hashlib.sha256(SHARED_SECRET.encode("utf-8")).digest()
@@ -66,13 +146,26 @@ def _fernet() -> Fernet:
     return Fernet(key)
 
 class IngestDoc(BaseModel):
-    docs: list[Dict[str, Any]] = Field(..., description="List of documents to index")
+    docs: list[Dict[str, Any]] = Field(
+        ...,
+        description=(
+            "List of documents to index. Each doc accepts:\n"
+            "- text/content/page_content/body (one of): the document text\n"
+            "- id, doc_id, title, url, source: standard metadata\n"
+            "Code-audit profile (RETRIEVAL_PROFILE=code) additionally accepts:\n"
+            "- kind: 'code' | 'text' (forces routing; otherwise inferred from path)\n"
+            "- path: repo-relative file path (drives language detection)\n"
+            "- language: tree-sitter language id (overrides path-based inference)\n"
+            "- repo: repository identifier\n"
+            "- commit_sha: commit hash for provenance"
+        ),
+    )
     source: Optional[str] = Field(None, description="Source identifier (e.g. 'grocy', 'growdb')")
     tags: Optional[list[str]] = Field(default_factory=list)
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {"ok": True, "nonce_store": NONCE_BACKEND}
 
 
 @app.get("/ui/ingest", response_class=HTMLResponse)
@@ -419,6 +512,8 @@ async def ingest(
     # - upsert into Qdrant
     try:
         result = await ingest_docs(ingest_doc.docs, source=ingest_doc.source, tags=ingest_doc.tags or [])
+    except RetryableOomError as e:
+        raise HTTPException(503, str(e))
     except HTTPException:
         raise
     except Exception as e:

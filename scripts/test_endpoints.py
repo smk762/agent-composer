@@ -16,6 +16,15 @@ from typing import Any, Tuple
 
 CHAT_BASE = os.environ.get("CHAT_URL", "http://127.0.0.1:9150")
 INGEST_BASE = os.environ.get("INGEST_URL", "http://127.0.0.1:9050")
+API_KEY = os.environ.get("RAG_API_KEY", "")
+
+
+def _auth_headers() -> dict[str, str]:
+    """Return auth headers if an API key is configured."""
+    hdrs: dict[str, str] = {"Accept": "application/json", "Content-Type": "application/json"}
+    if API_KEY:
+        hdrs["Authorization"] = f"Bearer {API_KEY}"
+    return hdrs
 
 
 def _request(
@@ -37,17 +46,12 @@ def _request(
 
 
 def get_json(url: str) -> Tuple[int, Any]:
-    return _request(url, "GET", None, {"Accept": "application/json"})
+    return _request(url, "GET", None, _auth_headers())
 
 
 def post_json(url: str, payload: dict[str, Any]) -> Tuple[int, Any]:
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    return _request(
-        url,
-        "POST",
-        body,
-        {"Accept": "application/json", "Content-Type": "application/json"},
-    )
+    return _request(url, "POST", body, _auth_headers())
 
 
 def check_health(name: str, url: str) -> bool:
@@ -61,7 +65,17 @@ def check_chat() -> bool:
     payload = {"messages": [{"role": "user", "content": "Hello, test message."}]}
     status, data = post_json(f"{CHAT_BASE}/chat", payload)
     ok = status == 200
-    snippet = data if isinstance(data, str) else data.get("content")
+    
+    # Handle both new (OpenAI-compatible) and old response formats
+    if isinstance(data, str):
+        snippet = data
+    elif "choices" in data and data["choices"]:
+        # New format: extract from choices[0].message.content
+        snippet = data["choices"][0].get("message", {}).get("content", "")
+    else:
+        # Old format: direct content field
+        snippet = data.get("content", "")
+    
     print(f"rag-chat /chat: {'OK' if ok else 'FAIL'} (status {status}) -> {snippet}")
     return ok
 
