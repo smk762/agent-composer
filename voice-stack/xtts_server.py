@@ -168,17 +168,26 @@ class XTTSModelManager:
 
         logger.info("loading_xtts", model=XTTS_MODEL, target="cpu")
 
-        # Download (no-op if cached) and resolve the local checkpoint dir + config.
+        # Download (no-op if cached). coqui-tts may return the checkpoint
+        # file itself; load_checkpoint rejects a file passed as checkpoint_dir.
         model_path, config_path, _ = ModelManager().download_model(XTTS_MODEL)
+        model_path = os.fspath(model_path)
+        if os.path.isfile(model_path):
+            checkpoint_path = model_path
+            checkpoint_dir = os.path.dirname(model_path)
+        else:
+            checkpoint_path = None
+            checkpoint_dir = model_path
         if config_path is None:
-            config_path = os.path.join(str(model_path), "config.json")
+            config_path = os.path.join(checkpoint_dir, "config.json")
 
         config = XttsConfig()
         config.load_json(str(config_path))
         model = Xtts.init_from_config(config)
         model.load_checkpoint(
             config,
-            checkpoint_dir=str(model_path),
+            checkpoint_dir=checkpoint_dir,
+            checkpoint_path=checkpoint_path,
             use_deepspeed=USE_DEEPSPEED,
         )
         model.eval()
