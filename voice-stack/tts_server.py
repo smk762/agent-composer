@@ -10,12 +10,16 @@ Loads two model variants:
   - CustomVoice: predefined speakers + instruction-based emotion
 
 GPU memory lifecycle (three-state, like ModernBERT):
-  unloaded → cpu → gpu
+  unloaded → gpu → cpu
 
-  On request the models are promoted to GPU; after TTS_KEEP_ALIVE_GPU seconds
-  of idle time they are demoted back to CPU, freeing VRAM for other services
-  (Ollama, Whisper, Infinity).  After a further TTS_KEEP_ALIVE_CPU seconds
-  on CPU they are fully unloaded.
+  The first request loads with device_map set to TTS_DEVICE. Loading onto
+  CPU and then calling Module.to("cuda") leaves Accelerate dispatch hooks
+  in place: weights report cuda but generation runs tens of times slower
+  than real time. The CPU copy is only produced later, by .to("cpu") of a
+  model that was loaded on CUDA, which stays on the fast path when promoted
+  again. After TTS_KEEP_ALIVE_GPU seconds of idle the models demote to CPU,
+  freeing VRAM for other services. After a further TTS_KEEP_ALIVE_CPU
+  seconds on CPU they are fully unloaded.
 
 Env vars:
   TTS_MODEL_SIZE       — "0.6b" (default) or "1.7b"
@@ -46,7 +50,7 @@ from typing import Optional
 
 import structlog
 from fastapi import FastAPI, File, Form, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 logger = structlog.get_logger(__name__)
@@ -64,6 +68,9 @@ def _normalise_model_size(raw_size: str) -> str:
 MODEL_SIZE = _normalise_model_size(os.getenv("TTS_MODEL_SIZE", "0.6b"))
 DEVICE = os.getenv("TTS_DEVICE", "cuda:0")
 LOAD_MODELS = os.getenv("TTS_LOAD_MODELS", "both")
+# Used when a request names no speaker, clone, or voice description.
+# A request `speaker` always wins.
+DEFAULT_SPEAKER = os.getenv("TTS_DEFAULT_SPEAKER", "").strip()
 PRELOAD = os.getenv("TTS_PRELOAD", "0") == "1"
 KEEP_ALIVE_GPU: float = float(os.getenv("TTS_KEEP_ALIVE_GPU", "120"))
 KEEP_ALIVE_CPU: float = float(os.getenv("TTS_KEEP_ALIVE_CPU", "600"))
@@ -132,9 +139,12 @@ class TTSState(str, Enum):
 
 
 class TTSModelManager:
-    """Three-state lifecycle: unloaded → cpu → gpu.
+    """Three-state lifecycle: unloaded → gpu → cpu.
 
-    Models are loaded to CPU first, then promoted to GPU on demand.
+    The first load uses device_map=<TTS_DEVICE>. A later idle demotes with
+    .to("cpu"); the next request moves that same module back. Do not reload
+    with device_map="cpu" and then .to("cuda") — Accelerate hooks survive
+    that move and generation becomes ~50× real time.
     After keep_alive_gpu seconds of idle the models demote to CPU.
     After keep_alive_cpu seconds on CPU the models fully unload.
     """
@@ -166,37 +176,39 @@ class TTSModelManager:
     def is_ready(self) -> bool:
         return self._state in (TTSState.CPU, TTSState.GPU)
 
-    def _load_to_cpu(self) -> None:
+    def _load(self, device: str) -> None:
         import torch
         from qwen_tts import Qwen3TTSModel
 
         dtype = torch.bfloat16
         ids = MODEL_IDS[MODEL_SIZE]
+        # Single-device map on the real target. See the class docstring.
+        device_map = device if str(device).startswith("cuda") else "cpu"
 
-        def _load(model_id: str):
+        def _load_one(model_id: str):
             # Prefer torch's built-in SDPA attention over the slow "manual PyTorch"
             # path used when flash-attn is absent. Fall back if the model rejects
             # the kwarg (custom model may not honor HF's attn dispatch).
             try:
                 return Qwen3TTSModel.from_pretrained(
-                    model_id, device_map="cpu", dtype=dtype,
+                    model_id, device_map=device_map, dtype=dtype,
                     attn_implementation="sdpa",
                 )
             except (TypeError, ValueError) as exc:
                 logger.warning("tts_sdpa_unsupported", error=str(exc))
                 return Qwen3TTSModel.from_pretrained(
-                    model_id, device_map="cpu", dtype=dtype,
+                    model_id, device_map=device_map, dtype=dtype,
                 )
 
         if LOAD_MODELS in ("both", "base"):
-            logger.info("loading_qwen3_tts_base", model=ids["base"], target="cpu")
-            self._base_model = _load(ids["base"])
-            logger.info("qwen3_tts_base_loaded_cpu")
+            logger.info("loading_qwen3_tts_base", model=ids["base"], target=device_map)
+            self._base_model = _load_one(ids["base"])
+            logger.info("qwen3_tts_base_loaded", device=device_map)
 
         if LOAD_MODELS in ("both", "custom_voice"):
-            logger.info("loading_qwen3_tts_custom_voice", model=ids["custom_voice"], target="cpu")
-            self._custom_model = _load(ids["custom_voice"])
-            logger.info("qwen3_tts_custom_voice_loaded_cpu")
+            logger.info("loading_qwen3_tts_custom_voice", model=ids["custom_voice"], target=device_map)
+            self._custom_model = _load_one(ids["custom_voice"])
+            logger.info("qwen3_tts_custom_voice_loaded", device=device_map)
 
     def _move_to_device(self, device: str) -> None:
         import torch
@@ -229,14 +241,17 @@ class TTSModelManager:
             if self._state in (TTSState.UNLOADED, TTSState.ERROR):
                 self._state = TTSState.LOADING
                 try:
-                    await asyncio.to_thread(self._load_to_cpu)
-                    self._state = TTSState.CPU
+                    await asyncio.to_thread(self._load, DEVICE)
+                    self._state = TTSState.GPU
                     self._error = None
                 except Exception as exc:
                     self._state = TTSState.ERROR
                     self._error = str(exc)
                     logger.error("tts_load_failed", error=str(exc))
                     raise
+                self._last_used = time.time()
+                self._arm_evict()
+                return
 
             if self._state == TTSState.CPU:
                 if DEVICE.startswith("cuda"):
@@ -366,14 +381,14 @@ def _gpu_memory_info() -> dict | None:
         if torch.cuda.is_available():
             allocated = torch.cuda.memory_allocated() / 1024**2
             reserved = torch.cuda.memory_reserved() / 1024**2
-            total = torch.cuda.get_device_properties(0).total_mem / 1024**2
+            total = torch.cuda.get_device_properties(0).total_memory / 1024**2
             return {
                 "allocated_mb": round(allocated, 1),
                 "reserved_mb": round(reserved, 1),
                 "total_mb": round(total, 1),
             }
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("gpu_memory_info_failed", error=str(exc))
     return None
 
 
@@ -423,9 +438,8 @@ def _max_new_tokens_for(text: str) -> int:
     return max(192, min(est, TTS_MAX_NEW_TOKENS_CEILING))
 
 
-@app.post("/synthesise")
-async def synthesise(req: SynthesiseRequest):
-    """Generate speech from text.
+async def _generate_audio(req: SynthesiseRequest):
+    """Render speech. Returns ``(float32 samples, sample_rate)`` or a JSONResponse error.
 
     Uses Base model if voice_clone_id is provided (voice cloning path).
     Uses CustomVoice model otherwise (predefined speaker + instruction path).
@@ -433,9 +447,7 @@ async def synthesise(req: SynthesiseRequest):
     if _mgr.state == TTSState.LOADING:
         return JSONResponse(status_code=503, content={"error": "Models still loading"})
 
-    t_req = time.monotonic()
     await _mgr.ensure_gpu()
-    t_ready = time.monotonic()
 
     instruction = req.instruction
     if instruction is None:
@@ -451,10 +463,8 @@ async def synthesise(req: SynthesiseRequest):
             },
         )
 
-    job_id = str(uuid.uuid4())
     max_new_tokens = _max_new_tokens_for(req.text)
 
-    t_gen0 = time.monotonic()
     try:
         if req.voice_clone_id:
             if _mgr.base_model is None:
@@ -479,7 +489,7 @@ async def synthesise(req: SynthesiseRequest):
                 )
             elif _mgr.custom_model is not None:
                 available = _mgr.custom_model.get_supported_speakers()
-                fallback_speaker = req.speaker or sorted(available)[0]
+                fallback_speaker = (req.speaker or "").strip() or DEFAULT_SPEAKER or sorted(available)[0]
                 logger.info("voice_design_fallback_to_speaker", speaker=fallback_speaker)
                 audio_arrays, sample_rate = await asyncio.to_thread(
                     _mgr.custom_model.generate_custom_voice,
@@ -493,7 +503,7 @@ async def synthesise(req: SynthesiseRequest):
         else:
             if _mgr.custom_model is None:
                 return JSONResponse(status_code=503, content={"error": "CustomVoice model not loaded (TTS_LOAD_MODELS=base)"})
-            speaker = req.speaker
+            speaker = (req.speaker or "").strip() or DEFAULT_SPEAKER
             if not speaker:
                 available = _mgr.custom_model.get_supported_speakers()
                 return JSONResponse(
@@ -529,11 +539,21 @@ async def synthesise(req: SynthesiseRequest):
         logger.error("tts_generation_failed", error=str(exc), exc_info=True)
         return JSONResponse(status_code=500, content={"error": f"TTS generation failed: {exc}"})
 
-    t_gen1 = time.monotonic()
-
     import numpy as np
 
-    audio_data = np.concatenate(audio_arrays) if len(audio_arrays) > 1 else audio_arrays[0]
+    audio = np.concatenate(audio_arrays) if len(audio_arrays) > 1 else audio_arrays[0]
+    audio = np.ascontiguousarray(np.asarray(audio), dtype="<f4").reshape(-1)
+    return audio, int(sample_rate)
+
+
+@app.post("/synthesise")
+async def synthesise(req: SynthesiseRequest):
+    """Generate speech from text and store a WAV. Returns ``{audio_url, duration, ...}``."""
+    t_req = time.monotonic()
+    rendered = await _generate_audio(req)
+    if isinstance(rendered, JSONResponse):
+        return rendered
+    audio, sample_rate = rendered
 
     import soundfile as sf
 
@@ -541,7 +561,7 @@ async def synthesise(req: SynthesiseRequest):
         tmp_path = f.name
 
     try:
-        await asyncio.to_thread(sf.write, tmp_path, audio_data, sample_rate)
+        await asyncio.to_thread(sf.write, tmp_path, audio, sample_rate)
         with open(tmp_path, "rb") as f:
             wav_bytes = f.read()
         info = await asyncio.to_thread(sf.info, tmp_path)
@@ -549,25 +569,17 @@ async def synthesise(req: SynthesiseRequest):
     finally:
         os.unlink(tmp_path)
 
-    t_encoded = time.monotonic()
-
+    job_id = str(uuid.uuid4())
     s3_key = f"generated/voice/{job_id}.wav"
     audio_url = await asyncio.to_thread(_upload_to_s3, wav_bytes, s3_key)
-
-    t_uploaded = time.monotonic()
 
     logger.info(
         "tts_synthesised",
         job_id=job_id,
         duration=round(duration, 2),
         language=req.language,
-        max_new_tokens=max_new_tokens,
-        ready_s=round(t_ready - t_req, 2),
-        generate_s=round(t_gen1 - t_gen0, 2),
-        encode_s=round(t_encoded - t_gen1, 2),
-        upload_s=round(t_uploaded - t_encoded, 2),
-        total_s=round(t_uploaded - t_req, 2),
-        rtf=round((t_gen1 - t_gen0) / duration, 1) if duration else None,
+        total_s=round(time.monotonic() - t_req, 2),
+        rtf=round((time.monotonic() - t_req) / duration, 1) if duration else None,
     )
 
     return {
@@ -576,6 +588,30 @@ async def synthesise(req: SynthesiseRequest):
         "duration_seconds": round(duration, 3),
         "format": "wav",
     }
+
+
+@app.post("/synthesise/stream")
+async def synthesise_stream(req: SynthesiseRequest):
+    """Return the utterance as raw mono float32 PCM.
+
+    Argus-mask ``POST /speak`` reads ``X-Sample-Rate``, ``X-Audio-Format`` and
+    ``X-Channels`` and then the body. Qwen renders the whole clip before the
+    first byte; mask buffers that by default.
+    """
+    rendered = await _generate_audio(req)
+    if isinstance(rendered, JSONResponse):
+        return rendered
+    audio, sample_rate = rendered
+    return Response(
+        content=audio.tobytes(),
+        media_type="application/octet-stream",
+        headers={
+            "X-Sample-Rate": str(sample_rate),
+            "X-Audio-Format": "pcm_f32le",
+            "X-Channels": "1",
+            "Connection": "close",
+        },
+    )
 
 
 # ── POST /clone-voice ─────────────────────────────────────────────────────────
@@ -696,6 +732,7 @@ async def health():
         "model_size": MODEL_SIZE,
         "device": DEVICE,
         "load_models": LOAD_MODELS,
+        "default_speaker": DEFAULT_SPEAKER or None,
         "model_state": _mgr.state.value,
         "keep_alive_gpu": KEEP_ALIVE_GPU,
         "keep_alive_cpu": KEEP_ALIVE_CPU,

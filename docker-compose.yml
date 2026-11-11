@@ -320,8 +320,11 @@ services:
   # Qwen3-TTS — GPU text-to-speech (CustomVoice + Base model variants).
   # GPU memory managed: models lazy-load on first request, demote to CPU after
   # TTS_KEEP_ALIVE_GPU idle seconds, fully unload after TTS_KEEP_ALIVE_CPU.
-  # API: POST /synthesise, GET /speakers, POST /clone-voice, GET /health,
+  # API: POST /synthesise, POST /synthesise/stream, GET /speakers,
+  #      POST /clone-voice, GET /health,
   #      POST /admin/evict, POST /admin/unload, POST /admin/wake.
+  # /synthesise/stream is the argus-mask PCM contract (24 kHz pcm_f32le).
+  # Qwen returns the whole clip at the end; the route does not chunk mid-utterance.
   tts:
     build:
       context: ./voice-stack
@@ -335,6 +338,7 @@ services:
       - TTS_MODEL_SIZE=${TTS_MODEL_SIZE:-0.6b}
       - TTS_DEVICE=${TTS_DEVICE:-cuda:0}
       - TTS_LOAD_MODELS=${TTS_LOAD_MODELS:-both}
+      - TTS_DEFAULT_SPEAKER=${TTS_DEFAULT_SPEAKER:-}
       - TTS_PRELOAD=${TTS_PRELOAD:-0}
       - TTS_KEEP_ALIVE_GPU=${TTS_KEEP_ALIVE_GPU:-120}
       - TTS_KEEP_ALIVE_CPU=${TTS_KEEP_ALIVE_CPU:-600}
@@ -350,10 +354,10 @@ services:
     depends_on:
       minio-setup:
         condition: service_completed_successfully
-    # Loopback only: legacy rollback engine, consumed by rag-chat via
-    # http://tts:8031 on the internal net. Host port is for debugging.
+    # argus-mask calls POST /synthesise/stream on this port. Unset TTS_BIND_IP
+    # follows BIND_ADDR; both unset stays on loopback.
     ports:
-      - "127.0.0.1:${TTS_PORT:-8031}:8031"
+      - "${TTS_BIND_IP:-${BIND_ADDR:-127.0.0.1}}:${TTS_PORT:-8031}:8031"
     deploy:
       resources:
         reservations:
