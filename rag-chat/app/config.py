@@ -212,6 +212,18 @@ ECOSYSTEM_CONFIG_PATH = os.getenv(
     "/home/smk/ai-code-auditor/config/ecosystem.yaml",
 )
 
+# Agent coding packs (ai-code-auditor ``GET /audit/packs/{id}``).  Default base for
+# ``pack_id``-driven repairs: AI_AUDIT_PUBLIC_BASE_URL, then AUDIT_API_URL, then localhost.
+AUDIT_PACK_BASE_URL = (
+    os.getenv("AI_AUDIT_PUBLIC_BASE_URL")
+    or os.getenv("AUDIT_API_URL")
+    or "http://127.0.0.1:8765"
+)
+AUDIT_PACK_TIMEOUT_S = float(os.getenv("AUDIT_PACK_TIMEOUT_S", "10"))
+# Tell the audit API a pack is resolved after a successful applied auto_fix.
+# Off by default: ``POST /audit/packs/{id}/status`` is not implemented upstream yet.
+REPAIR_PACK_STATUS_CALLBACK = os.getenv("REPAIR_PACK_STATUS_CALLBACK", "0").lower() in ("1", "true", "yes")
+
 UTC = timezone.utc
 
 

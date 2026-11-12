@@ -255,7 +255,7 @@ async def repair_loop(
     qdrant_snippets: list[str] = []
     if qdrant_url:
         qdrant_snippets = await fetch_qdrant_snippets(
-            query=request.diff[:500],
+            query=(request.diff or request.pack_context)[:500],
             qdrant_url=qdrant_url,
         )
 
@@ -270,6 +270,7 @@ async def repair_loop(
             critic_notes=critic_notes if iteration > 1 else "",
             adversary_notes=adversary_notes if iteration > 1 else "",
             qdrant_snippets=qdrant_snippets,
+            pack_context=request.pack_context,
         )
 
         # ── Model A: fixer ────────────────────────────────────────────────────

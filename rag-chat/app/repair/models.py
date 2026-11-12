@@ -28,7 +28,30 @@ class GitOpsConfig(BaseModel):
 
 
 class RepairRequest(BaseModel):
-    repo: str = Field(..., description="Repo name from ai-code-auditor ecosystem config")
+    repo: str = Field(
+        "",
+        description="Repo name from ai-code-auditor ecosystem config. "
+                    "May be omitted when ``pack_id`` is set (taken from the pack).",
+    )
+    pack_id: str = Field(
+        "",
+        description=(
+            "ai-code-auditor agent pack id (e.g. 'ext-retry-core-001').  The pack and its "
+            "brief are fetched from the audit API and injected into the repair context, so "
+            "the caller does not have to paste a brief.  If the pack's repo differs from "
+            "``repo``: read-only runs use the pack's repo (with a warning); runs that "
+            "apply/commit are rejected.  Fetch failures are non-fatal."
+        ),
+    )
+    audit_api_base: str = Field(
+        "",
+        description="Audit API base URL used to fetch ``pack_id``. Default: env "
+                    "AI_AUDIT_PUBLIC_BASE_URL, else AUDIT_API_URL, else http://127.0.0.1:8765.",
+    )
+    pack_context: str = Field(
+        "",
+        description="Server-populated: rendered pack block. Any client-supplied value is overwritten.",
+    )
     diff: str = Field("", description="Unified diff text to repair")
     compare_branch: str = Field("", description="Generate diff via git diff <branch>...HEAD")
     errors: list[str] = Field(default_factory=list, description="Validation errors to fix")

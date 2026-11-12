@@ -15,9 +15,17 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
-from app.config import AUDIT_API_URL, ECOSYSTEM_CONFIG_PATH, QDRANT_URL
+from app.config import (
+    AUDIT_API_URL,
+    AUDIT_PACK_BASE_URL,
+    AUDIT_PACK_TIMEOUT_S,
+    ECOSYSTEM_CONFIG_PATH,
+    QDRANT_URL,
+    REPAIR_PACK_STATUS_CALLBACK,
+)
 from app.repair.models import GitOpsConfig, RepairIteration, RepairRequest, RepairResult
 from app.repair.multi_model import repair_loop
+from app.repair.pack_client import fetch_pack_context, report_pack_status, resolve_repo
 from app.repair.patch_applier import apply_inplace, apply_to_temp
 
 log = logging.getLogger("rag-chat.repair")
@@ -68,15 +76,19 @@ async def run_repair(request: RepairRequest) -> StreamingResponse:
 
     Event types:
     - ``started``   — job created, contains ``job_id``
+    - ``pack_loaded`` — ``pack_id`` resolved (title, repo); only when ``pack_id`` was sent
+    - ``warning``   — non-fatal problem (pack fetch failed, repo override); loop continues
     - ``iteration`` — one repair pass completed, contains ``RepairIteration`` fields
     - ``complete``  — loop finished, contains ``final_patch`` and whether it was applied
     - ``error``     — unrecoverable failure
     """
-    if not request.diff and not request.compare_branch:
+    if not request.diff and not request.compare_branch and not request.pack_id:
         raise HTTPException(
             status_code=422,
-            detail="Provide 'diff' (unified diff text) or 'compare_branch'.",
+            detail="Provide 'diff' (unified diff text), 'compare_branch', or 'pack_id'.",
         )
+    if not request.repo and not request.pack_id:
+        raise HTTPException(status_code=422, detail="Provide 'repo' (or 'pack_id' to take it from the pack).")
 
     job_id = f"repair-{secrets.token_hex(8)}"
     result = RepairResult(
@@ -100,11 +112,51 @@ async def run_repair(request: RepairRequest) -> StreamingResponse:
         error_msg = ""
 
         try:
+            # Resolve the agent pack (if any) before anything else: it may supply
+            # the repo name and the context block.  Fails soft — warnings only.
+            repo = request.repo
+            pack_block = ""
+            pack_ctx = None
+            if request.pack_id:
+                pack_ctx = await fetch_pack_context(
+                    request.pack_id,
+                    request.audit_api_base or AUDIT_PACK_BASE_URL,
+                    timeout_s=AUDIT_PACK_TIMEOUT_S,
+                )
+                if pack_ctx.warning:
+                    log.warning("Repair %s: %s", job_id, pack_ctx.warning)
+                    yield _sse("warning", {"job_id": job_id, "pack_id": request.pack_id, "message": pack_ctx.warning})
+                if pack_ctx.ok:
+                    write_ops = bool(request.apply or (request.git_ops and request.git_ops.enabled))
+                    repo, repo_warning, repo_error = resolve_repo(request.repo, pack_ctx.repo, write_ops=write_ops)
+                    if repo_error:
+                        yield _sse("error", {"job_id": job_id, "message": repo_error})
+                        _update_job(job_id, status="failed", error=repo_error, completed_at=_now_iso())
+                        return
+                    if repo_warning:
+                        yield _sse("warning", {"job_id": job_id, "pack_id": request.pack_id, "message": repo_warning})
+                    pack_block = pack_ctx.block
+                    _update_job(job_id, repo=repo)
+                    yield _sse("pack_loaded", {
+                        "job_id": job_id,
+                        "pack_id": pack_ctx.pack_id,
+                        "title": pack_ctx.title,
+                        "repo": repo,
+                    })
+            if not repo:
+                msg = (
+                    "No repo: 'repo' was empty and the pack could not be loaded"
+                    if request.pack_id else "No repo given."
+                )
+                yield _sse("error", {"job_id": job_id, "message": msg})
+                _update_job(job_id, status="failed", error=msg, completed_at=_now_iso())
+                return
+
             # If compare_branch given, fetch raw diff via the audit API
             diff_text = request.diff
             if not diff_text and request.compare_branch:
                 diff_text, diff_error = await _fetch_diff_from_branch(
-                    request.repo, request.compare_branch, effective_audit_url
+                    repo, request.compare_branch, effective_audit_url
                 )
                 if diff_error:
                     yield _sse("error", {"message": diff_error})
@@ -113,8 +165,10 @@ async def run_repair(request: RepairRequest) -> StreamingResponse:
 
             # Run the multi-model repair loop
             effective_request = request.model_copy(update={
+                "repo": repo,
                 "diff": diff_text,
                 "audit_api_url": effective_audit_url,
+                "pack_context": pack_block,  # always server-populated
             })
             async for iteration in repair_loop(effective_request, qdrant_url=QDRANT_URL):
                 iter_dict = iteration.model_dump()
@@ -140,7 +194,7 @@ async def run_repair(request: RepairRequest) -> StreamingResponse:
             repo_path = None
             if request.apply and final_patch and request.mode == "auto_fix":
                 try:
-                    repo_path = await _resolve_repo_path(request.repo, request.audit_api_url)
+                    repo_path = await _resolve_repo_path(repo, request.audit_api_url)
                     if repo_path:
                         apply_inplace(repo_path, final_patch)
                         applied = True
@@ -158,9 +212,32 @@ async def run_repair(request: RepairRequest) -> StreamingResponse:
                     job_id=job_id,
                     final_patch=final_patch,
                     git_ops=request.git_ops,
-                    repo=request.repo,
+                    repo=repo,
                     audit_api_url=effective_audit_url,
                 )
+
+            # Tell the audit API the pack is resolved — only after a clean, applied
+            # auto_fix.  TODO(worker-a): POST /audit/packs/{id}/status is not in
+            # ai-code-auditor yet; the callback is off unless REPAIR_PACK_STATUS_CALLBACK=1.
+            if (
+                REPAIR_PACK_STATUS_CALLBACK
+                and request.pack_id
+                and pack_ctx is not None
+                and pack_ctx.ok
+                and applied
+                and iterations
+                and iterations[-1].get("validation_passed") is not False
+                and iterations[-1].get("test_validation_passed") is not False
+            ):
+                status_err = await report_pack_status(
+                    request.pack_id,
+                    request.audit_api_base or AUDIT_PACK_BASE_URL,
+                    "resolved",
+                    detail={"job_id": job_id, "branch": branch, "commit_sha": commit_sha},
+                    timeout_s=AUDIT_PACK_TIMEOUT_S,
+                )
+                if status_err:
+                    log.info("Repair %s: pack status callback skipped: %s", job_id, status_err)
 
             _update_job(
                 job_id,

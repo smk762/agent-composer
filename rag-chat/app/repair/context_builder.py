@@ -1,6 +1,7 @@
 """Build the prompt context block for each repair iteration.
 
 Context priority (highest to lowest):
+  0. Agent work pack (only when the request carries ``pack_id``)
   1. The unified diff itself (always present)
   2. Validation / compilation errors
   3. Qdrant semantic hits from the code_audit collection (best-effort)
@@ -16,6 +17,7 @@ log = logging.getLogger("rag-chat.repair")
 _DIFF_CAP = 12_000     # chars — cap raw diff to avoid blowing context
 _SNIPPET_CAP = 4_000   # chars — cap qdrant snippets
 _ERROR_CAP = 2_000     # chars — cap error block
+_PACK_CAP = 8_000      # chars — cap agent pack block
 
 
 def build_repair_context(
@@ -24,15 +26,29 @@ def build_repair_context(
     critic_notes: str = "",
     adversary_notes: str = "",
     qdrant_snippets: Optional[list[str]] = None,
+    pack_context: str = "",
 ) -> str:
     """Return a markdown context block that prefaces each repair prompt."""
     parts: list[str] = []
 
+    # 0. Agent pack (when the repair is driven by pack_id) — states the objective,
+    #    acceptance criteria and constraints, so it leads the context.
+    if pack_context:
+        parts.append(pack_context[:_PACK_CAP])
+
     # 1. Diff
-    diff_body = diff[:_DIFF_CAP]
-    if len(diff) > _DIFF_CAP:
-        diff_body += f"\n... (truncated — {len(diff) - _DIFF_CAP} chars omitted)"
-    parts.append("## Diff under review\n\n```diff\n" + diff_body + "\n```")
+    if diff:
+        diff_body = diff[:_DIFF_CAP]
+        if len(diff) > _DIFF_CAP:
+            diff_body += f"\n... (truncated — {len(diff) - _DIFF_CAP} chars omitted)"
+        parts.append("## Diff under review\n\n```diff\n" + diff_body + "\n```")
+    elif pack_context:
+        parts.append(
+            "## Diff under review\n\n(No diff supplied — derive the change from the "
+            "agent work pack above.)"
+        )
+    else:
+        parts.append("## Diff under review\n\n```diff\n\n```")
 
     # 2. Validation / compilation errors
     if errors:
