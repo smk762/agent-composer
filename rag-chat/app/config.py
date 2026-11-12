@@ -220,9 +220,11 @@ AUDIT_PACK_BASE_URL = (
     or "http://127.0.0.1:8765"
 )
 AUDIT_PACK_TIMEOUT_S = float(os.getenv("AUDIT_PACK_TIMEOUT_S", "10"))
-# Tell the audit API a pack is resolved after a successful applied auto_fix.
-# Off by default: ``POST /audit/packs/{id}/status`` is not implemented upstream yet.
-REPAIR_PACK_STATUS_CALLBACK = os.getenv("REPAIR_PACK_STATUS_CALLBACK", "0").lower() in ("1", "true", "yes")
+# After a clean, applied auto_fix, POST /audit/packs/{id}/status {"status": "resolved"}.
+# Fails soft (404/405 from older audit APIs is ignored).  Set to 0 to disable.
+REPAIR_PACK_STATUS_CALLBACK = os.getenv("REPAIR_PACK_STATUS_CALLBACK", "1").lower() in ("1", "true", "yes")
+# Sent as X-API-Token when the audit API gates mutating routes (AI_AUDIT_API_TOKEN there).
+AUDIT_API_TOKEN = os.getenv("AI_AUDIT_API_TOKEN", "")
 
 UTC = timezone.utc
 

@@ -113,6 +113,8 @@ def build_pack_block(pack: dict[str, Any], brief: str = "") -> PackContext:
         lines.append(f"- **kind:** {kind}")
     if priority.get("severity"):
         lines.append(f"- **severity:** {priority['severity']}")
+    if pack.get("status"):
+        lines.append(f"- **status:** {pack['status']}")
     if repo_name:
         lines.append(f"- **repo:** {repo_name}")
     if where:
@@ -244,31 +246,34 @@ async def fetch_pack_context(
     return PackContext(pack_id=pack_id, warning=warning or f"pack {pack_id!r} unavailable")
 
 
-# ── Status callback (not wired by default) ────────────────────────────────────
+# ── Status callback ───────────────────────────────────────────────────────────
 
 async def report_pack_status(
     pack_id: str,
     audit_api_base: str,
     status: str,
     *,
-    detail: dict[str, Any] | None = None,
+    note: str = "",
+    api_token: str = "",
     timeout_s: float = 10.0,
 ) -> str:
-    """POST ``{base}/audit/packs/{id}/status``.  Returns "" on success, else a reason.
+    """POST ``{base}/audit/packs/{id}/status`` (body ``{status, note}``).
 
-    TODO(worker-a): ``POST /audit/packs/{id}/status`` does not exist in
-    ai-code-auditor yet.  Confirm the request contract once it lands, then
-    enable via ``REPAIR_PACK_STATUS_CALLBACK=1``.  A 404/405 is reported as
-    "endpoint unavailable" and never fails the repair job.
+    Returns "" on success, else a short reason.  Never raises and never fails
+    the repair job: older audit APIs without the endpoint answer 404/405, which
+    is reported as "status endpoint unavailable".  ``api_token`` is sent as
+    ``X-API-Token`` for audit APIs that gate mutating routes.
     """
     base = normalize_base_url(audit_api_base)
     if not base or not validate_pack_id(pack_id):
         return "invalid pack id or audit_api_base"
+    headers = {"X-API-Token": api_token} if api_token else {}
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:
             r = await client.post(
                 f"{base}/audit/packs/{quote(pack_id, safe='')}/status",
-                json={"status": status, **(detail or {})},
+                json={"status": status, "note": note[:2000]},
+                headers=headers,
             )
     except Exception as exc:  # noqa: BLE001 - fail soft
         return f"status callback failed: {exc}"

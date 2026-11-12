@@ -198,6 +198,7 @@ services:
       - ECOSYSTEM_CONFIG_PATH=${ECOSYSTEM_CONFIG_PATH:-/home/smk/ai-code-auditor/config/ecosystem.yaml}
       # Base URL for pack_id-driven repairs (GET /audit/packs/{id}); empty falls back to AUDIT_API_URL.
       - AI_AUDIT_PUBLIC_BASE_URL=${AI_AUDIT_PUBLIC_BASE_URL:-}
+      - AI_AUDIT_API_TOKEN=${AI_AUDIT_API_TOKEN:-}
       # Voice services. STT is Whisper; TTS is a registry of selectable engines.
       - WHISPER_URL=${WHISPER_URL:-http://whisper:8030}
       # TTS engines (all speak the XTTS sidecar contract). XTTS is the local GPU

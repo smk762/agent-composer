@@ -139,6 +139,21 @@ class PackFetchTests(unittest.IsolatedAsyncioTestCase):
             err = await report_pack_status(PACK_ID, BASE, "resolved")
         self.assertIn("unavailable", err)
 
+    async def test_status_callback_payload_and_token(self) -> None:
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json={"status": "resolved"})
+
+        with _patch_http(handler):
+            err = await report_pack_status(PACK_ID, BASE, "resolved", note="done", api_token="tok")
+        self.assertEqual(err, "")
+        req = seen[0]
+        self.assertEqual(req.url.path, f"/audit/packs/{PACK_ID}/status")
+        self.assertEqual(json.loads(req.content), {"status": "resolved", "note": "done"})
+        self.assertEqual(req.headers["x-api-token"], "tok")
+
 
 class RepairContextTests(unittest.IsolatedAsyncioTestCase):
     def test_context_without_pack_unchanged(self) -> None:
@@ -267,6 +282,45 @@ class RepairEndpointTests(unittest.TestCase):
         self.assertNotIn("pack_loaded", names)
         self.assertNotIn("warning", names)
         self.assertNotIn("Agent work pack", self.prompts[0][1])
+
+    def test_applied_auto_fix_reports_resolved(self) -> None:
+        posts: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                posts.append(request)
+                return httpx.Response(200, json={})
+            return _ok_handler(request)
+
+        async def fake_generate(prompt: str, model: str, system: str) -> str:
+            return "```diff\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n```"
+
+        async def fake_path(repo: str, url: str):
+            return "/tmp/repo"
+
+        with patch.object(multi_model, "_generate", fake_generate), \
+                patch.object(self.router_mod, "_resolve_repo_path", fake_path), \
+                patch.object(self.router_mod, "apply_inplace", lambda path, patch_text: None):
+            _, events = self._post(
+                {"pack_id": PACK_ID, "diff": "--- a\n+++ b\n", "apply": True, "mode": "auto_fix"},
+                handler=handler,
+            )
+        self.assertEqual(events[-1][0], "complete")
+        self.assertTrue(events[-1][1]["applied"])
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0].url.path, f"/audit/packs/{PACK_ID}/status")
+        self.assertEqual(json.loads(posts[0].content)["status"], "resolved")
+
+    def test_review_mode_does_not_report_status(self) -> None:
+        posts: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                posts.append(request)
+            return _ok_handler(request)
+
+        self._post({"pack_id": PACK_ID, "diff": "--- a\n+++ b\n"}, handler=handler)
+        self.assertEqual(posts, [])
 
     def test_requires_something_to_repair(self) -> None:
         r = self.client.post("/api/repair/run", json={"repo": "argus-cortex"})

@@ -16,6 +16,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.config import (
+    AUDIT_API_TOKEN,
     AUDIT_API_URL,
     AUDIT_PACK_BASE_URL,
     AUDIT_PACK_TIMEOUT_S,
@@ -217,8 +218,7 @@ async def run_repair(request: RepairRequest) -> StreamingResponse:
                 )
 
             # Tell the audit API the pack is resolved — only after a clean, applied
-            # auto_fix.  TODO(worker-a): POST /audit/packs/{id}/status is not in
-            # ai-code-auditor yet; the callback is off unless REPAIR_PACK_STATUS_CALLBACK=1.
+            # auto_fix.  Best-effort: older audit APIs lack the endpoint (404/405).
             if (
                 REPAIR_PACK_STATUS_CALLBACK
                 and request.pack_id
@@ -233,7 +233,12 @@ async def run_repair(request: RepairRequest) -> StreamingResponse:
                     request.pack_id,
                     request.audit_api_base or AUDIT_PACK_BASE_URL,
                     "resolved",
-                    detail={"job_id": job_id, "branch": branch, "commit_sha": commit_sha},
+                    note=(
+                        f"Resolved by rag-chat repair job {job_id}"
+                        + (f", branch {branch}" if branch else "")
+                        + (f", commit {commit_sha[:12]}" if commit_sha else "")
+                    ),
+                    api_token=AUDIT_API_TOKEN,
                     timeout_s=AUDIT_PACK_TIMEOUT_S,
                 )
                 if status_err:
