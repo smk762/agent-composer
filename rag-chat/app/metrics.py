@@ -1,3 +1,5 @@
+"""Prometheus metrics for rag-chat: HTTP request count/latency middleware, GPU OOM counter, and the /metrics route."""
+
 from __future__ import annotations
 
 import re

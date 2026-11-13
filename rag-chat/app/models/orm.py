@@ -1,3 +1,5 @@
+"""SQLAlchemy ORM models: conversations, messages, API keys, provider configs, generations and media assets."""
+
 from uuid import uuid4
 
 from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text, func

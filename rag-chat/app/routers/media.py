@@ -1,3 +1,5 @@
+"""Media routes: serve stored generated assets and report the status of the user's image/video generation jobs."""
+
 import logging
 from typing import List
 

@@ -1,3 +1,5 @@
+"""Startup helper that creates the rag-chat Postgres database if it does not exist (run before Alembic migrations)."""
+
 import asyncio
 from sqlalchemy import text
 from sqlalchemy.engine.url import make_url

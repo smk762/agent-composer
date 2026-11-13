@@ -1,3 +1,10 @@
+"""Server-rendered HTML UI for rag-chat.
+
+Defines the shared BASE_CSS, navigation and render_page() helper, and the pages for
+chat, history, API keys, image generation, Pipeline Lab, Guard tester, voice
+(STT/TTS) and voice cloning (/ui/*), each with inline JavaScript calling the JSON APIs.
+"""
+
 import json
 from textwrap import dedent
 

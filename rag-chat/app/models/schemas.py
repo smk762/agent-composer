@@ -1,3 +1,5 @@
+"""Pydantic API schemas for rag-chat: chat/tool-calling requests and responses, auth context, API keys, conversations, media generation and provider config."""
+
 from datetime import datetime
 from typing import Any, Dict, List, Literal, Optional
 

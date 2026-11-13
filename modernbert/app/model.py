@@ -1,3 +1,7 @@
+"""Lazy ModernBERT model lifecycle (unloaded -> cpu -> gpu) with keep-alive timers
+(MODERNBERT_KEEP_ALIVE_GPU / _CPU) that demote to CPU and then unload after idle.
+"""
+
 import asyncio
 import gc
 import logging

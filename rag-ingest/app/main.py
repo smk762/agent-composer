@@ -1,3 +1,11 @@
+"""rag-ingest FastAPI application: signed document ingestion API.
+
+POST /ingest verifies the HMAC-SHA256 signature (X-Timestamp/X-Nonce/X-Signature,
+INGEST_SHARED_SECRET) with replay protection via a SQLite or Redis nonce store,
+optionally decrypts a Fernet envelope, then chunks, embeds and upserts the docs into
+Qdrant. Also serves /health, a /ui/ingest test page and Prometheus metrics.
+"""
+
 import base64
 import hashlib
 import hmac

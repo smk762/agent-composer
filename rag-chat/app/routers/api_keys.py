@@ -1,3 +1,5 @@
+"""API key management routes: list, create (returns the secret once) and revoke the current user's API keys."""
+
 from datetime import datetime
 from typing import List
 

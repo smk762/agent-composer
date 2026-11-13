@@ -1,3 +1,5 @@
+"""rag-chat FastAPI application: registers ORM models and providers, adds metrics middleware, and mounts all API and UI routers."""
+
 from fastapi import FastAPI
 
 from app.db import Base, engine  # noqa: F401 – ensure Base is loaded

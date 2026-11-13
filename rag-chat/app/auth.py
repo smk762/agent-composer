@@ -1,3 +1,5 @@
+"""Request authentication for rag-chat: resolves the user from a bearer API key, a Cloudflare Access email header, or the DEV_AUTH_BYPASS dev user."""
+
 import hashlib
 import secrets
 from datetime import datetime

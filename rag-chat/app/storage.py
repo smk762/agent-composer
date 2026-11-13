@@ -1,3 +1,5 @@
+"""Media asset storage backends (local filesystem or MinIO/S3, chosen by MEDIA_BACKEND) and the module-level media_store instance."""
+
 import uuid
 from pathlib import Path
 from typing import Optional

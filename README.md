@@ -7,6 +7,27 @@ Run a private AI stack that feels production-grade on day one: chat with your lo
 - Provides **`rag-chat`** (FastAPI) as your chat/API gateway, with optional retrieval from Qdrant.
 - Provides **`rag-ingest`** (FastAPI) to sign, verify, and safely ingest docs into your vector index.
 - Uses **`cloudflared` + Cloudflare Access** so humans use SSO/MFA and machines use service tokens.
+- Adds GPU sidecars that sleep when idle, plus the `rag-chat` features that use them:
+  - **`modernbert`**: ModernBERT classifier. `/api/pipeline/*` and Pipeline Lab use it.
+  - **`infinity`** (`infinity-manager/`): code embeddings and a reranker for the code-ingest profile.
+  - **Voice stack** (`voice-stack/`): Whisper STT, XTTS-v2 / Miso / legacy Qwen TTS with voice cloning, and Wyoming bridges for Home Assistant. Used by `/api/voice/*`.
+  - **Guard**: SingGuard content-safety checks on the shared Ollama (`/api/guard/*`).
+  - **Media generation**: image and video through pluggable providers (OpenAI, Stability, Replicate, Together, ComfyUI).
+  - **Repair**: a multi-model repair loop that ai-code-auditor validates (`/api/repair/*`).
+
+| Service | Port | Role |
+|---|---|---|
+| `rag-ingest` | 9050 | Signed ingestion → chunk → embed → upsert to Qdrant |
+| `rag-chat` | 9150 | Chat gateway (Ollama + optional RAG), history, UI, guard/voice/pipeline/repair/generation APIs |
+| `ollama` | 11434 | LLM runtime (internal by default) |
+| `infinity` | 7997 | Infinity embeddings and reranker, behind an idle-evicting manager (loopback only) |
+| `modernbert` | 7998 | ModernBERT classifier sidecar |
+| `whisper` | 8030 | faster-whisper STT |
+| `xtts` / `tts` | 8031 | XTTS-v2 TTS / legacy Qwen3-TTS |
+| `wyoming-xtts` / `wyoming-miso` / `wyoming-whisper` | 10200 / 10201 / 10300 | Home Assistant Wyoming bridges |
+| `cloudflared` | n/a | Tunnel; `--profile cloud` only |
+
+Qdrant, Postgres and MinIO run outside this compose file (`QDRANT_URL`, `DATABASE_URL`, `S3_*`). A Miso TTS host is optional and also external (`MISO_TTS_URL`).
 
 ## Why this is awesome
 - **Secure by default**: your LLM and vector DB stay private; only intentional endpoints are exposed.
@@ -29,7 +50,9 @@ Run a private AI stack that feels production-grade on day one: chat with your lo
   - Verifies an HMAC signature over the request body + timestamp + nonce.
   - Persists nonces (SQLite) and rejects replays within the timestamp window.
   - Optionally requires an encrypted envelope (Fernet) derived from the same shared secret.
-  - Implements “chunk → embed (Ollama) → upsert (Qdrant)” into `QDRANT_COLLECTION`.
+  - Has two ingest paths, chosen per document:
+    - **Text** (default): char-window chunking → Ollama embeddings → `QDRANT_COLLECTION`.
+    - **Code** (`RETRIEVAL_PROFILE=code`, `kind: "code"`, or a source-file `path`): tree-sitter chunks, one per function or class → Infinity `EMBED_MODEL_CODE` → `QDRANT_COLLECTION_CODE` (default `code_audit`), with optional BM25 (`HYBRID_SPARSE=1`). Code docs can carry `path`, `language`, `repo` and `commit_sha`. See [docs/api.md](docs/api.md#rag-ingest-port-9050).
 
 ## Design goals
 - Keep **Qdrant protected** (private/LAN-only or behind trusted network controls)
@@ -41,16 +64,21 @@ Run a private AI stack that feels production-grade on day one: chat with your lo
 ## Repo layout
 ```
 .
-├─ docker-compose.yml
+├─ docker-compose.yml            # full stack (Qdrant/Postgres/MinIO are external)
+├─ docker-compose.lan-ollama.yml # optional overlay exposing Ollama on the LAN
 ├─ env.example
-├─ rag-ingest/
-│  ├─ Dockerfile
-│  ├─ requirements.txt
-│  └─ app/main.py
-└─ rag-chat/
-   ├─ Dockerfile
-   ├─ requirements.txt
-   └─ app/main.py
+├─ docs/                         # api.md, configuration.md, integration-guide.md
+├─ rag-ingest/app/               # main.py (signing, /ingest), ingest_pipeline.py, code_chunker.py, embeddings.py
+├─ rag-chat/app/                 # main.py wires routers/
+│  ├─ routers/                   # chat, api_keys, ui, generation, media, providers, pipeline, repair, runtime, guard, voice
+│  ├─ providers/                 # image/video provider adapters
+│  ├─ repair/                    # repair loop (fixer → critic → adversary)
+│  ├─ streaming.py               # /chat SSE
+│  └─ guard_policy.py, guard_image.py
+├─ modernbert/app/               # classifier sidecar (lazy GPU load, keep-alive eviction)
+├─ infinity-manager/manager.py   # idle-evicting proxy in front of Infinity
+├─ voice-stack/                  # whisper/xtts/qwen-tts servers, wyoming_bridge/, VOICE_CLONING.md
+└─ scripts/                      # smoke tests, tool-calling/streaming clients, recommend_model.py
 ```
 
 ## Prereqs
@@ -76,7 +104,12 @@ Optional:
 - `INGEST_REQUIRE_ENCRYPTION`: set to `1` to require encrypted envelopes for ingestion
 - `CHAT_MODEL`: default Ollama model for chat (example: `llama3.2:3b`)
 - `CHAT_SYSTEM_PROMPT`: default system prompt
-- `QDRANT_COLLECTION`: default collection name (future use by ingestion pipeline)
+- `QDRANT_COLLECTION`: collection that `rag-ingest` writes text docs to and `rag-chat` retrieves from (default `project_docs`). Code docs go to `QDRANT_COLLECTION_CODE`.
+- `RAG_ENABLED`: `1` (default) injects Qdrant context into `/chat`; `0` turns retrieval off. Tune with `RAG_TOP_K` and `RAG_MAX_CONTEXT_CHARS`.
+- `CHAT_HISTORY_MAX_MSGS`: messages kept per conversation (default `100`; older ones are pruned; `0` keeps everything).
+- `DEV_AUTH_BYPASS`: **`1` disables rag-chat authentication** (requests run as `X-Dev-User` or `DEV_DEFAULT_USER`). Local development only. Never enable it on an exposed instance.
+- `PROVIDER_ENCRYPTION_KEY`: passphrase that encrypts stored image/video provider API keys. **If unset, provider keys are stored as plain base64.**
+- `RETRIEVAL_PROFILE`: `text` (default) or `code`, the default ingest path (see above).
 - `OLLAMA_KEEP_ALIVE`: Ollama keep-alive setting (example: `15m`)
 - `INFINITY_IDLE_TIMEOUT`: seconds before the managed Infinity child is evicted after idle; next inference request starts it again
 - `CHAT_DB_URL` / `DATABASE_URL`: chat database DSN. `postgresql://...` is accepted and automatically normalized to async SQLAlchemy driver usage.
@@ -85,6 +118,9 @@ Optional:
 - `INGEST_REDIS_URL`: Redis URL used when `INGEST_NONCE_STORE=redis`.
 - `MEDIA_BACKEND`: `local` (default) or `minio` for generated media storage.
 - `MEDIA_S3_*`: MinIO/S3 settings used when `MEDIA_BACKEND=minio`.
+- Sidecar URLs: `MODERNBERT_URL`, `INFINITY_URL`, `WHISPER_URL`, `XTTS_TTS_URL` / `MISO_TTS_URL` / `TTS_URL`.
+
+Every variable, grouped by service: [docs/configuration.md](docs/configuration.md).
 
 Single-user homelab QA profile (quality-first):
 - `CHAT_MODEL=Qwen2.5:7b`
@@ -201,15 +237,22 @@ Simple form to submit chunks for embedding and upserting to qdrant.
 
 ## APIs
 
-See `docs/integration-guide.md` for external service/agent integration (LAN or Cloudflare Access), auth headers, and ready-to-copy client snippets.
+- **[docs/api.md](docs/api.md)**: every route, with its auth requirement and key request fields, including the full `/chat` schema, streaming and tool calling.
+- **[docs/integration-guide.md](docs/integration-guide.md)**: calling the stack from another host (LAN or Cloudflare Access), with ready-to-copy client snippets.
 
 ### `rag-chat`
-- `GET /health`
-- `POST /chat` → forwards to Ollama `/api/chat`
-- Runtime controls: `GET /api/runtime/ollama/status`, `POST /api/runtime/ollama/evict`, `POST /api/runtime/ollama/wake`, `GET /api/runtime/infinity/status`, `POST /api/runtime/infinity/evict`, `POST /api/runtime/infinity/wake`
-- UI: `GET /ui/chat` (and `/`) for a minimal in-browser chat form
-- API keys: `GET /ui/api-keys` to create/list/revoke keys (use `Authorization: Bearer <key>` for requests)
-- History UI: `GET /ui/history` to browse/open conversations
+**Auth:** chat, history, API-key, generation, provider and runtime routes need `Authorization: Bearer <key>` (create one at `/ui/api-keys`), a Cloudflare Access identity, or `DEV_AUTH_BYPASS=1`. The guard, voice, pipeline and repair APIs and `/metrics` are **unauthenticated**, so keep rag-chat on loopback or a trusted network, or behind Access.
+
+- `GET /health`, `GET /models`, `GET /metrics`
+- `POST /chat`: OpenAI-style chat with `model`, `conversation_id`, `tools`, `temperature`, `max_tokens` and `stream` (SSE ending in `[DONE]`). Returns `choices`, `usage` and `conversation_id`, and persists the conversation.
+- `/conversations` (list/create/get/delete), `/api-keys` (list/create/revoke)
+- `/api/generate/image`, `/api/edit/image`, `/api/generate/video`, `/api/generations`, `/api/media/{id}`, `/api/providers/*`
+- `/api/guard/check`, `/api/guard/categories`, `/api/guard/policy`
+- `/api/voice/*`: transcribe, synthesise (plain/stream/pcm), analyze, clone, clones, speakers, engines, health
+- `/api/pipeline/*`: ModernBERT status/load/evict/unload, labels, classify, plus overlay/brain/prose helpers
+- `/api/repair/run` (SSE) and `/api/repair/jobs/{id}`
+- `/api/runtime/{ollama,infinity}/{status,wake,evict}`
+- UI: `/` and `/ui` show an index page linking every app page and service dashboard. The pages are `/ui/chat` (chat form), `/ui/history`, `/ui/api-keys`, `/ui/generate`, `/ui/pipeline`, `/ui/guard`, `/ui/voice` and `/ui/voice-clone`.
 
 Example curl (local default port 9150):
 
@@ -260,7 +303,8 @@ curl -s http://127.0.0.1:9050/ingest \
 
 ### Endpoint smoke test script
 - From repo root: `python3 scripts/test_endpoints.py`
-- Overrides: set `CHAT_URL` and/or `INGEST_URL` (defaults: `http://127.0.0.1:9150` and `http://127.0.0.1:9050`)
+- Overrides: set `CHAT_URL` and/or `INGEST_URL`. Both are base URLs (defaults `http://127.0.0.1:9150` and `http://127.0.0.1:9050`).
+- Auth: `/chat` needs a key. Set `RAG_API_KEY` (or `CHAT_API_KEY`) to a key from `/ui/api-keys`, unless the server runs with `DEV_AUTH_BYPASS=1`.
 - Checks `rag-chat` health, a simple `/chat` call, and `rag-ingest` health; exits non-zero on failure.
 
 #### Request signing (required)
@@ -282,7 +326,7 @@ import hashlib, hmac, json, os, secrets, time
 import requests
 
 INGEST_SHARED_SECRET = os.environ["INGEST_SHARED_SECRET"]
-INGEST_URL = os.environ.get("INGEST_URL", "http://127.0.0.1:9050/ingest")
+INGEST_URL = os.environ.get("INGEST_URL", "http://127.0.0.1:9050")  # base URL
 
 def hmac_key(secret: str) -> bytes:
     return hashlib.sha256(secret.encode("utf-8")).digest()
@@ -304,7 +348,7 @@ nonce = secrets.token_hex(16)
 sig = sign_body(ts, nonce, body)
 
 r = requests.post(
-    INGEST_URL,
+    f"{INGEST_URL}/ingest",
     data=body,
     headers={
         "Content-Type": "application/json",

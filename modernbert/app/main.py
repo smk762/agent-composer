@@ -1,3 +1,7 @@
+"""FastAPI entrypoint for the ModernBERT sidecar: health, model status/load/evict/unload,
+label CRUD, /classify and /embed endpoints backed by the lazily loaded ModelManager.
+"""
+
 import logging
 import os
 from contextlib import asynccontextmanager

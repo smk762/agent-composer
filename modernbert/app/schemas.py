@@ -1,3 +1,5 @@
+"""Pydantic request/response models for the ModernBERT sidecar API (classify, embed, labels, model status)."""
+
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field

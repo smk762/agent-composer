@@ -1,3 +1,5 @@
+"""Pipeline proxy (/api/pipeline): forwards classify, model load/evict/unload and label ops to the ModernBERT sidecar, and runs Ollama-backed overlay/brain/prose stages for character responses."""
+
 import json
 from typing import AsyncIterator, List, Optional
 
