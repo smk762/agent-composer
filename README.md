@@ -70,7 +70,7 @@ cp env.example .env
 Required:
 - `CF_TUNNEL_TOKEN`: Cloudflared tunnel token (from Cloudflare Zero Trust)
 - `INGEST_SHARED_SECRET`: shared secret used for ingestion HMAC (and for optional envelope encryption)
-- `QDRANT_URL`: external Qdrant HTTP endpoint (example: `http://192.168.1.128:6333`)
+- `QDRANT_URL`: external Qdrant HTTP endpoint (example: `http://<INFRA_HOST>:6333`)
 
 Optional:
 - `INGEST_REQUIRE_ENCRYPTION`: set to `1` to require encrypted envelopes for ingestion
@@ -136,11 +136,11 @@ curl -s http://127.0.0.1:9150/health
 services:
   rag-ingest:
     environment:
-      - RAG_INGEST_BIND_IP=192.168.1.50
+      - RAG_INGEST_BIND_IP=<LAN_HOST>
       - RAG_INGEST_PORT=9050
   rag-chat:
     environment:
-      - RAG_CHAT_BIND_IP=192.168.1.50
+      - RAG_CHAT_BIND_IP=<LAN_HOST>
       - RAG_CHAT_PORT=9150
   cloudflared:
     profiles: ["cloud"]  # starts only when you opt into the profile

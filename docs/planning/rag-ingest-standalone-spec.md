@@ -1,11 +1,13 @@
 # `rag-ingest` Standalone Repo Specification
 
+> Hosts in this doc are placeholders (`<AGENT_HOST>`, `<STATEFUL_HOST>`, `<NAS_HOST>`, …). The real host/IP is in the local `.env` (see `env.example`); check it there.
+
 ## Goal
-Create a standalone repo to deploy `rag-ingest` as an independent service on `192.168.1.198`, with external dependencies:
-- `QDRANT_URL=http://192.168.1.198:6333`
-- `OLLAMA_URL=http://192.168.1.198:11434`
-- Optional Redis nonce store on `192.168.1.121:6380`
-- Required Ollama embed model pre-pulled on `192.168.1.198` (QA profile: `mxbai-embed-large`)
+Create a standalone repo to deploy `rag-ingest` as an independent service on `<AGENT_HOST>`, with external dependencies:
+- `QDRANT_URL=http://<AGENT_HOST>:6333`
+- `OLLAMA_URL=http://<AGENT_HOST>:11434`
+- Optional Redis nonce store on `<NAS_HOST>:6380`
+- Required Ollama embed model pre-pulled on `<AGENT_HOST>` (QA profile: `mxbai-embed-large`)
 
 ## Non-goals
 - No `rag-chat` service in this repo.
@@ -49,7 +51,7 @@ Create a standalone repo to deploy `rag-ingest` as an independent service on `19
 3. **Docs**
    - API contract
    - Signature generation examples
-  - Deployment guide for the rag-ingest host (192.168.1.198)
+  - Deployment guide for the rag-ingest host (<AGENT_HOST>)
    - Troubleshooting section (Qdrant/Ollama unreachable, signature mismatch, replay detection)
 
 4. **Verification**
@@ -70,9 +72,9 @@ Must support at minimum:
 - `INGEST_NONCE_DB` (sqlite path, default `/data/nonces.db`)
 - `INGEST_REDIS_URL` (required when nonce store is redis)
 - `INGEST_NONCE_KEY_PREFIX` (default `ingest:nonce:`)
-- `QDRANT_URL` (required; set to `http://192.168.1.198:6333`)
+- `QDRANT_URL` (required; set to `http://<AGENT_HOST>:6333`)
 - `QDRANT_COLLECTION` (default `project_docs`)
-- `OLLAMA_URL` (required; set to `http://192.168.1.198:11434`)
+- `OLLAMA_URL` (required; set to `http://<AGENT_HOST>:11434`)
 - `EMBED_MODEL` (QA profile: `mxbai-embed-large`; must be pulled on Ollama host)
 - `INGEST_CHUNK_SIZE`, `INGEST_CHUNK_OVERLAP`, `INGEST_UPSERT_BATCH_SIZE`
 - `APP_PORT` (default `9050`)
@@ -119,8 +121,8 @@ Must support at minimum:
 
 8. **Acceptance verification**
    - Run against:
-     - Qdrant at `192.168.1.198:6333`
-     - Ollama at `192.168.1.198:11434`
+     - Qdrant at `<AGENT_HOST>:6333`
+     - Ollama at `<AGENT_HOST>:11434`
      - Ensure Ollama has the embedding model: `ollama pull mxbai-embed-large`
    - Confirm successful ingest/upsert and replay rejection.
 
