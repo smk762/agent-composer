@@ -241,7 +241,7 @@ Simple form to submit chunks for embedding and upserting to qdrant.
 - **[docs/integration-guide.md](docs/integration-guide.md)**: calling the stack from another host (LAN or Cloudflare Access), with ready-to-copy client snippets.
 
 ### `rag-chat`
-**Auth:** chat, history, API-key, generation, provider and runtime routes need `Authorization: Bearer <key>` (create one at `/ui/api-keys`), a Cloudflare Access identity, or `DEV_AUTH_BYPASS=1`. The guard, voice, pipeline and repair APIs and `/metrics` are **unauthenticated**, so keep rag-chat on loopback or a trusted network, or behind Access.
+**Auth:** chat, history, API-key, generation, provider and runtime routes need `Authorization: Bearer <key>` (create one at `/ui/api-keys`), a Cloudflare Access identity, or `DEV_AUTH_BYPASS=1`. Destructive and git actions also need auth: `DELETE /api/voice/clones/{id}`, `PUT /api/pipeline/labels`, and `/api/repair/run` with `apply` or `git_ops.enabled`. The rest of the guard, voice, pipeline and repair APIs and `/metrics` are **unauthenticated**, so keep rag-chat on loopback or a trusted network, or behind Access.
 
 - `GET /health`, `GET /models`, `GET /metrics`
 - `POST /chat`: OpenAI-style chat with `model`, `conversation_id`, `tools`, `temperature`, `max_tokens` and `stream` (SSE ending in `[DONE]`). Returns `choices`, `usage` and `conversation_id`, and persists the conversation.

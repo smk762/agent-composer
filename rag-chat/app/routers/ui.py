@@ -3696,6 +3696,15 @@ def voice_clone_ui():
 
     <script>
     (function() {
+      // Destructive actions (clone delete) need the API key saved at /ui/api-keys.
+      function authHeaders() {
+        const h = {};
+        try {
+          const key = (localStorage.getItem("rag_api_key") || "").trim();
+          if (key) h["Authorization"] = "Bearer " + key;
+        } catch (e) {}
+        return h;
+      }
       const recBtn = document.getElementById("recBtn");
       const recLabel = document.getElementById("recLabel");
       const recTimer = document.getElementById("recTimer");
@@ -4087,7 +4096,8 @@ def voice_clone_ui():
               const btn = row.querySelector(".del-btn");
               btn.disabled = true; btn.textContent = "Deleting…";
               try {
-                const r = await fetch("/api/voice/clones/" + encodeURIComponent(c.companion_id) + engineQuery(), { method: "DELETE" });
+                const r = await fetch("/api/voice/clones/" + encodeURIComponent(c.companion_id) + engineQuery(), { method: "DELETE", headers: authHeaders() });
+                if (r.status === 401) throw new Error("authentication required: save an API key at /ui/api-keys");
                 if (!r.ok) { let m = "HTTP " + r.status; try { m = (await r.text()) || m; } catch (e) {} throw new Error(m); }
                 await loadClones();
               } catch (err) {

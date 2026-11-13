@@ -14,7 +14,7 @@ Routes marked **auth** below resolve a user in this order (`rag-chat/app/auth.py
 
 Otherwise the route returns `401 Authentication required`. `GET /health` reports which mode is active (`"auth": "dev-bypass"` or `"access/api-key"`).
 
-> **Unauthenticated routes.** Routes marked **open** have no auth dependency: the guard, voice, pipeline and repair APIs, `/models`, `/metrics` and the HTML UI pages. Anyone who can reach the port can call them. Keep rag-chat on loopback or a trusted LAN, or put it behind Cloudflare Access. This matters most for `/api/repair/run`, which can apply patches and run git operations (see the SSRF note under [Repair](#repair-apirepair)).
+> **Open routes.** Routes marked **open** have no auth dependency: the guard API, read-only and generative voice, pipeline and repair calls, `/models`, `/metrics` and the HTML UI pages. Anyone who can reach the port can call them, so keep rag-chat on loopback or a trusted LAN, or put it behind Cloudflare Access. Destructive and git actions always need auth: deleting a voice clone, replacing the pipeline label set, and repair runs with `apply` or `git_ops.enabled`.
 
 ### rag-ingest
 
@@ -150,7 +150,7 @@ Proxies to the Whisper STT sidecar and a registry of TTS engines (`xtts`, `miso`
 | GET | `/api/voice/clones` | open | Stored clones |
 | POST | `/api/voice/clones/import` | open | multipart `archive`, `voice_name?`, `companion_id?` |
 | GET | `/api/voice/clones/{companion_id}/download` | open | Clone archive |
-| DELETE | `/api/voice/clones/{companion_id}` | open | |
+| DELETE | `/api/voice/clones/{companion_id}` | auth | Permanent. The `/ui/voice-clone` page sends the key saved at `/ui/api-keys`. |
 
 ### Pipeline (`routers/pipeline.py`)
 
@@ -160,7 +160,8 @@ Reverse proxy to the ModernBERT sidecar, plus LLM helpers for character-dialogue
 |---|---|---|---|
 | GET | `/api/pipeline/status` | open | Sidecar `model_state` |
 | POST | `/api/pipeline/load` \| `/evict` \| `/unload` | open | Move the model between `gpu`, `cpu` and `unloaded` |
-| GET / PUT | `/api/pipeline/labels` | open | Zero-shot label set; `PUT {labels: [...]}` |
+| GET | `/api/pipeline/labels` | open | Current zero-shot label set |
+| PUT | `/api/pipeline/labels` | auth | Replace the label set: `{labels: [...]}` |
 | POST | `/api/pipeline/classify` | open | `{text, context?, top_k?, threshold?}` |
 | POST | `/api/pipeline/overlay` | open | `{character_name, character_persona, character_state?, labels, scores, turns?, model?}` → a style directive |
 | POST | `/api/pipeline/brain` | open | `{character_name, character_persona, style_directive, labels, turns?, message, model?}` → a reply plan |
@@ -172,12 +173,12 @@ Runs a multi-model agentic repair loop (fixer → critic → adversary), validat
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| POST | `/api/repair/run` | open | SSE stream; events: `started`, `pack_loaded`, `iteration`, `warning`, `error`, `complete` |
+| POST | `/api/repair/run` | open / auth | SSE stream; events: `started`, `pack_loaded`, `iteration`, `warning`, `error`, `complete`. **Auth is required when `apply: true` or `git_ops.enabled`**, and the call fails with 401 before any work starts. Review, suggest and temp-copy `auto_fix` runs stay open. |
 | GET | `/api/repair/jobs/{job_id}` | open | Final job state |
 
 Key fields (`app/repair/models.py`): `repo`, `diff` or `compare_branch`, `pack_id` (an ai-code-auditor pack; `repo` may then be omitted), `audit_api_base`, `errors`, `mode` (`auto_fix`, `review` or `suggest`), `apply`, `git_ops`, `fix_model`, `critique_model`, `adversarial_model`, `max_iterations` (1–10, default 3), `validate_tests`.
 
-> **SSRF:** `audit_api_base` is supplied by the client, and the server issues GET requests to it, plus a status-callback POST. Only `http(s)` URLs are accepted, but no host allowlist exists yet. Expose this route only to trusted callers.
+> **SSRF:** `audit_api_base` is supplied by the client, and the server issues GET requests to it, plus a status-callback POST. Only `http(s)` URLs are accepted, but no host allowlist exists yet, and read-only runs are unauthenticated. Expose this route only to trusted callers. `ai-audit repair` sends its token as a Bearer key, so set it to a rag-chat API key for `apply` runs.
 
 ### Runtime controls (`routers/runtime.py`)
 

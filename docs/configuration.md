@@ -15,7 +15,7 @@ Every service reads its settings from environment variables, which compose passe
 | `CF_TUNNEL_TOKEN` | cloudflared | (empty) | Only needed with `--profile cloud` |
 | `BIND_ADDR`, `*_BIND_IP` | compose | `127.0.0.1` | Host interface for published ports (`RAG_CHAT_BIND_IP`, `RAG_INGEST_BIND_IP`, `OLLAMA_BIND_IP`, `WYOMING_{TTS,MISO,STT}_BIND_IP`, …) |
 
-Some rag-chat APIs are unauthenticated (guard, voice, pipeline, repair, `/metrics`); see [api.md](api.md#authentication). Binding rag-chat beyond loopback exposes them.
+Some rag-chat APIs are unauthenticated: guard, `/metrics`, and the read-only and generative voice, pipeline and repair calls. Destructive and git actions (clone delete, label replace, repair `apply`/`git_ops`) require auth. See [api.md](api.md#authentication). Binding rag-chat beyond loopback exposes the open routes.
 
 ## rag-chat: chat and RAG
 

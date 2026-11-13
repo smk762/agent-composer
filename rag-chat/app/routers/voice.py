@@ -33,10 +33,11 @@ from typing import Optional
 
 import httpx
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.auth import require_user
 from app.config import (
     MAX_SENTENCE_PAUSE_MS,
     TTS_DEFAULT_ENGINE,
@@ -721,7 +722,7 @@ async def download_clone(companion_id: str, engine: Optional[str] = Query(defaul
     )
 
 
-@router.delete("/clones/{companion_id}")
+@router.delete("/clones/{companion_id}", dependencies=[Depends(require_user)])
 async def delete_clone(companion_id: str, engine: Optional[str] = Query(default=None)):
     """Permanently delete a stored voice clone from the selected TTS engine.
 
