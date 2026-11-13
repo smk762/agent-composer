@@ -107,3 +107,7 @@ See `scripts/example_tool_calling_client.py` and `scripts/test_endpoints.py` for
 ## Cloudflare
 
 `cloudflared` is on the `cloud` compose profile and only starts with `docker compose --profile cloud up`. For LAN-only dev, omit the profile. Published ports bind to loopback by default; set `BIND_ADDR` (all services) or a per-service `RAG_INGEST_BIND_IP` / `RAG_CHAT_BIND_IP` / `OLLAMA_BIND_IP` / `WYOMING_{TTS,MISO,STT}_BIND_IP` to expose them on the LAN.
+
+## Branches
+
+`dev` is the default branch and the base for every PR. Cut feature branches from `origin/dev` and bring them up to date by merging `origin/dev`, never `main`. Never open a PR against `main` or push work to it directly: `main` must never be ahead of `dev`. A release fast-forwards `main` to a `dev` commit that passed CI (`git push origin origin/dev:main`), then tags it. If `main` is protected and needs a PR, merge the release PR, then immediately merge `main` back into `dev` so the merge commit is not left on `main` alone.
