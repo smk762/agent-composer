@@ -1,3 +1,9 @@
+"""Chat API: OpenAI-style /chat endpoint that sends conversations to Ollama (streaming SSE or
+single response, with tool calling), optionally injects Qdrant RAG context as a system
+message, and persists conversations/messages to Postgres. Also exposes /health, /models
+and conversation list/create/get/delete routes.
+"""
+
 import json
 import logging
 import secrets

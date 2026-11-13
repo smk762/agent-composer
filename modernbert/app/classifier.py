@@ -1,3 +1,7 @@
+"""ModernBERT text classifier: zero-shot label scoring via embedding cosine similarity
+(labels from MODERNBERT_LABELS / labels file) or supervised sequence classification, plus text embedding.
+"""
+
 import asyncio
 import json
 import logging

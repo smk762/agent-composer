@@ -1,3 +1,5 @@
+"""Replay-protection nonce stores for signed ingest requests: SQLite (atomic INSERT claim) and Redis (SET NX EX) backends with TTL expiry."""
+
 import os
 import random
 import sqlite3

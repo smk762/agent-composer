@@ -200,9 +200,20 @@ class RepairEndpointTests(unittest.TestCase):
 
         from app.routers import repair as repair_router
 
+        from app.db import get_db
+        from app.models.schemas import AuthContext
+
         self.router_mod = repair_router
         app = FastAPI()
         app.include_router(repair_router.router)
+
+        async def no_db():
+            yield None
+
+        async def fake_user(request, db):
+            return AuthContext(user_id="test", via="dev")
+
+        app.dependency_overrides[get_db] = no_db
         self.client = TestClient(app)
         self.prompts: list[tuple[str, str]] = []  # (repo, prompt)
         self._cur_repo = ""
@@ -215,6 +226,7 @@ class RepairEndpointTests(unittest.TestCase):
             patch.object(multi_model, "_generate", fake_generate),
             patch.object(repair_router, "AUDIT_API_URL", ""),
             patch.object(repair_router, "QDRANT_URL", ""),
+            patch.object(repair_router, "require_user", fake_user),
         ]
         for p in self._patches:
             p.start()
@@ -331,3 +343,56 @@ class RepairEndpointTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RepairAuthGateTest(unittest.TestCase):
+    """apply / git_ops need an authenticated caller; read-only runs stay open."""
+
+    def setUp(self) -> None:
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        from app import auth
+        from app.db import get_db
+        from app.routers import repair as repair_router
+
+        async def no_db():
+            yield None
+
+        async def fake_generate(prompt: str, model: str, system: str) -> str:
+            return ""
+
+        app = FastAPI()
+        app.include_router(repair_router.router)
+        app.dependency_overrides[get_db] = no_db
+        self.client = TestClient(app)
+        for p in (
+            patch.object(auth, "DEV_AUTH_BYPASS", False),
+            patch.object(multi_model, "_generate", fake_generate),
+            patch.object(repair_router, "AUDIT_API_URL", ""),
+            patch.object(repair_router, "QDRANT_URL", ""),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _run(self, **extra):
+        body = {"repo": "argus-cortex", "diff": "--- a\n+++ b\n", "validate_tests": False, **extra}
+        return self.client.post("/api/repair/run", json=body)
+
+    def test_apply_requires_auth(self) -> None:
+        self.assertEqual(self._run(apply=True, mode="auto_fix").status_code, 401)
+
+    def test_git_ops_requires_auth(self) -> None:
+        self.assertEqual(self._run(git_ops={"enabled": True}).status_code, 401)
+
+    def test_access_identity_allows_apply(self) -> None:
+        r = self.client.post(
+            "/api/repair/run",
+            json={"repo": "argus-cortex", "diff": "--- a\n+++ b\n", "validate_tests": False, "apply": True},
+            headers={"Cf-Access-Authenticated-User-Email": "ops@example.com"},
+        )
+        self.assertEqual(r.status_code, 200)
+
+    def test_read_only_runs_stay_open(self) -> None:
+        self.assertEqual(self._run(mode="review").status_code, 200)
+        self.assertEqual(self._run(git_ops={"enabled": False}).status_code, 200)

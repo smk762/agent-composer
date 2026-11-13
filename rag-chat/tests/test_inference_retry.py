@@ -1,3 +1,5 @@
+"""Tests for the CUDA OOM wait-and-retry helper and inference worker pool in app.inference_retry."""
+
 import asyncio
 import unittest
 

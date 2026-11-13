@@ -1,3 +1,8 @@
+"""Environment-driven configuration for rag-chat: Ollama/chat and guard models, Qdrant RAG,
+auth, media storage, ModernBERT/Infinity/Whisper URLs, audit API, and the TTS engine
+registry (TTS_ENGINES, tts_engine_url(), tts_engine_chain()) with default/fallback engines.
+"""
+
 import logging
 import os
 from datetime import timezone

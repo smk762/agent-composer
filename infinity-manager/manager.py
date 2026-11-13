@@ -1,3 +1,11 @@
+"""Idle manager for the Infinity embedding/reranker server.
+
+FastAPI front (port INFINITY_MANAGER_PORT, default 7997) that lazily spawns an
+``infinity_emb`` child process for INFINITY_MODEL_IDS on first request, reverse-proxies
+all traffic to it, and stops it after INFINITY_IDLE_TIMEOUT seconds idle to free GPU
+memory. Exposes /health plus /admin/status, /admin/wake and /admin/evict.
+"""
+
 import asyncio
 import os
 import signal

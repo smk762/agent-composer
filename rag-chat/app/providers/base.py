@@ -1,3 +1,5 @@
+"""Abstract media-generation provider interfaces (BaseProvider, ImageProvider, VideoProvider), capabilities and result types."""
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum

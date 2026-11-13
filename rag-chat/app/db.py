@@ -1,3 +1,5 @@
+"""Async SQLAlchemy engine, session factory, declarative Base and the get_db FastAPI dependency."""
+
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 

@@ -1,3 +1,5 @@
+"""Tests for sentence-paced TTS in the voice router: WAV concatenation with silence gaps and fallback to single-shot synthesis."""
+
 import contextlib
 import io
 import unittest

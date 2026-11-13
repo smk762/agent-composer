@@ -1,3 +1,5 @@
+"""Runtime model control (/api/runtime): status, wake and evict for Ollama models and the Infinity idle manager."""
+
 import time
 from typing import Any, Dict, List, Optional
 

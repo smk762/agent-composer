@@ -1,3 +1,5 @@
+"""GPU inference helpers: a semaphore-bounded worker pool and run_with_oom_wait(), which retries CUDA OOM failures until a deadline before raising RetryableOomError."""
+
 from __future__ import annotations
 
 import asyncio

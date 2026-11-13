@@ -2,6 +2,10 @@
 """
 Minimal endpoint smoke test for rag-chat and rag-ingest.
 Dependency-free (stdlib only).
+
+Env: CHAT_URL / INGEST_URL are *base* URLs (defaults http://127.0.0.1:9150 and
+http://127.0.0.1:9050). /chat needs auth, so set RAG_API_KEY (or CHAT_API_KEY)
+to a key from /ui/api-keys unless the server runs with DEV_AUTH_BYPASS=1.
 """
 
 from __future__ import annotations
@@ -16,7 +20,7 @@ from typing import Any, Tuple
 
 CHAT_BASE = os.environ.get("CHAT_URL", "http://127.0.0.1:9150")
 INGEST_BASE = os.environ.get("INGEST_URL", "http://127.0.0.1:9050")
-API_KEY = os.environ.get("RAG_API_KEY", "")
+API_KEY = os.environ.get("RAG_API_KEY") or os.environ.get("CHAT_API_KEY", "")
 
 
 def _auth_headers() -> dict[str, str]:

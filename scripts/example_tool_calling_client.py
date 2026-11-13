@@ -18,7 +18,7 @@ from typing import Any, Dict, List
 
 
 CHAT_URL = os.getenv("CHAT_URL", "http://127.0.0.1:9150") + "/chat"
-API_KEY = os.getenv("RAG_API_KEY", "")
+API_KEY = os.getenv("RAG_API_KEY") or os.getenv("CHAT_API_KEY", "")
 
 
 # Define available tools

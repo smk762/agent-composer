@@ -15,7 +15,7 @@ from typing import Any, Tuple
 
 
 CHAT_BASE = os.environ.get("CHAT_URL", "http://127.0.0.1:9150")
-API_KEY = os.environ.get("RAG_API_KEY", "")
+API_KEY = os.environ.get("RAG_API_KEY") or os.environ.get("CHAT_API_KEY", "")
 
 
 def _auth_headers() -> dict[str, str]:

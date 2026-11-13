@@ -12,8 +12,9 @@ import threading
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import (
     AUDIT_API_TOKEN,
@@ -24,6 +25,8 @@ from app.config import (
     QDRANT_URL,
     REPAIR_PACK_STATUS_CALLBACK,
 )
+from app.auth import require_user
+from app.db import get_db
 from app.repair.models import GitOpsConfig, RepairIteration, RepairRequest, RepairResult
 from app.repair.multi_model import repair_loop
 from app.repair.pack_client import fetch_pack_context, report_pack_status, resolve_repo
@@ -72,7 +75,11 @@ def _sse(event: str, data: Any) -> str:
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.post("/run")
-async def run_repair(request: RepairRequest) -> StreamingResponse:
+async def run_repair(
+    request: RepairRequest,
+    http_request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> StreamingResponse:
     """Start a repair job and stream SSE events until completion.
 
     Event types:
@@ -83,6 +90,11 @@ async def run_repair(request: RepairRequest) -> StreamingResponse:
     - ``complete``  — loop finished, contains ``final_patch`` and whether it was applied
     - ``error``     — unrecoverable failure
     """
+    # Read-only runs (review/suggest, or auto_fix on a temp copy) stay open.
+    # Writing to a checkout or running git ops requires an authenticated caller.
+    if request.apply or (request.git_ops is not None and request.git_ops.enabled):
+        await require_user(http_request, db)
+
     if not request.diff and not request.compare_branch and not request.pack_id:
         raise HTTPException(
             status_code=422,

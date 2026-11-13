@@ -1,3 +1,5 @@
+"""Provider registry: registers provider classes by name and resolves a configured, enabled provider per user and capability using encrypted stored API keys."""
+
 import json
 import logging
 from typing import Dict, List, Optional, Type

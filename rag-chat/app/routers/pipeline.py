@@ -1,11 +1,14 @@
+"""Pipeline proxy (/api/pipeline): forwards classify, model load/evict/unload and label ops to the ModernBERT sidecar, and runs Ollama-backed overlay/brain/prose stages for character responses."""
+
 import json
 from typing import AsyncIterator, List, Optional
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from app.auth import require_user
 from app.config import CHAT_MODEL, MODERNBERT_URL, OLLAMA_KEEP_ALIVE, OLLAMA_TIMEOUT, OLLAMA_URL
 
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
@@ -98,7 +101,7 @@ class LabelUpdate(BaseModel):
     labels: List[str]
 
 
-@router.put("/labels")
+@router.put("/labels", dependencies=[Depends(require_user)])
 async def update_labels(body: LabelUpdate):
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT_INFER) as client:
