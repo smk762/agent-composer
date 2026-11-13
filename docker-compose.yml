@@ -1,11 +1,11 @@
 services:
-  # ── Stateful services live on the dedicated stateful node (192.168.1.109) ──
+  # ── Stateful services live on the dedicated stateful node (<STATEFUL_HOST>) ──
   # PostgreSQL (chat history), Qdrant (vector store), and MinIO (object store)
   # are NOT run in this compose stack any more. They are provided by the remote
   # stateful node and reached over the LAN via:
-  #   DATABASE_URL  -> postgresql://...@192.168.1.109:5432/ragchat
-  #   QDRANT_URL    -> http://192.168.1.109:6333
-  #   S3_ENDPOINT_URL / MEDIA_S3_ENDPOINT_URL -> http://192.168.1.109:9000
+  #   DATABASE_URL  -> postgresql://...@<STATEFUL_HOST>:5432/ragchat
+  #   QDRANT_URL    -> http://<STATEFUL_HOST>:6333
+  #   S3_ENDPOINT_URL / MEDIA_S3_ENDPOINT_URL -> http://<STATEFUL_HOST>:9000
   # Bucket provisioning is handled at launch by the `minio-setup` one-shot
   # below; PostgreSQL schema by rag-chat's init (bootstrap_db + alembic); Qdrant
   # collections by rag-ingest on startup. Credentials live in .env.
@@ -18,7 +18,7 @@ services:
     container_name: minio-setup
     restart: "no"
     environment:
-      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://192.168.1.109:9000}
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:?set S3_ENDPOINT_URL in .env (see env.example)}
       - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
       - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
       - TTS_BUCKET=${S3_BUCKET_NAME:-voice}
@@ -113,7 +113,7 @@ services:
       - INGEST_REDIS_URL=${INGEST_REDIS_URL:-}
       - INGEST_NONCE_KEY_PREFIX=${INGEST_NONCE_KEY_PREFIX:-ingest:nonce:}
       - INGEST_MAX_SKEW_S=${INGEST_MAX_SKEW_S:-300}
-      - QDRANT_URL=${QDRANT_URL:-http://192.168.1.109:6333}
+      - QDRANT_URL=${QDRANT_URL:?set QDRANT_URL in .env (see env.example)}
       - OLLAMA_URL=http://ollama:11434
       - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-15m}
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-project_docs}
@@ -170,14 +170,14 @@ services:
       - GUARD_THINKING=${GUARD_THINKING:-fast-slow}
       - GUARD_WORKER_CONCURRENCY=${GUARD_WORKER_CONCURRENCY:-1}
       - CHAT_SYSTEM_PROMPT=${CHAT_SYSTEM_PROMPT:-You are a helpful assistant.}
-      - QDRANT_URL=${QDRANT_URL:-http://192.168.1.109:6333}
+      - QDRANT_URL=${QDRANT_URL:?set QDRANT_URL in .env (see env.example)}
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-project_docs}
       - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
       - RAG_ENABLED=${RAG_ENABLED:-1}
       - RAG_TOP_K=${RAG_TOP_K:-5}
       - RAG_MAX_CONTEXT_CHARS=${RAG_MAX_CONTEXT_CHARS:-4000}
       # Remote PostgreSQL on the stateful node — full DSN supplied via .env.
-      - DATABASE_URL=${DATABASE_URL:-postgresql://ragchat:ragchat@192.168.1.109:5432/ragchat}
+      - DATABASE_URL=${DATABASE_URL:?set DATABASE_URL in .env (see env.example)}
       - CHAT_HISTORY_MAX_MSGS=${CHAT_HISTORY_MAX_MSGS:-100}
       - DEV_AUTH_BYPASS=${DEV_AUTH_BYPASS:-0}
       - DEV_DEFAULT_USER=${DEV_DEFAULT_USER:-dev@example.com}
@@ -224,11 +224,11 @@ services:
       # Shared "voice" MinIO bucket — lets the proxy re-host rendered audio from
       # remote engines (e.g. Miso on another subnet) so browsers always fetch it
       # from the LAN-reachable S3_PUBLIC_URL. Same creds the tts/xtts sidecars use.
-      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://192.168.1.109:9000}
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:?set S3_ENDPOINT_URL in .env (see env.example)}
       - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
       - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
       - S3_BUCKET_NAME=${S3_BUCKET_NAME:-voice}
-      - S3_PUBLIC_URL=${S3_PUBLIC_URL:-http://192.168.1.109:9000/voice}
+      - S3_PUBLIC_URL=${S3_PUBLIC_URL:?set S3_PUBLIC_URL in .env (see env.example)}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     command: /app/init.sh
@@ -354,11 +354,11 @@ services:
       - TTS_KEEP_ALIVE_CPU=${TTS_KEEP_ALIVE_CPU:-600}
       # MinIO is on the stateful node (LAN), not an in-stack service.
       # S3_PUBLIC_URL is the host-reachable URL handed back to the browser.
-      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://192.168.1.109:9000}
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:?set S3_ENDPOINT_URL in .env (see env.example)}
       - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
       - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
       - S3_BUCKET_NAME=${S3_BUCKET_NAME:-voice}
-      - S3_PUBLIC_URL=${S3_PUBLIC_URL:-http://192.168.1.109:9000/voice}
+      - S3_PUBLIC_URL=${S3_PUBLIC_URL:?set S3_PUBLIC_URL in .env (see env.example)}
       - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     depends_on:
@@ -409,11 +409,11 @@ services:
       - COQUI_TOS_AGREED=1
       # MinIO is on the stateful node (LAN), not an in-stack service.
       # S3_PUBLIC_URL is the host-reachable URL handed back to the browser.
-      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://192.168.1.109:9000}
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:?set S3_ENDPOINT_URL in .env (see env.example)}
       - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
       - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
       - S3_BUCKET_NAME=${S3_BUCKET_NAME:-voice}
-      - S3_PUBLIC_URL=${S3_PUBLIC_URL:-http://192.168.1.109:9000/voice}
+      - S3_PUBLIC_URL=${S3_PUBLIC_URL:?set S3_PUBLIC_URL in .env (see env.example)}
       - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     volumes:

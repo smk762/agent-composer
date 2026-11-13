@@ -49,12 +49,12 @@ services:
       - TTS_DEVICE=${TTS_DEVICE:-cuda:0}
       - TTS_LOAD_MODELS=${TTS_LOAD_MODELS:-both}
       # Standalone voice-stack has no in-stack minio; point at MinIO on the
-      # stateful node (192.168.1.109:9000), same default as the main stack.
-      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://192.168.1.109:9000}
+      # stateful node (<STATEFUL_HOST>:9000), same default as the main stack.
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:?set S3_ENDPOINT_URL in .env (see env.example)}
       - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
       - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
       - S3_BUCKET_NAME=${S3_BUCKET_NAME:-voice}
-      - S3_PUBLIC_URL=${S3_PUBLIC_URL:-http://192.168.1.109:9000/voice}
+      - S3_PUBLIC_URL=${S3_PUBLIC_URL:?set S3_PUBLIC_URL in .env (see env.example)}
       - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     deploy:
@@ -91,12 +91,12 @@ services:
       - XTTS_KEEP_ALIVE_CPU=${XTTS_KEEP_ALIVE_CPU:-600}
       - COQUI_TOS_AGREED=1
       # Standalone voice-stack has no in-stack minio; point at MinIO on the
-      # stateful node (192.168.1.109:9000), same default as the main stack.
-      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:-http://192.168.1.109:9000}
+      # stateful node (<STATEFUL_HOST>:9000), same default as the main stack.
+      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:?set S3_ENDPOINT_URL in .env (see env.example)}
       - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
       - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
       - S3_BUCKET_NAME=${S3_BUCKET_NAME:-voice}
-      - S3_PUBLIC_URL=${S3_PUBLIC_URL:-http://192.168.1.109:9000/voice}
+      - S3_PUBLIC_URL=${S3_PUBLIC_URL:?set S3_PUBLIC_URL in .env (see env.example)}
       - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     volumes:

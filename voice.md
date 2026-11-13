@@ -1,5 +1,7 @@
 # Voice Stack
 
+> Hosts in this doc are placeholders (`<AGENT_HOST>`, `<STATEFUL_HOST>`, `<NAS_HOST>`, …). The real host/IP is in the local `.env` (see `env.example`); check it there.
+
 faster-whisper STT (port 8030, GPU) and Qwen3-TTS (port 8031, GPU), integrated
 into the main `docker-compose.yml`. Both services share the GPU — inference is
 bursty, not concurrent-heavy.
@@ -86,7 +88,7 @@ mithrandir (direct), kimini-api (direct via `/transcriptions`).
 | `TTS_MODEL_SIZE` | `0.6b` | `0.6b` or `1.7b` |
 | `TTS_DEVICE` | `cuda:0` | `cuda:0` or `cpu` |
 | `TTS_LOAD_MODELS` | `both` | `both`, `custom_voice`, or `base` |
-| `S3_ENDPOINT_URL` | `http://192.168.1.109:9000` | MinIO/S3 for audio storage |
+| `S3_ENDPOINT_URL` | `http://<STATEFUL_HOST>:9000` | MinIO/S3 for audio storage |
 
 ### rag-chat voice proxy
 
