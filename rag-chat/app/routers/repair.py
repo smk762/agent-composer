@@ -22,6 +22,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import (
+    AUDIT_API_ALLOWED_HOSTS,
     AUDIT_API_TOKEN,
     AUDIT_API_URL,
     AUDIT_PACK_BASE_URL,
@@ -36,6 +37,7 @@ from app.repair.models import GitOpsConfig, RepairIteration, RepairRequest, Repa
 from app.repair.multi_model import repair_loop
 from app.repair.pack_client import fetch_pack_context, report_pack_status, resolve_repo
 from app.repair.patch_applier import apply_inplace, apply_to_temp
+from app.repair.url_policy import check_audit_url
 
 log = logging.getLogger("rag-chat.repair")
 router = APIRouter(prefix="/api/repair", tags=["repair"])
@@ -113,6 +115,15 @@ async def run_repair(
     # Writing to a checkout or running git ops requires an authenticated caller.
     if request.apply or (request.git_ops is not None and request.git_ops.enabled):
         await require_user(http_request, db)
+
+    # The server sends requests (the patch, the audit token) to these client-supplied URLs:
+    # only configured or allow-listed audit API origins are accepted (issue #28).
+    for field, value in (("audit_api_url", request.audit_api_url), ("audit_api_base", request.audit_api_base)):
+        if value:
+            problem = check_audit_url(value, field, allowlist=AUDIT_API_ALLOWED_HOSTS,
+                                      configured=(AUDIT_API_URL, AUDIT_PACK_BASE_URL))
+            if problem:
+                raise HTTPException(status_code=422, detail=problem)
 
     if not request.diff and not request.compare_branch and not request.pack_id:
         raise HTTPException(

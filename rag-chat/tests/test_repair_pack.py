@@ -227,6 +227,7 @@ class RepairEndpointTests(unittest.TestCase):
             patch.object(repair_router, "AUDIT_API_URL", ""),
             patch.object(repair_router, "QDRANT_URL", ""),
             patch.object(repair_router, "require_user", fake_user),
+            patch.object(repair_router, "AUDIT_API_ALLOWED_HOSTS", "audit.test:8765"),
         ]
         for p in self._patches:
             p.start()
@@ -403,6 +404,14 @@ class RepairEndpointTests(unittest.TestCase):
         self._post({"pack_id": PACK_ID, "diff": "--- a\n+++ b\n"}, handler=handler)
         self.assertEqual(posts, [])
 
+    def test_audit_urls_outside_the_allowlist_are_refused(self) -> None:
+        for field in ("audit_api_url", "audit_api_base"):
+            for url in ("http://evil.test:8765", "http://audit.test:6379", "http://169.254.169.254/", "file:///etc/passwd"):
+                r = self.client.post("/api/repair/run", json={"repo": "r", "diff": "x", field: url})
+                self.assertEqual(r.status_code, 422, (field, url, r.text))
+                self.assertIn(field, r.text)
+        self.assertEqual(self.prompts, [])  # refused before any work
+
     def test_requires_something_to_repair(self) -> None:
         r = self.client.post("/api/repair/run", json={"repo": "argus-cortex"})
         self.assertEqual(r.status_code, 422)
@@ -465,3 +474,31 @@ class RepairAuthGateTest(unittest.TestCase):
     def test_read_only_runs_stay_open(self) -> None:
         self.assertEqual(self._run(mode="review").status_code, 200)
         self.assertEqual(self._run(git_ops={"enabled": False}).status_code, 200)
+
+
+class AuditUrlPolicyTests(unittest.TestCase):
+    """Issue #28: client-supplied audit URLs must be configured or allow-listed origins."""
+
+    def check(self, url, allowlist="", configured=("http://host.docker.internal:8765",)):
+        from app.repair.url_policy import check_audit_url
+        return check_audit_url(url, "audit_api_url", allowlist=allowlist, configured=configured)
+
+    def test_configured_origin_only_by_default(self) -> None:
+        self.assertIsNone(self.check("http://host.docker.internal:8765/"))
+        self.assertIsNone(self.check("HTTP://Host.Docker.Internal:8765"))
+        self.assertIn("not allowed", self.check("http://host.docker.internal:6379"))  # same host, other service
+        self.assertIn("not allowed", self.check("http://192.168.1.50:8765"))
+
+    def test_allowlist_entries(self) -> None:
+        self.assertIsNone(self.check("http://audit.lan:8765", allowlist=" audit.lan:8765 , other "))
+        self.assertIsNotNone(self.check("http://audit.lan:9000", allowlist="audit.lan:8765"))
+        self.assertIsNone(self.check("https://other/x", allowlist="audit.lan:8765,other"))  # bare host: any port
+        self.assertIsNone(self.check("http://[::1]:8765", allowlist="[::1]:8765"))
+        self.assertIsNone(self.check("http://anything:1", allowlist="*"))
+        self.assertIsNotNone(self.check("http://audit.lan:8765", allowlist="http://audit.lan/path"))  # bad entry ignored
+
+    def test_never_link_local_or_non_http(self) -> None:
+        for url in ("http://169.254.169.254/latest", "http://[fe80::1]:80", "http://[::ffff:169.254.169.254]/"):
+            self.assertIn("link-local", self.check(url, allowlist="*"))
+        for url in ("file:///etc/passwd", "ftp://audit:21", "http://", "not a url", "http://h:99999"):
+            self.assertIn("http(s)", self.check(url, allowlist="*"))
