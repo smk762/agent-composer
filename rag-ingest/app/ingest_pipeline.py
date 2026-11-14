@@ -3,8 +3,8 @@
 Two paths share most of the code:
 
 * **Text (legacy)** — ``RETRIEVAL_PROFILE=text``. One unnamed dense vector per
-  chunk via Ollama. Backward compatible with the existing ``project_docs``
-  collection layout. No tree-sitter, no sparse vectors.
+  chunk via Ollama. Writes ``QDRANT_COLLECTION`` (default ``audit_docs``;
+  the old ``project_docs`` is deprecated) in the legacy unnamed-vector layout. No tree-sitter, no sparse vectors.
 
 * **Code-audit** — ``RETRIEVAL_PROFILE=code``. Tree-sitter chunks per
   function/class, dense vector via the Infinity sidecar (default
@@ -47,7 +47,7 @@ def _env_int(name: str, default: int) -> int:
 log = logging.getLogger("rag-ingest.ingest")
 
 QDRANT_URL = os.getenv("QDRANT_URL", "http://192.168.1.109:6333")
-QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "project_docs")
+QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "audit_docs")
 QDRANT_COLLECTION_CODE = os.getenv("QDRANT_COLLECTION_CODE", "code_audit")
 RETRIEVAL_PROFILE = os.getenv("RETRIEVAL_PROFILE", "text").strip().lower()
 HYBRID_SPARSE = os.getenv("HYBRID_SPARSE", "0") == "1"

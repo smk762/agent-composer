@@ -35,6 +35,7 @@ Otherwise the route returns `401 Authentication required`. `GET /health` reports
 | GET | `/conversations/{id}` | auth | Conversation plus its messages |
 | DELETE | `/conversations/{id}` | auth | |
 | POST | `/chat` | auth | OpenAI-style chat; see below |
+| POST | `/search` | auth | Retrieval over `QDRANT_COLLECTION` as JSON (`routers/search.py`); see below |
 
 #### `POST /chat`
 
@@ -52,7 +53,7 @@ Request (`ChatRequest` in `app/models/schemas.py`):
 
 Processing:
 - If the first message is not a `system` message, `CHAT_SYSTEM_PROMPT` is prepended.
-- If `RAG_ENABLED=1` (the default), the last user message is embedded with `EMBED_MODEL`, the top `RAG_TOP_K` hits are retrieved from `QDRANT_COLLECTION` and injected as a second system message, capped at `RAG_MAX_CONTEXT_CHARS`. A failed Qdrant search is logged and skipped. A failed embedding returns 502.
+- If `RAG_ENABLED=1` (the default), the last user message is embedded with `EMBED_MODEL`, the top `RAG_TOP_K` hits are retrieved from `QDRANT_COLLECTION` and injected as a second system message, capped at `RAG_MAX_CONTEXT_CHARS`. Each passage is headed by its title and link (`meta.title`, `meta.url`), and the model is asked to name and link the passages it uses. A failed Qdrant search is logged and skipped. A failed embedding returns 502.
 - Messages are persisted to Postgres. Each conversation keeps the newest `CHAT_HISTORY_MAX_MSGS` (default 100; `0` keeps all).
 
 Non-streaming response:
@@ -91,6 +92,25 @@ curl -N http://127.0.0.1:9150/chat \
 ```
 
 Working clients: `scripts/test_streaming.py`, `scripts/test_tool_calling.py` and `scripts/example_tool_calling_client.py`.
+
+#### `POST /search`
+
+The passages `/chat` would inject, as JSON, for agents and tools that want to read them directly. Same auth as `/chat`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `query` | string | Required, 1–2000 characters. Embedded with `EMBED_MODEL`. |
+| `top_k` | int | Default 5, at most 20. |
+| `repo` | string | Shorthand for the tag `repo:<name>`. |
+| `kind` | string | Shorthand for the tag `kind:<kind>`: ai-code-auditor sends `kind:wiki` (one doc per wiki `##` section), `kind:agent_coding_pack`, `kind:mithrandir_latest` and its report kinds. |
+| `tags` | list | Further tags; a hit must carry every requested tag. |
+
+Response: `{collection, tags, hits: [{score, doc_id, chunk_index, title, url, path, source, tags, text}]}`, best first. A Qdrant failure is a 502, as is a failed embedding.
+
+```bash
+curl -s http://127.0.0.1:9150/search -H "Authorization: Bearer ${CHAT_API_KEY}" -H "Content-Type: application/json" \
+  -d '{"query":"how are uploads validated","repo":"argus-mint","kind":"wiki","top_k":3}'
+```
 
 ### API keys (`routers/api_keys.py`)
 
@@ -233,7 +253,7 @@ Routing works per doc. An explicit `kind` wins. Otherwise a `path` with a known 
 | Embeddings | Ollama `EMBED_MODEL` | Infinity `EMBED_MODEL_CODE` (default `nomic-ai/CodeRankEmbed`) |
 | Collection | `QDRANT_COLLECTION` (unnamed dense vector) | `QDRANT_COLLECTION_CODE` (default `code_audit`; named `dense` vector, plus `bm25` when `HYBRID_SPARSE=1`) |
 
-rag-chat's `/chat` RAG retrieval reads only `QDRANT_COLLECTION`. The code collection is consumed by ai-code-auditor.
+rag-chat's `/chat` RAG context and `/search` read only `QDRANT_COLLECTION`. The code collection is consumed by ai-code-auditor.
 
 The response contains `ok`, `chunks`, `upserted`, `skipped_chunks`, `truncated_chunks`, `collection`, `embed_model`, `retrieval_profile`, `hybrid_sparse`, `code_docs` and `text_docs`.
 
