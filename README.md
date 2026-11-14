@@ -248,7 +248,7 @@ Simple form to submit chunks for embedding and upserting to qdrant.
 - `POST /chat`: OpenAI-style chat with `model`, `conversation_id`, `tools`, `temperature`, `max_tokens` and `stream` (SSE ending in `[DONE]`). Returns `choices`, `usage` and `conversation_id`, and persists the conversation.
 - `/conversations` (list/create/get/delete), `/api-keys` (list/create/revoke)
 - `/api/generate/image`, `/api/edit/image`, `/api/generate/video`, `/api/generations`, `/api/media/{id}`, `/api/providers/*`
-- `/api/guard/check`, `/api/guard/categories`, `/api/guard/policy`
+- `/api/guard/check`, `/api/guard/categories`, `/api/guard/policy` (setup, model pull, request and response fields and thinking modes: [SingGuard guard server](https://studio.dragonhound.dev/docs/setup/services/singguard/) in the Argus docs)
 - `/api/voice/*`: transcribe, synthesise (plain/stream/pcm), analyze, clone, clones, speakers, engines, health
 - `/api/pipeline/*`: ModernBERT status/load/evict/unload, labels, classify, plus overlay/brain/prose helpers
 - `/api/repair/run` (SSE) and `/api/repair/jobs/{id}`

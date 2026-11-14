@@ -42,7 +42,7 @@ GUARD_THINKING = (
 )
 SYSTEM_PROMPT = os.getenv("CHAT_SYSTEM_PROMPT", "You are a helpful assistant.")
 
-QDRANT_URL = os.getenv("QDRANT_URL", "http://192.168.1.109:6333")
+QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "audit_docs")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
 # rag-chat embeds queries with Ollama + EMBED_MODEL. rag-ingest stamps text points with the

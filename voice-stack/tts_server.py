@@ -74,11 +74,11 @@ DEFAULT_SPEAKER = os.getenv("TTS_DEFAULT_SPEAKER", "").strip()
 PRELOAD = os.getenv("TTS_PRELOAD", "0") == "1"
 KEEP_ALIVE_GPU: float = float(os.getenv("TTS_KEEP_ALIVE_GPU", "120"))
 KEEP_ALIVE_CPU: float = float(os.getenv("TTS_KEEP_ALIVE_CPU", "600"))
-S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "http://192.168.1.109:9000")
+S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "http://localhost:9000")
 S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", "minioadmin")
 S3_SECRET_ACCESS_KEY = os.getenv("S3_SECRET_ACCESS_KEY", "minioadmin")
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "voice")
-S3_PUBLIC_URL = os.getenv("S3_PUBLIC_URL", "http://192.168.1.109:9000/voice")
+S3_PUBLIC_URL = os.getenv("S3_PUBLIC_URL", "http://localhost:9000/voice")
 
 # Cap autoregressive codec-token generation. The talker default
 # (max_new_tokens=4096 ≈ 340s @12Hz) with do_sample=True can occasionally fail
