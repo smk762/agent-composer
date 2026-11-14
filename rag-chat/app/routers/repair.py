@@ -37,6 +37,7 @@ from app.repair.models import GitOpsConfig, RepairIteration, RepairRequest, Repa
 from app.repair.multi_model import repair_loop
 from app.repair.pack_client import fetch_pack_context, report_pack_status, resolve_repo
 from app.repair.patch_applier import apply_inplace, apply_to_temp
+from app.repair.code_search import code_query, fetch_code_snippets
 from app.repair.url_policy import check_audit_url
 
 log = logging.getLogger("rag-chat.repair")
@@ -220,7 +221,19 @@ async def run_repair(
                 "audit_api_url": effective_audit_url,
                 "pack_context": pack_block,  # always server-populated
             })
-            async for iteration in repair_loop(effective_request, qdrant_url=QDRANT_URL):
+            # Related code from the code collection, embedded like the collection was (#35).
+            code_snippets: list[str] = []
+            if QDRANT_URL:
+                found = await fetch_code_snippets(
+                    code_query(diff_text, pack_block, pack_ctx.title if pack_ctx and pack_ctx.ok else ""),
+                    repo=repo,
+                )
+                code_snippets = found.snippets
+                if found.warning:
+                    log.warning("Repair %s: %s", job_id, found.warning)
+                    await emit("warning", {"job_id": job_id, "message": found.warning})
+
+            async for iteration in repair_loop(effective_request, code_snippets=code_snippets):
                 iter_dict = iteration.model_dump()
                 iterations.append(iter_dict)
                 final_patch = iteration.patch or final_patch
