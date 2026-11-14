@@ -12,7 +12,7 @@ from typing import AsyncIterator, Optional
 import httpx
 
 from app.config import CHAT_MODEL, OLLAMA_KEEP_ALIVE, OLLAMA_TIMEOUT, OLLAMA_URL
-from app.repair.context_builder import build_repair_context, fetch_qdrant_snippets
+from app.repair.context_builder import build_repair_context
 from app.repair.models import RepairIteration, RepairRequest
 from app.repair.patch_applier import extract_patch
 
@@ -233,7 +233,7 @@ async def _validate_via_tests(
 
 async def repair_loop(
     request: RepairRequest,
-    qdrant_url: str = "",
+    code_snippets: Optional[list[str]] = None,
 ) -> AsyncIterator[RepairIteration]:
     """Async generator: yield one RepairIteration per loop pass.
 
@@ -251,13 +251,8 @@ async def repair_loop(
         "suggest": _FIXER_SYSTEM_SUGGEST,
     }.get(request.mode, _FIXER_SYSTEM_AUTO)
 
-    # Build initial Qdrant context (best-effort)
-    qdrant_snippets: list[str] = []
-    if qdrant_url:
-        qdrant_snippets = await fetch_qdrant_snippets(
-            query=(request.diff or request.pack_context)[:500],
-            qdrant_url=qdrant_url,
-        )
+    # Related code, looked up once by the caller (code_search.fetch_code_snippets).
+    qdrant_snippets: list[str] = list(code_snippets or [])
 
     critic_notes = ""
     adversary_notes = ""

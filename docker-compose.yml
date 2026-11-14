@@ -169,6 +169,9 @@ services:
       - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-15m}
       - MODERNBERT_URL=${MODERNBERT_URL:-http://modernbert:7998}
       - INFINITY_URL=${INFINITY_URL:-http://infinity:7997}
+      # Repair related-code search: same code collection and embedder as rag-ingest's code path (#35).
+      - QDRANT_COLLECTION_CODE=${QDRANT_COLLECTION_CODE:-code_audit}
+      - EMBED_MODEL_CODE=${EMBED_MODEL_CODE:-nomic-ai/CodeRankEmbed}
       - CHAT_MODEL=${CHAT_MODEL:-llama3.2:3b}
       - GUARD_MODEL=${GUARD_MODEL:-hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M}
       - GUARD_THINKING=${GUARD_THINKING:-fast-slow}

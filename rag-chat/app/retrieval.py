@@ -82,7 +82,7 @@ async def search(query: str, *, embed: Embed, top_k: int, tags: Sequence[str] = 
 
 # ---- Embedder check ------------------------------------------------------------
 
-_embedder_cache: Dict[str, tuple] = {}  # collection -> (monotonic time, status)
+_embedder_cache: Dict[tuple, tuple] = {}  # (collection, expected label) -> (monotonic time, status)
 
 
 def _other_embedders_filter(embedder: str, strict: bool = False) -> qm.Filter:
@@ -93,15 +93,18 @@ def _other_embedders_filter(embedder: str, strict: bool = False) -> qm.Filter:
     return qm.Filter(must_not=must_not)
 
 
-def cached_embedder_status(collection: str = QDRANT_COLLECTION) -> Optional[Dict[str, Any]]:
+def cached_embedder_status(collection: str = QDRANT_COLLECTION,
+                           expected: str = TEXT_EMBEDDER) -> Optional[Dict[str, Any]]:
     """The last completed check, without touching Qdrant (for /health)."""
-    cached = _embedder_cache.get(collection)
+    cached = _embedder_cache.get((collection, expected))
     return cached[1] if cached else None
 
 
 async def embedder_status(*, collection: str = QDRANT_COLLECTION, client: Any = None,
-                          force: bool = False, strict: Optional[bool] = None) -> Dict[str, Any]:
-    """Whether ``collection`` holds only vectors from the embedder our queries use.
+                          force: bool = False, strict: Optional[bool] = None,
+                          expected: str = TEXT_EMBEDDER) -> Dict[str, Any]:
+    """Whether ``collection`` holds only vectors from ``expected``, the embedder our queries use
+    (TEXT_EMBEDDER for the RAG collection; the repair code search passes CODE_EMBEDDER).
 
     ``ok`` is True when no labelled point names another embedder, False when some do, and None
     when the check couldn't run (Qdrant down, collection missing): callers then carry on and
@@ -109,14 +112,14 @@ async def embedder_status(*, collection: str = QDRANT_COLLECTION, client: Any = 
     With ``strict`` (default EMBEDDER_STRICT) unlabelled points count as mismatched."""
     strict = EMBEDDER_STRICT if strict is None else strict
     now = time.monotonic()
-    cached = _embedder_cache.get(collection)
+    cached = _embedder_cache.get((collection, expected))
     if cached and not force and now - cached[0] < EMBEDDER_CHECK_TTL_S:
         return cached[1]
-    status: Dict[str, Any] = {"collection": collection, "expected": TEXT_EMBEDDER, "strict": strict,
+    status: Dict[str, Any] = {"collection": collection, "expected": expected, "strict": strict,
                               "ok": None, "mismatched": 0, "unlabelled": 0, "found": []}
     qc = client or AsyncQdrantClient(url=QDRANT_URL)
     try:
-        flt = _other_embedders_filter(TEXT_EMBEDDER, strict)
+        flt = _other_embedders_filter(expected, strict)
         mismatched = (await qc.count(collection_name=collection, count_filter=flt, exact=True)).count
         unlabelled = (await qc.count(
             collection_name=collection, exact=True,
@@ -128,7 +131,7 @@ async def embedder_status(*, collection: str = QDRANT_COLLECTION, client: Any = 
                                      with_payload=["embedder"], with_vectors=False)
             found = sorted({str((p.payload or {}).get("embedder") or "(unlabelled)") for p in pts})
         status.update(ok=mismatched == 0, mismatched=mismatched, unlabelled=unlabelled, found=found)
-        _embedder_cache[collection] = (now, status)
+        _embedder_cache[(collection, expected)] = (now, status)
         if mismatched:
             log.error("retrieval: %s", mismatch_message(status))
     except Exception as e:
@@ -143,8 +146,8 @@ def mismatch_message(status: Dict[str, Any]) -> str:
     return (
         f"collection {status['collection']!r} holds {status['mismatched']} point(s) embedded by "
         f"{', '.join(status['found']) or 'another embedder'}, but rag-chat embeds queries with "
-        f"{status['expected']}; their vectors aren't comparable. Set EMBED_MODEL to the model that "
-        f"wrote the collection (in both services), or re-ingest it."
+        f"{status['expected']}; their vectors aren't comparable. Point the model setting (EMBED_MODEL, "
+        f"or EMBED_MODEL_CODE for code) at the model that wrote the collection in both services, or re-ingest it."
     )
 
 

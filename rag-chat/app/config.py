@@ -57,6 +57,16 @@ QUERY_PREFIX = _QUERY_PREFIXES[EMBED_TASK_PREFIXES]
 # vectors came from another embedder.
 TEXT_EMBEDDER = f"ollama:{EMBED_MODEL}" + ("" if EMBED_TASK_PREFIXES == "none" else f"+{EMBED_TASK_PREFIXES}-prefix")
 EMBEDDER_CHECK_TTL_S = float(os.getenv("EMBEDDER_CHECK_TTL_S", "60"))
+# Code collection (rag-ingest's code path: Infinity + EMBED_MODEL_CODE, label CODE_EMBEDDER).
+# The repair loop searches it for related code; queries must use the same embedder (#35).
+QDRANT_COLLECTION_CODE = os.getenv("QDRANT_COLLECTION_CODE", "code_audit")
+EMBED_MODEL_CODE = os.getenv("EMBED_MODEL_CODE", "nomic-ai/CodeRankEmbed")
+CODE_EMBEDDER = f"infinity:{EMBED_MODEL_CODE}"
+# Query instruction for the code embedder (CodeRankEmbed's model card); stored code is unprefixed.
+_DEFAULT_CODE_QUERY_PREFIX = (
+    "Represent this query for searching relevant code: " if "coderankembed" in EMBED_MODEL_CODE.lower() else ""
+)
+CODE_QUERY_PREFIX = os.getenv("EMBED_CODE_QUERY_PREFIX", _DEFAULT_CODE_QUERY_PREFIX)
 # Strict: unlabelled points (written before labels existed) count as a mismatch too.
 EMBEDDER_STRICT = os.getenv("EMBEDDER_STRICT", "0").strip().lower() in ("1", "true", "yes")
 RAG_ENABLED = os.getenv("RAG_ENABLED", "1") == "1"

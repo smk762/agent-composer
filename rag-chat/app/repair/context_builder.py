@@ -4,7 +4,7 @@ Context priority (highest to lowest):
   0. Agent work pack (only when the request carries ``pack_id``)
   1. The unified diff itself (always present)
   2. Validation / compilation errors
-  3. Qdrant semantic hits from the code_audit collection (best-effort)
+  3. Related code from the code collection (best-effort; see code_search.py)
   4. Critic / adversary notes from the previous iteration
 """
 from __future__ import annotations
@@ -71,43 +71,3 @@ def build_repair_context(
         parts.append("## Adversary's objections (previous iteration)\n\n" + adversary_notes[:2000])
 
     return "\n\n".join(parts)
-
-
-async def fetch_qdrant_snippets(
-    query: str,
-    qdrant_url: str,
-    collection: str = "code_audit",
-    top_k: int = 5,
-) -> list[str]:
-    """Query Qdrant's code_audit collection and return text snippets.
-
-    Returns an empty list on any error so the repair loop degrades gracefully.
-    """
-    try:
-        import httpx
-        from app.routers.chat import ollama_embed
-
-        vector = await ollama_embed(query[:500])
-        payload = {
-            "vector": {"name": "dense", "vector": vector},
-            "limit": top_k,
-            "with_payload": True,
-        }
-        async with httpx.AsyncClient(timeout=10) as client:
-            r = await client.post(
-                f"{qdrant_url}/collections/{collection}/points/search",
-                json=payload,
-            )
-        if r.status_code != 200:
-            return []
-        hits = r.json().get("result", [])
-        snippets: list[str] = []
-        for hit in hits:
-            p = hit.get("payload", {})
-            text = p.get("text") or p.get("content") or p.get("raw_text") or ""
-            if text:
-                snippets.append(text[:600])
-        return snippets
-    except Exception as exc:
-        log.debug("Qdrant fetch skipped: %s", exc)
-        return []

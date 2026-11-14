@@ -76,7 +76,7 @@ The sidecar-side settings (`XTTS_PREPROCESS*`, `XTTS_GPT_COND_LEN`, `MISO_KEEP_A
 | Variable | Default | Notes |
 |---|---|---|
 | `MODERNBERT_URL` | `http://modernbert:7998` | Target of the `/api/pipeline/*` proxy |
-| `INFINITY_URL` | `http://infinity:7997` | Target of the `/api/runtime/infinity/*` controls |
+| `INFINITY_URL` | `http://infinity:7997` | Target of the `/api/runtime/infinity/*` controls, and the embedder for the repair loop's related-code search |
 | `AUDIT_API_URL` | `http://127.0.0.1:8765` | ai-code-auditor API for diff validation between repair iterations; empty disables validation |
 | `AI_AUDIT_PUBLIC_BASE_URL` | falls back to `AUDIT_API_URL` | Base URL for fetching `pack_id` packs |
 | `AUDIT_PACK_TIMEOUT_S` | `10` | Per-request timeout for pack fetches |
@@ -91,13 +91,14 @@ The sidecar-side settings (`XTTS_PREPROCESS*`, `XTTS_GPT_COND_LEN`, `MISO_KEEP_A
 |---|---|---|
 | `RETRIEVAL_PROFILE` | `text` | Default ingest path for docs with no `kind` and no recognised `path`: `text` or `code` |
 | `QDRANT_COLLECTION` | `audit_docs` | Text-path collection |
-| `QDRANT_COLLECTION_CODE` | `code_audit` | Code-path collection (named vectors) |
+| `QDRANT_COLLECTION_CODE` | `code_audit` | Code-path collection (named vectors). rag-chat's repair loop searches it too, so both services get it from the same variable |
 | `EMBED_BACKEND_URL` | `http://infinity:7997` | Infinity endpoint (code path) |
 | `EMBED_MODEL` | `nomic-embed-text` | Text-path embedding model, always served by Ollama. rag-chat embeds queries with the same Ollama model, so set it identically in both services. (`EMBED_BACKEND` is retired: it is ignored, with a warning, if set to anything but `ollama`.) |
 | `EMBEDDER_CHECK_TTL_S` | `60` | rag-chat: how often the RAG collection's `embedder` labels are re-checked |
 | `EMBED_TASK_PREFIXES` | `none` | Both services: `nomic` embeds chunks as `search_document: …` and queries as `search_query: …`. Changes the vector space, so migrate with `python -m app.reembed` rather than flipping it on a populated collection (see docs/api.md). |
 | `EMBEDDER_STRICT` | `0` | Both services: `1` treats points without an `embedder` label as a mismatch |
-| `EMBED_MODEL_CODE` | `nomic-ai/CodeRankEmbed` | Code-path embedding model (also preloaded by the `infinity` service) |
+| `EMBED_MODEL_CODE` | `nomic-ai/CodeRankEmbed` | Code-path embedding model (also preloaded by the `infinity` service). rag-chat embeds repair code-search queries with it, so both services share it |
+| `EMBED_CODE_QUERY_PREFIX` | CodeRankEmbed's `Represent this query for searching relevant code: ` (empty for other models) | rag-chat: instruction prepended to code-search queries; stored code is unprefixed |
 | `HYBRID_SPARSE` | `0` | `1` adds a `bm25` sparse vector to code points |
 | `INGEST_CHUNK_SIZE` / `INGEST_CHUNK_OVERLAP` | `1000` / `120` | Text-path window, in characters |
 | `CODE_CHUNK_MIN_CHARS` / `CODE_CHUNK_MAX_CHARS` | `120` / `3000` | Code-path chunk bounds |

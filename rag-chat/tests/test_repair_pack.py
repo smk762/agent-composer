@@ -412,6 +412,23 @@ class RepairEndpointTests(unittest.TestCase):
                 self.assertIn(field, r.text)
         self.assertEqual(self.prompts, [])  # refused before any work
 
+    def test_mismatched_code_collection_surfaces_a_warning(self) -> None:
+        from app.repair.code_search import CodeSnippets
+
+        queries = []
+
+        async def fake_fetch(query, repo=None, **kw):
+            queries.append((query, repo))
+            return CodeSnippets([], warning="Related-code search skipped: collection 'code_audit' holds 3 point(s) embedded by ollama:x")
+
+        with patch.object(self.router_mod, "QDRANT_URL", "http://qdrant.test:6333"), \
+                patch.object(self.router_mod, "fetch_code_snippets", fake_fetch):
+            _, events = self._post({"repo": "argus-cortex", "diff": "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n"})
+        self.assertTrue(any(e == "warning" and "ollama:x" in d["message"] for e, d in events))
+        self.assertEqual(events[-1][0], "complete")
+        self.assertEqual(queries[0][1], "argus-cortex")
+        self.assertIn("files: x.py", queries[0][0])
+
     def test_requires_something_to_repair(self) -> None:
         r = self.client.post("/api/repair/run", json={"repo": "argus-cortex"})
         self.assertEqual(r.status_code, 422)
