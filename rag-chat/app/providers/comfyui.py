@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 from typing import List, Optional
 from uuid import uuid4
 
@@ -84,8 +85,16 @@ class ComfyUIProvider(ImageProvider, VideoProvider):
         r.raise_for_status()
         return r.content
 
-    def _build_txt2img_workflow(self, prompt: str, negative: str, width: int, height: int, model: str) -> dict:
-        """Build a minimal SDXL/Flux txt2img workflow graph."""
+    def _build_txt2img_workflow(
+        self, prompt: str, negative: str, width: int, height: int, model: str, seed: Optional[int] = None,
+    ) -> dict:
+        """Build a minimal SDXL/Flux txt2img workflow graph.
+
+        ComfyUI's KSampler rejects a negative seed (-1 is an A1111 convention, not
+        "random" here), so each call gets a fresh non-negative one unless given.
+        """
+        if seed is None:
+            seed = secrets.randbits(63)
         ckpt = _CHECKPOINT_MAP.get(model, model)
         return {
             "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ckpt}},
@@ -96,7 +105,7 @@ class ComfyUIProvider(ImageProvider, VideoProvider):
                 "class_type": "KSampler",
                 "inputs": {
                     "model": ["1", 0], "positive": ["2", 0], "negative": ["3", 0],
-                    "latent_image": ["4", 0], "seed": -1, "steps": 30,
+                    "latent_image": ["4", 0], "seed": seed, "steps": 30,
                     "cfg": 7.5, "sampler_name": "euler_ancestral", "scheduler": "normal",
                     "denoise": 1.0,
                 },

@@ -39,6 +39,13 @@ router = APIRouter()
 
 # ---- Helpers ----
 
+def _tool_calls_json(tool_calls: List[Any]) -> Optional[str]:
+    """Stored form of streamed tool calls: dicts as-is, pydantic models via model_dump()."""
+    if not tool_calls:
+        return None
+    return json.dumps([tc.model_dump() if hasattr(tc, "model_dump") else tc for tc in tool_calls])
+
+
 def _is_chat_model(name: str) -> bool:
     n = (name or "").lower()
     return not ("embed" in n or "embedding" in n)
@@ -432,7 +439,7 @@ async def chat(
             log.info("chat: streaming from ollama, model=%s, conv=%s", model, conv.id)
             t0 = time.monotonic()
             acc_content = ""
-            acc_tools = None
+            acc_tools: list = []
             chunk_count = 0
             try:
                 async for chunk in stream_ollama_chat(OLLAMA_URL, payload, model, conv.id):
@@ -443,7 +450,7 @@ async def chat(
                         if delta.content:
                             acc_content += delta.content
                         if delta.tool_calls:
-                            acc_tools = delta.tool_calls
+                            acc_tools.extend(delta.tool_calls)
             except StreamError as e:
                 log.error("chat: stream error after %.1fs (%d chunks): %s",
                           time.monotonic() - t0, chunk_count, e)
@@ -461,7 +468,7 @@ async def chat(
                     Message(
                         conversation_id=conv.id, role="assistant",
                         content=acc_content or None,
-                        tool_calls=json.dumps(acc_tools) if acc_tools else None,
+                        tool_calls=_tool_calls_json(acc_tools),
                         seq=next_seq + 1,
                     ),
                 ])

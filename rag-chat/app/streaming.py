@@ -121,9 +121,10 @@ async def stream_ollama_chat(
                         conversation_id=conversation_id,
                     )
 
-                # Accumulate tool calls from Ollama
+                # Accumulate tool calls from Ollama: newer versions send each
+                # call in its own chunk, so replacing would keep only the last.
                 if tool_calls:
-                    accumulated_tool_calls = tool_calls
+                    accumulated_tool_calls.extend(tool_calls)
 
                 # Final chunk
                 if done:

@@ -564,7 +564,8 @@ _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 
 def _slugify(name: str) -> str:
-    slug = _SLUG_RE.sub("-", (name or "").strip().lower()).strip("-")
+    # TTS sidecars accept companion ids of at most 64 chars ([A-Za-z0-9_-]).
+    slug = _SLUG_RE.sub("-", (name or "").strip().lower()).strip("-")[:64].strip("-")
     return slug or f"voice-{int(time.time())}"
 
 

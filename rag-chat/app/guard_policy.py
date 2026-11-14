@@ -227,9 +227,25 @@ def finish_cascade(fast: GuardVerdict, slow: GuardVerdict) -> GuardVerdict:
     )
 
 
+# ``<|im_start|>``, ``<|im_end|>``, ``<|endoftext|>`` and friends. Ollama
+# tokenizes special tokens it finds in the rendered prompt (raw or templated),
+# so one in user text would close the user turn and let it forge an assistant
+# verdict or a new system block.
+_SPECIAL_TOKEN_RE = re.compile(r"<\|([^<>|\n]{0,64})\|>")
+
+
+def neutralize_special_tokens(text: str) -> str:
+    """Make ``<|...|>`` sequences in untrusted text plain characters.
+
+    The bars become fullwidth ``｜`` so the model still reads what was written
+    but the tokenizer no longer sees a control token.
+    """
+    return _SPECIAL_TOKEN_RE.sub(lambda m: f"<｜{m.group(1)}｜>", text)
+
+
 def risk_categories_block(policy: str | None) -> str:
     """Return the ``## Risk Categories`` section the template would insert."""
-    text = (policy or "").strip()
+    text = neutralize_special_tokens((policy or "").strip())
     if not text:
         return DEFAULT_POLICY
     if "## Risk Categories" in text:
@@ -293,7 +309,7 @@ def build_singguard_prompt(
     for role, content in messages:
         if role not in ("user", "assistant"):
             raise ValueError(f"unsupported role: {role}")
-        text = content.strip()
+        text = neutralize_special_tokens(content.strip())
         if not text:
             continue
         turns.append(f"[{role}]: {text}")
@@ -336,7 +352,7 @@ def build_image_chat_messages(
     for role, content in messages:
         if role not in ("user", "assistant"):
             raise ValueError(f"unsupported role: {role}")
-        turns.append((role, content.strip()))
+        turns.append((role, neutralize_special_tokens(content.strip())))
     user_indexes = [i for i, (role, _) in enumerate(turns) if role == "user"]
     if not user_indexes:
         raise ValueError(
