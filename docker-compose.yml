@@ -59,10 +59,14 @@ services:
       retries: 10
     networks: [internal]
 
-  # Code-audit embedder + reranker (sentence-transformers via Infinity)
-  # OpenAI-compatible /embeddings and /rerank endpoints. Used by rag-ingest in
-  # code mode and reachable from external services (e.g. ai-code-auditor) via
-  # 127.0.0.1:${INFINITY_PORT:-7997} on the host.
+  # Code-audit embedder (sentence-transformers via Infinity): OpenAI-compatible
+  # /embeddings (and /rerank when a reranker is listed). Used by rag-ingest in code
+  # mode and by rag-chat's repair code search.
+  # VRAM, measured on dragon (fp16, 4000-char chunks = rag-ingest's cap):
+  #   CodeRankEmbed, batch 8: 0.8 GB loaded, 1.3 GB peak  <- default; fits beside SingGuard
+  #   CodeRankEmbed, batch 32: 1.5 GB loaded, 3.5 GB peak
+  #   + bge-reranker-v2-m3: +1.26 GB (4.7 GB peak at batch 32); nothing calls /rerank today
+  # Peak memory stays reserved until the manager stops the child (INFINITY_IDLE_TIMEOUT).
   infinity:
     build:
       context: ./infinity-manager
@@ -71,7 +75,10 @@ services:
     gpus: all
     environment:
       - HF_HOME=/data/hf
-      - INFINITY_MODEL_IDS=${EMBED_MODEL_CODE:-nomic-ai/CodeRankEmbed},${RERANK_MODEL:-BAAI/bge-reranker-v2-m3}
+      # Comma-separated. To serve the reranker too: ${EMBED_MODEL_CODE},BAAI/bge-reranker-v2-m3
+      - INFINITY_MODEL_IDS=${INFINITY_MODEL_IDS:-${EMBED_MODEL_CODE:-nomic-ai/CodeRankEmbed}}
+      # Max batch per forward pass; the main driver of peak VRAM (see above).
+      - INFINITY_EXTRA_ARGS=${INFINITY_EXTRA_ARGS:---batch-size 8}
       - INFINITY_QUEUE_SIZE=${INFINITY_QUEUE_SIZE:-512}
       - INFINITY_IDLE_TIMEOUT=${INFINITY_IDLE_TIMEOUT:-300}
       - INFINITY_PRELOAD=${INFINITY_PRELOAD:-0}

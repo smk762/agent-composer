@@ -27,7 +27,7 @@ REQUEST_TIMEOUT_S = float(os.getenv("INFINITY_REQUEST_TIMEOUT", "300"))
 
 MODEL_IDS = [
     item.strip()
-    for item in os.getenv("INFINITY_MODEL_IDS", "nomic-ai/CodeRankEmbed,BAAI/bge-reranker-v2-m3").split(",")
+    for item in os.getenv("INFINITY_MODEL_IDS", "nomic-ai/CodeRankEmbed").split(",")
     if item.strip()
 ]
 ENGINE = os.getenv("INFINITY_ENGINE", "torch")
