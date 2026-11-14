@@ -31,6 +31,8 @@ jobs:
         working-directory: ${{ matrix.service }}
     env:
       DATABASE_URL: sqlite+aiosqlite:////tmp/ci.db
+      # rag-ingest opens its nonce store at import; the image's /data doesn't exist on the runner.
+      INGEST_NONCE_DB: /tmp/ci-nonces.db
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
       - uses: actions/checkout@v4
