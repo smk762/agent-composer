@@ -11,7 +11,7 @@ GPU memory lifecycle:
 Endpoints:
   POST /transcribe      — multipart file upload (playact-engine, rag-chat)
   POST /transcriptions   — JSON body with audio_url or audio_base64 (kimini-api)
-  GET  /health           — readiness check
+  GET  /health           — readiness check; 503 when the audio decoder is broken
 
 Env vars:
   STT_MODEL           — model id (default "large-v3-turbo")
@@ -21,6 +21,7 @@ Env vars:
   STT_BEAM_SIZE       — beam size for decoding (default 5)
   STT_KEEP_ALIVE_GPU  — seconds on GPU before eviction. -1 = forever. Default 120.
   STT_DOWNLOAD_TIMEOUT — seconds allowed for an audio_url download (default 30).
+  STT_DECODE_TIMEOUT  — seconds allowed for the ffmpeg decode of one upload (default 120).
   STT_AUDIO_URL_ALLOWED_HOSTS — comma-separated `host` or `host:port` entries
                         that /transcriptions may fetch even though they resolve
                         to a private/loopback address (e.g. `minio:9000` or the
@@ -43,12 +44,14 @@ import gc
 import ipaddress
 import os
 import socket
+import subprocess
 import tempfile
 import time
 from typing import Optional
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+import numpy as np
 import structlog
 from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
@@ -137,6 +140,71 @@ async def _eviction_loop():
         pass
 
 
+SAMPLE_RATE = 16000  # what faster-whisper expects for an ndarray input
+STT_DECODE_TIMEOUT = float(os.getenv("STT_DECODE_TIMEOUT", "120"))
+HEALTH_DECODE_TTL_S = 60.0
+
+
+class AudioDecodeError(Exception):
+    """ffmpeg could not decode the audio."""
+
+
+def _decode_audio(path: str) -> np.ndarray:
+    """Decode any ffmpeg-readable file to 16 kHz mono float32.
+
+    Done with the ffmpeg CLI instead of faster-whisper's PyAV-based
+    ``decode_audio``, so a PyAV API change can't break every upload (#42)."""
+    cmd = [
+        "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-threads", "0",
+        "-i", path, "-f", "s16le", "-ac", "1", "-ar", str(SAMPLE_RATE), "-",
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=STT_DECODE_TIMEOUT, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise AudioDecodeError(f"ffmpeg failed: {exc}") from exc
+    if proc.returncode != 0:
+        err = proc.stderr.decode(errors="replace").strip()[-300:]
+        raise AudioDecodeError(f"ffmpeg exit {proc.returncode}: {err}")
+    return np.frombuffer(proc.stdout, dtype=np.int16).astype(np.float32) / 32768.0
+
+
+def _silence_wav(path: str, seconds: float = 1.0, rate: int = 24000) -> None:
+    import wave
+
+    with wave.open(path, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(b"\0\0" * int(rate * seconds))
+
+
+def _decoder_self_test() -> dict:
+    """Decode a second of generated silence through the real decode path."""
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        path = f.name
+    try:
+        _silence_wav(path)
+        samples = _decode_audio(path)
+        if abs(len(samples) - SAMPLE_RATE) > SAMPLE_RATE // 100:
+            return {"ok": False, "error": f"decoded {len(samples)} samples, expected ~{SAMPLE_RATE}"}
+        return {"ok": True}
+    except Exception as exc:  # any failure here means /transcribe is broken too
+        return {"ok": False, "error": str(exc)}
+    finally:
+        os.unlink(path)
+
+
+_decoder_check: dict = {"at": 0.0, "result": None}
+
+
+async def _decoder_status() -> dict:
+    now = time.monotonic()
+    if _decoder_check["result"] is None or now - _decoder_check["at"] >= HEALTH_DECODE_TTL_S:
+        _decoder_check["result"] = await asyncio.to_thread(_decoder_self_test)
+        _decoder_check["at"] = now
+    return _decoder_check["result"]
+
+
 def _transcribe_sync(path: str, language: str | None, model) -> dict:
     """Run transcription in a thread — faster-whisper is not async.
 
@@ -150,7 +218,8 @@ def _transcribe_sync(path: str, language: str | None, model) -> dict:
     if language:
         kwargs["language"] = language
 
-    segments, info = model.transcribe(path, **kwargs)
+    audio = _decode_audio(path)
+    segments, info = model.transcribe(audio, **kwargs)
     text = " ".join(seg.text.strip() for seg in segments)
 
     return {
@@ -196,7 +265,17 @@ async def _run_transcription(tmp_path: str, language: str | None, endpoint: str)
                 status_code=503,
                 content={"error": "GPU OOM", "detail": str(exc), "gpu": gpu_info},
             )
-        raise
+        logger.error("stt_transcription_failed", error=str(exc), exc_info=True, endpoint=endpoint)
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Transcription failed: {exc}"},
+        )
+    except AudioDecodeError as exc:
+        logger.warning("stt_decode_failed", error=str(exc), endpoint=endpoint)
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Could not decode audio: {exc}"},
+        )
     except Exception as exc:
         logger.error("stt_transcription_failed", error=str(exc), exc_info=True, endpoint=endpoint)
         return JSONResponse(
@@ -417,9 +496,15 @@ async def transcriptions(req: TranscriptionRequest):
 
 @app.get("/health")
 async def health():
+    """Readiness without loading the model: the decoder is exercised on a
+    second of silence (cached HEALTH_DECODE_TTL_S) so a broken decode path
+    reports 503 instead of ``ok`` (#42). A full transcription would pull the
+    model onto the GPU on every poll."""
     loaded = _model is not None
-    return {
-        "status": "ok",
+    decoder = await _decoder_status()
+    body = {
+        "status": "ok" if decoder["ok"] else "error",
+        "decoder": decoder,
         "model": STT_MODEL,
         "device": STT_DEVICE,
         "compute_type": STT_COMPUTE_TYPE,
@@ -427,6 +512,9 @@ async def health():
         "model_state": "gpu" if loaded else "unloaded",
         "keep_alive_gpu": STT_KEEP_ALIVE_GPU,
     }
+    if not decoder["ok"]:
+        return JSONResponse(status_code=503, content=body)
+    return body
 
 
 @app.post("/admin/evict")
