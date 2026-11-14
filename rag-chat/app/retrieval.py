@@ -5,17 +5,22 @@ its wiki sections and agent packs). Points are rag-ingest's legacy text layout: 
 dense vector plus a payload of ``text``, ``source``, ``tags``, ``doc_id``, ``chunk_index`` and
 ``meta`` (``id``/``title``/``url``/``path``). Tags such as ``repo:<name>`` and ``kind:wiki`` are
 the filter handles: a search can require any number of them.
+
+Queries are embedded with Ollama + ``EMBED_MODEL`` (``TEXT_EMBEDDER``). rag-ingest stamps every
+point with the ``embedder`` that wrote it; ``embedder_status`` checks that no point in the
+collection came from a different one, because those vectors can't be compared with our queries.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http import models as qm
 
-from app.config import QDRANT_COLLECTION, QDRANT_URL
+from app.config import EMBEDDER_CHECK_TTL_S, QDRANT_COLLECTION, QDRANT_URL, TEXT_EMBEDDER
 
 log = logging.getLogger("rag-chat")
 
@@ -73,6 +78,72 @@ async def search(query: str, *, embed: Embed, top_k: int, tags: Sequence[str] = 
             await qc.close()
     log.debug("retrieval: %d hits from %s for %r tags=%s", len(hits or []), collection, query[:80], list(tags))
     return [d for d in (hit_to_dict(h) for h in hits or []) if d]
+
+
+# ---- Embedder check ------------------------------------------------------------
+
+_embedder_cache: Dict[str, tuple] = {}  # collection -> (monotonic time, status)
+
+
+def _other_embedders_filter(embedder: str) -> qm.Filter:
+    """Points labelled with another embedder. Unlabelled (pre-label) points don't match."""
+    return qm.Filter(must_not=[
+        qm.FieldCondition(key="embedder", match=qm.MatchValue(value=embedder)),
+        qm.IsEmptyCondition(is_empty=qm.PayloadField(key="embedder")),
+    ])
+
+
+def cached_embedder_status(collection: str = QDRANT_COLLECTION) -> Optional[Dict[str, Any]]:
+    """The last completed check, without touching Qdrant (for /health)."""
+    cached = _embedder_cache.get(collection)
+    return cached[1] if cached else None
+
+
+async def embedder_status(*, collection: str = QDRANT_COLLECTION, client: Any = None,
+                          force: bool = False) -> Dict[str, Any]:
+    """Whether ``collection`` holds only vectors from the embedder our queries use.
+
+    ``ok`` is True when no labelled point names another embedder, False when some do, and None
+    when the check couldn't run (Qdrant down, collection missing): callers then carry on and
+    let the search itself fail or succeed. Successful checks are cached for EMBEDDER_CHECK_TTL_S."""
+    now = time.monotonic()
+    cached = _embedder_cache.get(collection)
+    if cached and not force and now - cached[0] < EMBEDDER_CHECK_TTL_S:
+        return cached[1]
+    status: Dict[str, Any] = {"collection": collection, "expected": TEXT_EMBEDDER, "ok": None,
+                              "mismatched": 0, "unlabelled": 0, "found": []}
+    qc = client or AsyncQdrantClient(url=QDRANT_URL)
+    try:
+        flt = _other_embedders_filter(TEXT_EMBEDDER)
+        mismatched = (await qc.count(collection_name=collection, count_filter=flt, exact=True)).count
+        unlabelled = (await qc.count(
+            collection_name=collection, exact=True,
+            count_filter=qm.Filter(must=[qm.IsEmptyCondition(is_empty=qm.PayloadField(key="embedder"))]),
+        )).count
+        found: List[str] = []
+        if mismatched:
+            pts, _ = await qc.scroll(collection_name=collection, scroll_filter=flt, limit=20,
+                                     with_payload=["embedder"], with_vectors=False)
+            found = sorted({str((p.payload or {}).get("embedder")) for p in pts})
+        status.update(ok=mismatched == 0, mismatched=mismatched, unlabelled=unlabelled, found=found)
+        _embedder_cache[collection] = (now, status)
+        if mismatched:
+            log.error("retrieval: %s", mismatch_message(status))
+    except Exception as e:
+        status["error"] = str(e)
+    finally:
+        if client is None:
+            await qc.close()
+    return status
+
+
+def mismatch_message(status: Dict[str, Any]) -> str:
+    return (
+        f"collection {status['collection']!r} holds {status['mismatched']} point(s) embedded by "
+        f"{', '.join(status['found']) or 'another embedder'}, but rag-chat embeds queries with "
+        f"{status['expected']}; their vectors aren't comparable. Set EMBED_MODEL to the model that "
+        f"wrote the collection (in both services), or re-ingest it."
+    )
 
 
 def format_context(hits: Sequence[Dict[str, Any]], max_chars: int) -> Optional[str]:

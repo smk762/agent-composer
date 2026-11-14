@@ -36,6 +36,7 @@ class ReplaceOnResendTests(unittest.TestCase):
         self.q.close = self._noop_close  # one shared client across ingests
         self.emb = Embedder()
         ip._INDEXED.clear()
+        ip._EMBEDDER_OK.clear()
         self.patches = [
             mock.patch.object(ip, "AsyncQdrantClient", lambda url=None: self.q),
             mock.patch.object(ip, "_text_client", self.emb),
@@ -153,6 +154,29 @@ class ReplaceOnResendTests(unittest.TestCase):
         self.assertIsInstance(pts[0].payload["ingested_at"], int)
         self.assertIn((COLL, "doc_id"), ip._INDEXED)
 
+    def test_points_are_labelled_with_their_embedder(self):
+        res = self.ingest([{"id": "a", "text": "x"}])
+        pts, _ = asyncio.run(self.q.scroll(COLL, limit=10, with_payload=True))
+        self.assertEqual({p.payload["embedder"] for p in pts}, {ip.TEXT_EMBEDDER})
+        self.assertEqual(res["embedder"], ip.TEXT_EMBEDDER)
+        self.assertTrue(ip.TEXT_EMBEDDER.startswith("ollama:"))
+
+    def test_refuses_a_collection_written_by_another_embedder(self):
+        self.ingest([{"id": "a", "text": "theirs"}])
+        asyncio.run(self.q.set_payload(COLL, {"embedder": "infinity:some-other-model"}, points=ip.qm.Filter()))
+        ip._EMBEDDER_OK.clear()
+        with self.assertRaises(ip.EmbedderMismatchError) as cm:
+            self.ingest([{"id": "b", "text": "mine"}])
+        self.assertIn("infinity:some-other-model", str(cm.exception))
+        self.assertEqual(self.points("b"), [])  # nothing was written
+
+    def test_unlabelled_legacy_points_are_accepted(self):
+        self.ingest([{"id": "a", "text": "legacy"}])
+        asyncio.run(self.q.delete_payload(COLL, keys=["embedder"], points=ip.qm.Filter()))
+        ip._EMBEDDER_OK.clear()
+        self.ingest([{"id": "b", "text": "new"}])
+        self.assertEqual(len(self.points("b")), 1)
+
     def test_delete_docs(self):
         self.ingest([{"id": "a", "text": "A" * 150}, {"id": "b", "text": "b"}])
         self.ingest([{"id": "a", "text": "other source"}], source="else")
@@ -173,6 +197,7 @@ class CodeReplaceTests(ReplaceOnResendTests.__base__):
 
         self.q.close = _close
         ip._INDEXED.clear()
+        ip._EMBEDDER_OK.clear()
         self.patches = [
             mock.patch.object(ip, "AsyncQdrantClient", lambda url=None: self.q),
             mock.patch.object(ip, "_get_code_client", lambda: Embedder()),

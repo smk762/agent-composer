@@ -1,10 +1,11 @@
 """Embedding backend abstraction.
 
-Two backends:
-* ``ollama`` (default): one request per text against ``/api/embeddings``.
+Two backends, each pinned to one path:
+* ``ollama``: one request per text against ``/api/embeddings``. Always the text path,
+  because rag-chat embeds its queries with Ollama and both sides must share one vector space.
 * ``infinity``: batched OpenAI-shape ``/embeddings`` against the Infinity
-  sidecar. Used when ``RETRIEVAL_PROFILE=code`` so we can serve a code-
-  specialized embedder (default ``nomic-ai/CodeRankEmbed``).
+  sidecar. Always the code path, so we can serve a code-specialized embedder
+  (default ``nomic-ai/CodeRankEmbed``).
 
 Picking the model:
     The ``profile`` argument selects between the prose embedder
@@ -14,6 +15,7 @@ Picking the model:
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import List, Sequence
@@ -31,10 +33,20 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-EMBED_BACKEND = os.getenv("EMBED_BACKEND", "ollama").strip().lower()
 EMBED_BACKEND_URL = os.getenv("EMBED_BACKEND_URL", "http://infinity:7997").rstrip("/")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
 EMBED_MODEL_CODE = os.getenv("EMBED_MODEL_CODE", "nomic-ai/CodeRankEmbed")
+
+# Which embedder wrote a point, stored on every point as ``embedder``. rag-chat embeds its
+# queries with Ollama + EMBED_MODEL and builds the same label, so it can tell when a
+# collection holds vectors its queries can't be compared with.
+TEXT_EMBEDDER = f"ollama:{EMBED_MODEL}"
+CODE_EMBEDDER = f"infinity:{EMBED_MODEL_CODE}"
+
+if os.getenv("EMBED_BACKEND", "ollama").strip().lower() not in ("", "ollama"):
+    logging.getLogger("rag-ingest.embed").warning(
+        "EMBED_BACKEND=%s is ignored: text is always embedded with Ollama, the backend rag-chat "
+        "queries with (code always uses Infinity)", os.getenv("EMBED_BACKEND"))
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434").rstrip("/")
 OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "15m").strip()
 EMBED_TIMEOUT_S = _env_int("EMBED_TIMEOUT_S", 120)
@@ -217,12 +229,6 @@ class InfinityEmbeddingClient(EmbeddingClient):
             dim=len(vectors[0]) if vectors else 0,
             truncated=truncated,
         )
-
-
-def make_client() -> EmbeddingClient:
-    if EMBED_BACKEND == "infinity":
-        return InfinityEmbeddingClient()
-    return OllamaEmbeddingClient()
 
 
 # ---- Reranker (Infinity only) ------------------------------------------------

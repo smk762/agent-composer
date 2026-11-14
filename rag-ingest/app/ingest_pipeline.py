@@ -33,11 +33,12 @@ from qdrant_client.http import models as qm
 
 from app.code_chunker import CodeChunk, chunk_code, language_for_path
 from app.embeddings import (
+    CODE_EMBEDDER,
     EMBED_MODEL,
     EMBED_MODEL_CODE,
+    TEXT_EMBEDDER,
     InfinityEmbeddingClient,
     OllamaEmbeddingClient,
-    make_client,
 )
 
 
@@ -61,10 +62,10 @@ CHUNK_OVERLAP = _env_int("INGEST_CHUNK_OVERLAP", 120)
 UPSERT_BATCH_SIZE = _env_int("INGEST_UPSERT_BATCH_SIZE", 64)
 EMBED_MAX_CHARS = _env_int("EMBED_MAX_CHARS", 4000)
 
-# Single shared client; for the code path we ALWAYS go through Infinity even
-# if EMBED_BACKEND happens to be set to ollama, because Ollama doesn't host
-# code-specialized embedders.
-_text_client = make_client()
+# Each path has exactly one embedder. Text always goes through Ollama because rag-chat embeds
+# its queries there (one vector space, one place it's decided); code always goes through
+# Infinity because Ollama doesn't host code-specialized embedders.
+_text_client = OllamaEmbeddingClient()
 _code_client: Optional[InfinityEmbeddingClient] = None
 
 
@@ -129,6 +130,12 @@ def extract_doc_fields(doc: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
 
 class IngestRequestError(ValueError):
     """The request itself is unusable (rag-ingest answers 400)."""
+
+
+class EmbedderMismatchError(RuntimeError):
+    """The target collection holds vectors from another embedder (rag-ingest answers 409).
+
+    Mixing them would make every search over that collection rank by incomparable vectors."""
 
 
 def _point_id(source: Optional[str], doc_id: Optional[str], chunk_index: int, chunk_text: str) -> str:
@@ -392,6 +399,41 @@ async def delete_docs(doc_ids: List[str], *, source: Optional[str], collection: 
     return out
 
 
+# ---- Embedder guard ------------------------------------------------------------
+#
+# Points carry ``embedder`` (TEXT_EMBEDDER / CODE_EMBEDDER). A collection must only ever hold
+# one embedder's vectors: rag-ingest refuses to add to a collection labelled by another, and
+# rag-chat refuses to search one. Points from before the label are unlabelled and accepted.
+
+_EMBEDDER_OK: set = set()  # (collection, embedder) pairs already checked in this process
+
+
+def other_embedders_filter(embedder: str) -> qm.Filter:
+    """Points labelled with an embedder other than ``embedder`` (unlabelled points don't match)."""
+    return qm.Filter(must_not=[
+        qm.FieldCondition(key="embedder", match=qm.MatchValue(value=embedder)),
+        qm.IsEmptyCondition(is_empty=qm.PayloadField(key="embedder")),
+    ])
+
+
+async def _check_embedder(q: AsyncQdrantClient, collection: str, embedder: str) -> None:
+    if (collection, embedder) in _EMBEDDER_OK:
+        return
+    if await _collection_exists(q, collection):
+        flt = other_embedders_filter(embedder)
+        n = (await q.count(collection_name=collection, count_filter=flt, exact=True)).count
+        if n:
+            pts, _ = await q.scroll(collection_name=collection, scroll_filter=flt, limit=20,
+                                    with_payload=["embedder"], with_vectors=False)
+            found = sorted({str((p.payload or {}).get("embedder")) for p in pts})
+            raise EmbedderMismatchError(
+                f"collection {collection!r} holds {n} point(s) embedded by {', '.join(found)}; this "
+                f"rag-ingest embeds with {embedder}. Their vectors aren't comparable: point "
+                f"EMBED_MODEL back at the model that wrote the collection, or use a new collection."
+            )
+    _EMBEDDER_OK.add((collection, embedder))
+
+
 # ---- Per-doc ingest helpers --------------------------------------------------
 
 def _stage(state: Dict[str, Any], collection: str, identity: Optional[Identity], point: qm.PointStruct) -> None:
@@ -474,6 +516,7 @@ async def _ingest_text_doc(
             "truncated_for_embedding": was_truncated,
             "ingested_at": state["ingested_at"],
             "ingest_seq": state["ingest_seq"],
+            "embedder": TEXT_EMBEDDER,
         }
         _stage(state, coll, identity, qm.PointStruct(id=pid, vector=emb, payload=payload))
 
@@ -542,6 +585,7 @@ async def _ingest_code_doc(
             "truncated_for_embedding": was_trunc,
             "ingested_at": state["ingested_at"],
             "ingest_seq": state["ingest_seq"],
+            "embedder": CODE_EMBEDDER,
         }
 
         vector: Dict[str, Any] = {"dense": dvec}
@@ -614,6 +658,11 @@ async def ingest_docs(
 
     q = AsyncQdrantClient(url=QDRANT_URL)
     try:
+        # Refuse before spending any embedding time on a collection we must not write to.
+        if text_docs:
+            await _check_embedder(q, text_collection, TEXT_EMBEDDER)
+        if code_docs:
+            await _check_embedder(q, QDRANT_COLLECTION_CODE, CODE_EMBEDDER)
         async with _identity_locks(first_seen):
             for doc, is_code, identity in plan:
                 ingest_one = _ingest_code_doc if is_code else _ingest_text_doc
@@ -644,6 +693,7 @@ async def ingest_docs(
         "collection": QDRANT_COLLECTION_CODE if to_code else text_collection,
         "collections": collections,
         "embed_model": EMBED_MODEL_CODE if to_code else EMBED_MODEL,
+        "embedder": CODE_EMBEDDER if to_code else TEXT_EMBEDDER,
         "retrieval_profile": RETRIEVAL_PROFILE,
         "hybrid_sparse": HYBRID_SPARSE,
         "code_docs": code_docs,

@@ -121,5 +121,75 @@ class SearchEndpointTests(unittest.TestCase):
         self.assertEqual(TestClient(app).post("/search", json={"query": "q"}).status_code, 401)
 
 
+class EmbedderCheckTests(unittest.TestCase):
+    """rag-chat refuses a collection whose vectors came from another embedder (in-memory Qdrant)."""
+
+    def setUp(self):
+        from qdrant_client import AsyncQdrantClient
+        from qdrant_client.http import models as qm
+
+        retrieval._embedder_cache.clear()
+        self.addCleanup(retrieval._embedder_cache.clear)
+        self.qm = qm
+        self.q = AsyncQdrantClient(location=":memory:")
+
+        async def setup():
+            await self.q.create_collection("c", vectors_config=qm.VectorParams(size=2, distance=qm.Distance.COSINE))
+        asyncio.run(setup())
+
+    def _put(self, *embedders):
+        async def put():
+            await self.q.upsert("c", points=[
+                self.qm.PointStruct(id=i, vector=[1.0, 0.5], payload={"text": "t", **({"embedder": e} if e else {})})
+                for i, e in enumerate(embedders)])
+        asyncio.run(put())
+
+    def _status(self, **kw):
+        return asyncio.run(retrieval.embedder_status(collection="c", client=self.q, force=True, **kw))
+
+    def test_matching_and_unlabelled_points_are_ok(self):
+        self._put(retrieval.TEXT_EMBEDDER, None)
+        st = self._status()
+        self.assertEqual((st["ok"], st["mismatched"], st["unlabelled"]), (True, 0, 1))
+        self.assertEqual(retrieval.cached_embedder_status("c"), st)
+
+    def test_another_embedder_is_a_mismatch(self):
+        self._put(retrieval.TEXT_EMBEDDER, "infinity:nomic-ai/nomic-embed-text-v1.5")
+        st = self._status()
+        self.assertEqual((st["ok"], st["mismatched"], st["found"]), (False, 1, ["infinity:nomic-ai/nomic-embed-text-v1.5"]))
+        self.assertIn("aren't comparable", retrieval.mismatch_message(st))
+
+    def test_check_failure_is_unknown_not_a_mismatch(self):
+        st = asyncio.run(retrieval.embedder_status(collection="missing", client=FakeQdrant([]), force=True))
+        self.assertIsNone(st["ok"])
+        self.assertIn("error", st)
+        self.assertIsNone(retrieval.cached_embedder_status("missing"))
+
+    def test_search_and_chat_refuse_a_mismatched_collection(self):
+        from app.routers import chat, search
+
+        bad = {"collection": "audit_docs", "expected": retrieval.TEXT_EMBEDDER, "ok": False,
+               "mismatched": 3, "unlabelled": 0, "found": ["infinity:x"]}
+
+        async def status(**kw):
+            return bad
+
+        async def embed_must_not_run(_q):
+            raise AssertionError("must not embed against a mismatched collection")
+
+        app = FastAPI()
+        app.include_router(search.router)
+        app.dependency_overrides[require_user] = lambda: AuthContext(user_id="u", via="dev")
+        with patch.object(retrieval, "embedder_status", status), \
+                patch.object(search, "ollama_embed", embed_must_not_run), \
+                patch.object(chat, "ollama_embed", embed_must_not_run), \
+                patch.object(chat, "RAG_ENABLED", True):
+            r = TestClient(app).post("/search", json={"query": "q"})
+            ctx = asyncio.run(chat.rag_context_for([chat.Msg(role="user", content="hi")]))
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("infinity:x", r.json()["detail"])
+        self.assertIsNone(ctx)
+
+
 if __name__ == "__main__":
     unittest.main()

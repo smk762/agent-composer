@@ -91,9 +91,9 @@ The sidecar-side settings (`XTTS_PREPROCESS*`, `XTTS_GPT_COND_LEN`, `MISO_KEEP_A
 | `RETRIEVAL_PROFILE` | `text` | Default ingest path for docs with no `kind` and no recognised `path`: `text` or `code` |
 | `QDRANT_COLLECTION` | `audit_docs` | Text-path collection |
 | `QDRANT_COLLECTION_CODE` | `code_audit` | Code-path collection (named vectors) |
-| `EMBED_BACKEND` | `ollama` | Text-path embedder: `ollama` or `infinity`. The code path always uses Infinity. |
-| `EMBED_BACKEND_URL` | `http://infinity:7997` | Infinity endpoint |
-| `EMBED_MODEL` | `nomic-embed-text` | Text-path embedding model |
+| `EMBED_BACKEND_URL` | `http://infinity:7997` | Infinity endpoint (code path) |
+| `EMBED_MODEL` | `nomic-embed-text` | Text-path embedding model, always served by Ollama. rag-chat embeds queries with the same Ollama model, so set it identically in both services. (`EMBED_BACKEND` is retired: it is ignored, with a warning, if set to anything but `ollama`.) |
+| `EMBEDDER_CHECK_TTL_S` | `60` | rag-chat: how often the RAG collection's `embedder` labels are re-checked |
 | `EMBED_MODEL_CODE` | `nomic-ai/CodeRankEmbed` | Code-path embedding model (also preloaded by the `infinity` service) |
 | `HYBRID_SPARSE` | `0` | `1` adds a `bm25` sparse vector to code points |
 | `INGEST_CHUNK_SIZE` / `INGEST_CHUNK_OVERLAP` | `1000` / `120` | Text-path window, in characters |

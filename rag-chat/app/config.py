@@ -45,6 +45,11 @@ SYSTEM_PROMPT = os.getenv("CHAT_SYSTEM_PROMPT", "You are a helpful assistant.")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://192.168.1.109:6333")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "audit_docs")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
+# rag-chat embeds queries with Ollama + EMBED_MODEL. rag-ingest stamps text points with the
+# same label (``embedder`` payload), so retrieval can refuse a collection whose vectors came
+# from another embedder.
+TEXT_EMBEDDER = f"ollama:{EMBED_MODEL}"
+EMBEDDER_CHECK_TTL_S = float(os.getenv("EMBEDDER_CHECK_TTL_S", "60"))
 RAG_ENABLED = os.getenv("RAG_ENABLED", "1") == "1"
 RAG_TOP_K = int(os.getenv("RAG_TOP_K", "5"))
 RAG_MAX_CONTEXT_CHARS = int(os.getenv("RAG_MAX_CONTEXT_CHARS", "4000"))
