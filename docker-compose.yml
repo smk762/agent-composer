@@ -129,7 +129,6 @@ services:
       - APP_RELOAD=${APP_RELOAD:-1}
       # Code-audit retrieval (additive; defaults preserve legacy text-only behavior)
       - RETRIEVAL_PROFILE=${RETRIEVAL_PROFILE:-text}
-      - EMBED_BACKEND=${EMBED_BACKEND:-ollama}
       - EMBED_BACKEND_URL=${EMBED_BACKEND_URL:-http://infinity:7997}
       - EMBED_MODEL_CODE=${EMBED_MODEL_CODE:-nomic-ai/CodeRankEmbed}
       - HYBRID_SPARSE=${HYBRID_SPARSE:-0}

@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 
 from app.inference_retry import RetryableOomError
 from app.ingest_pipeline import (
-    QDRANT_COLLECTION, QDRANT_COLLECTION_CODE, IngestRequestError, allowed_collections, delete_docs,
+    QDRANT_COLLECTION, QDRANT_COLLECTION_CODE, EmbedderMismatchError, IngestRequestError, allowed_collections, delete_docs,
     ensure_collections_on_startup, ingest_docs,
 )
 from app.metrics import MetricsMiddleware, metrics_router
@@ -544,6 +544,8 @@ async def ingest(
                                    collection=ingest_doc.collection)
     except IngestRequestError as e:
         raise HTTPException(400, str(e))
+    except EmbedderMismatchError as e:
+        raise HTTPException(409, str(e))
     except RetryableOomError as e:
         raise HTTPException(503, str(e))
     except HTTPException:

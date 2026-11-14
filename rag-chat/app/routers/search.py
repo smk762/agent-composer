@@ -54,6 +54,9 @@ async def search(req: SearchRequest, auth: AuthContext = Depends(require_user)) 
     if not query:
         raise HTTPException(422, "query is empty")
     tags = retrieval.search_tags(req.repo, req.kind, req.tags)
+    status = await retrieval.embedder_status()
+    if status["ok"] is False:
+        raise HTTPException(409, retrieval.mismatch_message(status))
     try:
         hits = await retrieval.search(query, embed=ollama_embed, top_k=req.top_k, tags=tags)
     except HTTPException:

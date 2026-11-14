@@ -89,6 +89,25 @@ class IngestCollectionTests(unittest.TestCase):
 
 
 class IngestEndpointTests(unittest.TestCase):
+    def test_embedder_mismatch_is_409(self) -> None:
+        import json
+
+        from fastapi.testclient import TestClient
+
+        with mock.patch.dict("os.environ", {"INGEST_SHARED_SECRET": "test-only"}):
+            from app import main
+
+        async def mismatch(*a, **k):
+            raise ip.EmbedderMismatchError("collection 'audit_docs' holds 3 point(s) embedded by infinity:x")
+
+        body = json.dumps({"docs": [{"id": "d", "text": "x"}]}).encode()
+        with mock.patch.object(main, "verify_signature", lambda *a, **k: None), \
+                mock.patch.object(main, "ingest_docs", mismatch):
+            r = TestClient(main.app).post("/ingest", content=body, headers={
+                "X-Timestamp": "1", "X-Nonce": "n", "X-Signature": "s", "Content-Type": "application/json"})
+        self.assertEqual(r.status_code, 409, r.text)
+        self.assertIn("infinity:x", r.text)
+
     def test_endpoint_refuses_one_doc_sent_twice_with_400(self) -> None:
         import json
 

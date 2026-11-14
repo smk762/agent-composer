@@ -173,6 +173,9 @@ async def rag_context_for(msgs: List[Msg]) -> Optional[str]:
     query = last_user_message(msgs)
     if not query:
         return None
+    status = await retrieval.embedder_status()
+    if status["ok"] is False:  # logged by embedder_status; answering without context beats wrong context
+        return None
     try:
         q_emb = await ollama_embed(query)
     except HTTPException:
@@ -272,6 +275,8 @@ def health():
         "ok": True,
         "model": CHAT_MODEL,
         "auth": "dev-bypass" if DEV_AUTH_BYPASS else "access/api-key",
+        # Last embedder check of the RAG collection (null until the first one finishes).
+        "embedder": retrieval.cached_embedder_status(),
     }
 
 

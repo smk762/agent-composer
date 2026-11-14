@@ -28,7 +28,7 @@ Otherwise the route returns `401 Authentication required`. `GET /health` reports
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| GET | `/health` | open | `{ok, model, auth}` |
+| GET | `/health` | open | `{ok, model, auth, embedder}`; `embedder` is the last check of the RAG collection (see below), `null` before the first |
 | GET | `/models` | open | Ollama chat models (embedding models filtered out); names are tag-qualified, e.g. `llama3.2:3b` |
 | GET | `/conversations` | auth | The caller's conversations |
 | POST | `/conversations` | auth | Create an empty conversation |
@@ -105,7 +105,7 @@ The passages `/chat` would inject, as JSON, for agents and tools that want to re
 | `kind` | string | Shorthand for the tag `kind:<kind>`: ai-code-auditor sends `kind:wiki` (one doc per wiki `##` section), `kind:agent_coding_pack`, `kind:mithrandir_latest` and its report kinds. |
 | `tags` | list | Further tags; a hit must carry every requested tag. |
 
-Response: `{collection, tags, hits: [{score, doc_id, chunk_index, title, url, path, source, tags, text}]}`, best first. A Qdrant failure is a 502, as is a failed embedding.
+Response: `{collection, tags, hits: [{score, doc_id, chunk_index, title, url, path, source, tags, text}]}`, best first. A Qdrant failure is a 502, as is a failed embedding. A 409 means the collection holds points from another embedder (see *One embedder per collection*).
 
 ```bash
 curl -s http://127.0.0.1:9150/search -H "Authorization: Bearer ${CHAT_API_KEY}" -H "Content-Type: application/json" \
@@ -257,6 +257,8 @@ Routing works per doc. An explicit `kind` wins. Otherwise a `path` with a known 
 | Collection | `QDRANT_COLLECTION` (unnamed dense vector) | `QDRANT_COLLECTION_CODE` (default `code_audit`; named `dense` vector, plus `bm25` when `HYBRID_SPARSE=1`) |
 
 rag-chat's `/chat` RAG context and `/search` read only `QDRANT_COLLECTION`. The code collection is consumed by ai-code-auditor.
+
+**One embedder per collection.** Text is always embedded with Ollama + `EMBED_MODEL` (the backend rag-chat queries with) and code with Infinity + `EMBED_MODEL_CODE`. Every point carries `embedder` (`ollama:<EMBED_MODEL>` or `infinity:<EMBED_MODEL_CODE>`, also returned in the ingest response). `/ingest` answers **409** instead of writing into a collection that holds points labelled with another embedder; rag-chat checks the same at startup and before searching (cached `EMBEDDER_CHECK_TTL_S`): on a mismatch `/search` answers **409** and `/chat` answers without RAG context. Points written before the label are unlabelled and accepted.
 
 The response contains `ok`, `chunks`, `upserted`, `skipped_chunks`, `truncated_chunks`, `collection`, `embed_model`, `retrieval_profile`, `hybrid_sparse`, `code_docs`, `text_docs`, `docs_with_id`, `docs_with_identity` (id- and path-keyed), `pruned`, `incomplete_docs` (ids or paths that lost chunks to context overflow) and `collections` (every collection the request wrote; `collection`/`embed_model` follow the docs when they all went to one, else the profile).
 
