@@ -1,0 +1,13 @@
+---
+description: Where to commit and push fixes made while reviewing a branch or PR
+alwaysApply: true
+---
+
+# Review fixes
+
+When you make fixes as part of a code review (including Bugbot, security review, or PR feedback):
+
+- Commit and push the fixes to the branch under review. Don't leave them uncommitted, and don't open a separate branch or PR.
+- Check out the reviewed branch first if you aren't already on it.
+- Use a clear commit message that describes the fix, for example `fix: handle empty diff in repair loop`.
+- Never force-push. If the push is rejected, pull or rebase and retry.

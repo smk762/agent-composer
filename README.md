@@ -66,7 +66,7 @@ Qdrant, Postgres and MinIO run outside this compose file (`QDRANT_URL`, `DATABAS
 .
 ├─ docker-compose.yml            # full stack (Qdrant/Postgres/MinIO are external)
 ├─ docker-compose.lan-ollama.yml # optional overlay exposing Ollama on the LAN
-├─ env.example
+├─ .env.example
 ├─ docs/                         # api.md, configuration.md, integration-guide.md
 ├─ rag-ingest/app/               # main.py (signing, /ingest), ingest_pipeline.py, code_chunker.py, embeddings.py
 ├─ rag-chat/app/                 # main.py wires routers/
@@ -92,7 +92,7 @@ Qdrant, Postgres and MinIO run outside this compose file (`QDRANT_URL`, `DATABAS
 Copy the example and fill in values:
 
 ```bash
-cp env.example .env
+cp .env.example .env
 ```
 
 Required:

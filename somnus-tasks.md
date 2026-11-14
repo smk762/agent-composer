@@ -1,6 +1,6 @@
 # Digital Familiar — task tracker
 
-> Hosts in this doc are placeholders (`<AGENT_HOST>`, `<STATEFUL_HOST>`, `<NAS_HOST>`, …). The real host/IP is in the local `.env` (see `env.example`); check it there.
+> Hosts in this doc are placeholders (`<AGENT_HOST>`, `<STATEFUL_HOST>`, `<NAS_HOST>`, …). The real host/IP is in the local `.env` (see `.env.example`); check it there.
 
 Status key: ✅ done · 🔧 in progress · ⬜ not started · ⏭ skipped
 

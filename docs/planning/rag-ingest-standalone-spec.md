@@ -1,6 +1,6 @@
 # `rag-ingest` Standalone Repo Specification
 
-> Hosts in this doc are placeholders (`<AGENT_HOST>`, `<STATEFUL_HOST>`, `<NAS_HOST>`, …). The real host/IP is in the local `.env` (see `env.example`); check it there.
+> Hosts in this doc are placeholders (`<AGENT_HOST>`, `<STATEFUL_HOST>`, `<NAS_HOST>`, …). The real host/IP is in the local `.env` (see `.env.example`); check it there.
 
 ## Goal
 Create a standalone repo to deploy `rag-ingest` as an independent service on `<AGENT_HOST>`, with external dependencies:
@@ -40,7 +40,7 @@ Create a standalone repo to deploy `rag-ingest` as an independent service on `<A
 1. **Repo structure**
    - `docker-compose.yml` (single service: `rag-ingest`)
    - `rag-ingest/` app code + `Dockerfile`
-   - `env.example`
+   - `.env.example`
    - `README.md`
    - `scripts/smoke_test.sh` (or python equivalent)
 
@@ -104,7 +104,7 @@ Must support at minimum:
    - No bundled infra services.
 
 5. **Configuration + docs**
-   - `env.example` with comments and production notes.
+   - `.env.example` with comments and production notes.
    - README with curl/python examples and signature reference.
 
 6. **Validation tooling**

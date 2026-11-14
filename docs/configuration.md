@@ -1,6 +1,6 @@
 # Configuration
 
-Every service reads its settings from environment variables, which compose passes through from `.env` (`cp env.example .env`). This page lists the user-facing ones by service. Defaults are the code defaults; where `docker-compose.yml` sets a different default, the compose value is noted. `env.example` has the full annotated list.
+Every service reads its settings from environment variables, which compose passes through from `.env` (`cp .env.example .env`). This page lists the user-facing ones by service. Defaults are the code defaults; where `docker-compose.yml` sets a different default, the compose value is noted. `.env.example` has the full annotated list.
 
 ## Security-relevant
 
@@ -69,7 +69,7 @@ Some rag-chat APIs are unauthenticated: guard, `/metrics`, and the read-only and
 | `MISO_SENTENCE_PAUSE_MS` / `MAX_SENTENCE_PAUSE_MS` | `300` / `2000` | Silence inserted between Miso sentences |
 | `S3_ENDPOINT_URL`, `S3_PUBLIC_URL`, `S3_BUCKET_NAME`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | | Shared "voice" MinIO bucket for clones and re-hosted audio |
 
-The sidecar-side settings (`XTTS_PREPROCESS*`, `XTTS_GPT_COND_LEN`, `MISO_KEEP_ALIVE_*`, Wyoming bridge vars) are described in `voice-stack/VOICE_CLONING.md` and `env.example`.
+The sidecar-side settings (`XTTS_PREPROCESS*`, `XTTS_GPT_COND_LEN`, `MISO_KEEP_ALIVE_*`, Wyoming bridge vars) are described in `voice-stack/VOICE_CLONING.md` and `.env.example`.
 
 ## rag-chat: sidecars and repair
 

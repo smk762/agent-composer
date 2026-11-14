@@ -1,6 +1,6 @@
 # Voice Stack
 
-> Hosts in this doc are placeholders (`<AGENT_HOST>`, `<STATEFUL_HOST>`, `<NAS_HOST>`, …). The real host/IP is in the local `.env` (see `env.example`); check it there.
+> Hosts in this doc are placeholders (`<AGENT_HOST>`, `<STATEFUL_HOST>`, `<NAS_HOST>`, …). The real host/IP is in the local `.env` (see `.env.example`); check it there.
 
 faster-whisper STT (port 8030, GPU) and Qwen3-TTS (port 8031, GPU), integrated
 into the main `docker-compose.yml`. Both services share the GPU — inference is
