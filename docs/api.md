@@ -9,7 +9,7 @@ Routes served by each service in this stack, with their auth requirements and ke
 Routes marked **auth** below resolve a user in this order (`rag-chat/app/auth.py`):
 
 1. `Authorization: Bearer <key>`: an API key created at `/ui/api-keys` or via `POST /api-keys`. An unknown or revoked key returns `401 Invalid API key`.
-2. `Cf-Access-Authenticated-User-Email`: the header Cloudflare Access sets on authenticated requests. The email becomes the user id.
+2. A Cloudflare Access JWT: the `Cf-Access-Jwt-Assertion` header, else the `CF_Authorization` cookie. rag-chat checks its signature against `https://<CF_ACCESS_TEAM_DOMAIN>/cdn-cgi/access/certs`, its audience (`CF_ACCESS_AUD`, the Access app's AUD tag), issuer and expiry, and the token's `email` claim becomes the user id. A bad token returns 401. The `Cf-Access-Authenticated-User-Email` header is never trusted alone: sent without a token it returns 401. If either setting is unset, Access tokens are refused.
 3. `DEV_AUTH_BYPASS=1`: no credentials needed. The user id is the `X-Dev-User` header, else `DEV_DEFAULT_USER` (default `dev@example.com`). **Use this for local development only.** With it on, anyone who can reach the port is authenticated.
 
 Otherwise the route returns `401 Authentication required`. `GET /health` reports which mode is active (`"auth": "dev-bypass"` or `"access/api-key"`).

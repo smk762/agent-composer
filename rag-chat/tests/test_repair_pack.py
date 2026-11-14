@@ -481,12 +481,19 @@ class RepairAuthGateTest(unittest.TestCase):
         self.assertEqual(self._run(git_ops={"enabled": True}).status_code, 401)
 
     def test_access_identity_allows_apply(self) -> None:
-        r = self.client.post(
-            "/api/repair/run",
-            json={"repo": "argus-cortex", "diff": "--- a\n+++ b\n", "validate_tests": False, "apply": True},
-            headers={"Cf-Access-Authenticated-User-Email": "ops@example.com"},
-        )
-        self.assertEqual(r.status_code, 200)
+        from app import auth
+        from test_access_auth import AUD, TEAM, _FakeJwks, _token
+
+        body = {"repo": "argus-cortex", "diff": "--- a\n+++ b\n", "validate_tests": False, "apply": True}
+        with patch.object(auth, "CF_ACCESS_TEAM_DOMAIN", TEAM), patch.object(auth, "CF_ACCESS_AUD", AUD), \
+                patch.object(auth, "_jwks_client", lambda team: _FakeJwks()):
+            r = self.client.post("/api/repair/run", json=body,
+                                 headers={"Cf-Access-Jwt-Assertion": _token(email="ops@example.com")})
+            self.assertEqual(r.status_code, 200)
+            # The bare email header is forgeable and never enough on its own.
+            r = self.client.post("/api/repair/run", json=body,
+                                 headers={"Cf-Access-Authenticated-User-Email": "ops@example.com"})
+            self.assertEqual(r.status_code, 401)
 
     def test_read_only_runs_stay_open(self) -> None:
         self.assertEqual(self._run(mode="review").status_code, 200)

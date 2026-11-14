@@ -10,6 +10,8 @@ Every service reads its settings from environment variables, which compose passe
 | `INGEST_REQUIRE_ENCRYPTION` | rag-ingest | `0` | `1` requires a Fernet envelope `{"token": …}` on `/ingest` |
 | `INGEST_MAX_SKEW_S` | rag-ingest | `300` | Accepted clock skew for `X-Timestamp` |
 | `DEV_AUTH_BYPASS` | rag-chat | `0` | **`1` disables authentication.** Every request is accepted as `X-Dev-User` or `DEV_DEFAULT_USER`. Local development only. |
+| `CF_ACCESS_TEAM_DOMAIN` | rag-chat | (empty) | Cloudflare Access team domain (e.g. `myteam.cloudflareaccess.com`). With `CF_ACCESS_AUD`, enables Access identity: the Access JWT is verified against this team's certs. Empty = Access tokens refused. |
+| `CF_ACCESS_AUD` | rag-chat | (empty) | Application Audience (AUD) tag of the Access app; the JWT's `aud` must contain it. |
 | `DEV_DEFAULT_USER` | rag-chat | `dev@example.com` | User id when bypassing auth without `X-Dev-User` |
 | `PROVIDER_ENCRYPTION_KEY` | rag-chat | (empty) | Passphrase (PBKDF2 → Fernet) that encrypts stored image/video provider API keys. **If unset, provider keys are stored as plain base64**, and only a startup warning is logged. Set it before configuring any provider. Changing it later makes existing stored keys unreadable. |
 | `CF_TUNNEL_TOKEN` | cloudflared | (empty) | Only needed with `--profile cloud` |
