@@ -23,7 +23,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from app.inference_retry import RetryableOomError
-from app.ingest_pipeline import ensure_collections_on_startup, ingest_docs
+from app.ingest_pipeline import allowed_collections, ensure_collections_on_startup, ingest_docs
 from app.metrics import MetricsMiddleware, metrics_router
 from app.nonce_store import (
     NonceStore,
@@ -170,6 +170,14 @@ class IngestDoc(BaseModel):
     )
     source: Optional[str] = Field(None, description="Source identifier (e.g. 'grocy', 'growdb')")
     tags: Optional[list[str]] = Field(default_factory=list)
+    collection: Optional[str] = Field(
+        None,
+        description=(
+            "Text collection to write to instead of QDRANT_COLLECTION. Must be the default or listed "
+            "in INGEST_ALLOWED_COLLECTIONS; anything else is refused (400), never redirected. "
+            "Code docs always go to QDRANT_COLLECTION_CODE."
+        ),
+    )
 
 @app.get("/health")
 def health():
@@ -518,8 +526,12 @@ async def ingest(
     # - chunk
     # - embed via Ollama
     # - upsert into Qdrant
+    if ingest_doc.collection and ingest_doc.collection not in allowed_collections():
+        raise HTTPException(400, f"Collection {ingest_doc.collection!r} is not allowed (INGEST_ALLOWED_COLLECTIONS)")
+
     try:
-        result = await ingest_docs(ingest_doc.docs, source=ingest_doc.source, tags=ingest_doc.tags or [])
+        result = await ingest_docs(ingest_doc.docs, source=ingest_doc.source, tags=ingest_doc.tags or [],
+                                   collection=ingest_doc.collection)
     except RetryableOomError as e:
         raise HTTPException(503, str(e))
     except HTTPException:

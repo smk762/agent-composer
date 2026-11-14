@@ -117,6 +117,8 @@ services:
       - OLLAMA_URL=http://ollama:11434
       - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-15m}
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-project_docs}
+      # Extra text collections a signed request may target with `collection` (comma list; e.g. audit_docs)
+      - INGEST_ALLOWED_COLLECTIONS=${INGEST_ALLOWED_COLLECTIONS:-}
       - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
       - INGEST_CHUNK_SIZE=${INGEST_CHUNK_SIZE:-1000}
       - INGEST_CHUNK_OVERLAP=${INGEST_CHUNK_OVERLAP:-120}
