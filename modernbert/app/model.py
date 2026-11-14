@@ -7,8 +7,9 @@ import gc
 import logging
 import os
 import time
+from contextlib import asynccontextmanager
 from enum import Enum
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 import torch
 from transformers import AutoModel, AutoModelForSequenceClassification, AutoTokenizer
@@ -30,6 +31,10 @@ class ModelManager:
 
     keep_alive_gpu  seconds on GPU after last use before demoting to CPU  (-1 = forever, 0 = immediate)
     keep_alive_cpu  seconds on CPU after GPU eviction before full unload  (-1 = forever, 0 = immediate)
+
+    Inference must hold a lease (``async with manager.use(): ...``) for as long as it touches
+    ``model``/``tokenizer``. Demotion and unload wait until no lease is held, and the idle timer
+    only starts when the last lease is released.
     """
 
     def __init__(self) -> None:
@@ -46,6 +51,9 @@ class ModelManager:
         self._last_used: float = 0.0
         self._lock: asyncio.Lock = asyncio.Lock()
         self._evict_task: Optional[asyncio.Task] = None
+        self._in_use: int = 0
+        self._idle: asyncio.Event = asyncio.Event()
+        self._idle.set()
 
     # ------------------------------------------------------------------ props
 
@@ -131,39 +139,75 @@ class ModelManager:
 
     # ------------------------------------------------------------------ public
 
-    async def ensure_ready(self, num_labels: int = 2) -> None:
-        """Guarantee model is on GPU (or CPU if MODERNBERT_DEVICE=cpu) and reset keep-alive."""
-        async with self._lock:
-            if self._state == ModelState.GPU:
-                pass
-            elif self._state == ModelState.CPU:
-                await self._promote()
-            elif self._state in (ModelState.UNLOADED, ModelState.ERROR):
-                await self._do_load(num_labels)
-                await self._promote()
-            # LOADING is serialised by the lock — can't reach here from outside
+    async def _make_ready(self, num_labels: int) -> None:
+        # Caller holds self._lock.
+        if self._state == ModelState.GPU:
+            pass
+        elif self._state == ModelState.CPU:
+            await self._promote()
+        elif self._state in (ModelState.UNLOADED, ModelState.ERROR):
+            await self._do_load(num_labels)
+            await self._promote()
+        # LOADING is serialised by the lock — can't reach here from outside
 
+    async def ensure_ready(self, num_labels: int = 2) -> None:
+        """Guarantee model is on GPU (or CPU if MODERNBERT_DEVICE=cpu) and reset keep-alive.
+
+        Does not protect a following inference; use ``use()`` for that.
+        """
+        async with self._lock:
+            await self._make_ready(num_labels)
             self._last_used = time.time()
-            self._arm_evict()
+            if self._in_use == 0:
+                self._arm_evict()
+
+    @asynccontextmanager
+    async def use(self, num_labels: int = 2) -> AsyncIterator["ModelManager"]:
+        """Make the model ready and hold it for the whole block.
+
+        While any lease is held the model is neither demoted nor unloaded. Don't call
+        ``ensure_ready``/``evict``/``unload`` inside the block: they take the lock that a
+        waiting demote/unload holds, which would deadlock.
+        """
+        async with self._lock:
+            await self._make_ready(num_labels)
+            self._in_use += 1
+            self._idle.clear()
+            if self._evict_task and not self._evict_task.done():
+                self._evict_task.cancel()
+        try:
+            yield self
+        finally:
+            self._in_use -= 1
+            self._last_used = time.time()
+            if self._in_use == 0:
+                self._idle.set()
+                self._arm_evict()
 
     async def evict(self) -> None:
-        """Move GPU → CPU without full unload."""
+        """Move GPU → CPU without full unload (waits for in-flight inference)."""
         async with self._lock:
+            await self._idle.wait()
             if self._state == ModelState.GPU:
                 await self._demote()
 
+    def _unload_locked(self) -> None:
+        if self._model is not None:
+            del self._model
+            self._model = None
+            gc.collect()
+            torch.cuda.empty_cache()
+        self._state = ModelState.UNLOADED
+        logger.info("Model unloaded")
+
     async def unload(self) -> None:
-        """Full unload; frees both VRAM and RAM."""
+        """Full unload; frees both VRAM and RAM (waits for in-flight inference)."""
         async with self._lock:
-            if self._evict_task and not self._evict_task.done():
+            await self._idle.wait()
+            if (self._evict_task and not self._evict_task.done()
+                    and self._evict_task is not asyncio.current_task()):
                 self._evict_task.cancel()
-            if self._model is not None:
-                del self._model
-                self._model = None
-                gc.collect()
-                torch.cuda.empty_cache()
-            self._state = ModelState.UNLOADED
-            logger.info("Model unloaded")
+            self._unload_locked()
 
     # ------------------------------------------------------------------ timer
 
@@ -173,28 +217,30 @@ class ModelManager:
         self._evict_task = asyncio.create_task(self._eviction_loop())
 
     async def _eviction_loop(self) -> None:
+        # Armed when the model goes idle (last lease released, or ensure_ready with no lease);
+        # any new lease cancels it. A stage that finds a lease held just stops: its release re-arms.
         try:
             # --- GPU keep-alive ---
-            if self.keep_alive_gpu == 0:
+            if self.keep_alive_gpu < 0:
+                return  # stay resident forever
+            if self._state == ModelState.GPU:
+                if self.keep_alive_gpu > 0:
+                    await asyncio.sleep(self.keep_alive_gpu)
                 async with self._lock:
-                    if self._state == ModelState.GPU:
-                        await self._demote()
-            elif self.keep_alive_gpu > 0:
-                await asyncio.sleep(self.keep_alive_gpu)
-                idle = time.time() - self._last_used
-                if idle >= self.keep_alive_gpu:
-                    async with self._lock:
-                        if self._state == ModelState.GPU:
-                            await self._demote()
-            # keep_alive_gpu < 0 → stay on GPU forever
+                    if self._state != ModelState.GPU or self._in_use:
+                        return
+                    await self._demote()
+            elif self._state != ModelState.CPU:
+                return  # unloaded / error: nothing to evict
 
-            # --- CPU keep-alive ---
-            if self.keep_alive_cpu == 0:
-                await self.unload()
-            elif self.keep_alive_cpu > 0:
+            # --- CPU keep-alive --- (after a GPU→CPU demotion, or CPU-resident to begin with)
+            if self.keep_alive_cpu < 0:
+                return  # stay on CPU forever
+            if self.keep_alive_cpu > 0:
                 await asyncio.sleep(self.keep_alive_cpu)
-                if time.time() - self._last_used >= self.keep_alive_gpu + self.keep_alive_cpu:
-                    await self.unload()
-            # keep_alive_cpu < 0 → stay on CPU forever
+            async with self._lock:
+                if self._state != ModelState.CPU or self._in_use:
+                    return
+                self._unload_locked()
         except asyncio.CancelledError:
             pass

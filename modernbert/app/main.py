@@ -25,8 +25,8 @@ classifier = Classifier(manager)
 async def lifespan(app: FastAPI):
     if int(os.environ.get("MODERNBERT_PRELOAD", "0")):
         try:
-            await manager.ensure_ready()
-            await classifier._embed_labels()
+            async with manager.use():
+                await classifier._embed_labels()
             logger.info("Preload complete")
         except Exception as exc:
             logger.warning("Preload failed (%s) — will load on first request", exc)
