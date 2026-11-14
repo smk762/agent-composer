@@ -140,15 +140,22 @@ def _doc_is_code(doc: Dict[str, Any], meta: Dict[str, Any]) -> bool:
 
 # ---- Collection lifecycle ----------------------------------------------------
 
-async def ensure_legacy_collection(client: AsyncQdrantClient, *, vector_size: int) -> None:
+def allowed_collections() -> set[str]:
+    """Text collections a request may target: the default plus INGEST_ALLOWED_COLLECTIONS."""
+    extra = {c.strip() for c in os.getenv("INGEST_ALLOWED_COLLECTIONS", "").split(",") if c.strip()}
+    return {QDRANT_COLLECTION} | extra
+
+
+async def ensure_legacy_collection(client: AsyncQdrantClient, *, vector_size: int,
+                                   name: str = QDRANT_COLLECTION) -> None:
     """Legacy unnamed-dense-vector collection (RETRIEVAL_PROFILE=text)."""
     try:
-        await client.get_collection(QDRANT_COLLECTION)
+        await client.get_collection(name)
         return
     except Exception:
         pass
     await client.create_collection(
-        collection_name=QDRANT_COLLECTION,
+        collection_name=name,
         vectors_config=qm.VectorParams(size=vector_size, distance=qm.Distance.COSINE),
     )
 
@@ -263,9 +270,10 @@ async def _ingest_text_doc(
         if was_truncated:
             state["truncated_chunks"] += 1
 
-        if not state["created_collections"].get(QDRANT_COLLECTION):
-            await ensure_legacy_collection(q, vector_size=len(emb))
-            state["created_collections"][QDRANT_COLLECTION] = True
+        coll = state["text_collection"]
+        if not state["created_collections"].get(coll):
+            await ensure_legacy_collection(q, vector_size=len(emb), name=coll)
+            state["created_collections"][coll] = True
 
         pid = _point_id(source, doc_id, idx, chunk)
         payload = {
@@ -277,11 +285,11 @@ async def _ingest_text_doc(
             "meta": meta,
             "truncated_for_embedding": was_truncated,
         }
-        state["batches"][QDRANT_COLLECTION].append(
+        state["batches"][coll].append(
             qm.PointStruct(id=pid, vector=emb, payload=payload)
         )
         state["total_chunks"] += 1
-        await _flush_batch(q, state, QDRANT_COLLECTION)
+        await _flush_batch(q, state, coll)
 
 
 async def _ingest_code_doc(
@@ -372,13 +380,20 @@ async def ingest_docs(
     *,
     source: Optional[str],
     tags: List[str],
+    collection: Optional[str] = None,
 ) -> Dict[str, Any]:
+    """Ingest docs. ``collection`` overrides the text collection for this request; it must be
+    in allowed_collections() (the caller validates). Code docs always go to QDRANT_COLLECTION_CODE."""
+    text_collection = collection or QDRANT_COLLECTION
+    if text_collection not in allowed_collections():
+        raise ValueError(f"collection {text_collection!r} is not allowed")
     q = AsyncQdrantClient(url=QDRANT_URL)
 
     # Separate batches per collection so a mixed code+text ingest doesn't
     # accidentally upsert points into the wrong place.
     state: Dict[str, Any] = {
-        "batches": {QDRANT_COLLECTION: [], QDRANT_COLLECTION_CODE: []},
+        "text_collection": text_collection,
+        "batches": {text_collection: [], QDRANT_COLLECTION_CODE: []},
         "created_collections": {},
         "total_chunks": 0,
         "upserted": 0,
@@ -414,11 +429,11 @@ async def ingest_docs(
             text_docs += 1
 
     # Final flush of both batches.
-    await _flush_batch(q, state, QDRANT_COLLECTION, force=True)
+    await _flush_batch(q, state, text_collection, force=True)
     await _flush_batch(q, state, QDRANT_COLLECTION_CODE, force=True)
     await q.close()
 
-    target_collection = QDRANT_COLLECTION_CODE if profile_default_code else QDRANT_COLLECTION
+    target_collection = QDRANT_COLLECTION_CODE if profile_default_code else text_collection
     return {
         "ok": True,
         "chunks": state["total_chunks"],

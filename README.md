@@ -105,6 +105,7 @@ Optional:
 - `CHAT_MODEL`: default Ollama model for chat (example: `llama3.2:3b`)
 - `CHAT_SYSTEM_PROMPT`: default system prompt
 - `QDRANT_COLLECTION`: collection that `rag-ingest` writes text docs to and `rag-chat` retrieves from (default `project_docs`). Code docs go to `QDRANT_COLLECTION_CODE`.
+- `INGEST_ALLOWED_COLLECTIONS`: comma-separated extra text collections a signed `/ingest` request may target with its optional `collection` field (e.g. `audit_docs` for ai-code-auditor's packs and wiki, kept out of the chat's `project_docs`). `QDRANT_COLLECTION` is always allowed; any other collection is refused with 400, never redirected. `rag-chat` still retrieves only from `QDRANT_COLLECTION`.
 - `RAG_ENABLED`: `1` (default) injects Qdrant context into `/chat`; `0` turns retrieval off. Tune with `RAG_TOP_K` and `RAG_MAX_CONTEXT_CHARS`.
 - `CHAT_HISTORY_MAX_MSGS`: messages kept per conversation (default `100`; older ones are pruned; `0` keeps everything).
 - `DEV_AUTH_BYPASS`: **`1` disables rag-chat authentication** (requests run as `X-Dev-User` or `DEV_DEFAULT_USER`). Local development only. Never enable it on an exposed instance.
