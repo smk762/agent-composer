@@ -21,6 +21,7 @@ import hashlib
 import json
 import logging
 import os
+import time
 import uuid
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
@@ -213,6 +214,86 @@ async def ensure_collections_on_startup() -> None:
         await client.close()
 
 
+# ---- Replace on re-send ------------------------------------------------------
+#
+# A doc that carries an ``id`` has an identity: (collection, source, doc_id). Code docs
+# without an id fall back to (collection, source, repo, path). When a request writes an
+# identity, every older point of that identity that the request didn't write is deleted,
+# after all of the request's upserts succeeded. Ids stay content-addressed, so a failure
+# mid-request leaves each doc's previous chunks in place. Docs with neither id nor path
+# keep the old append-only behaviour.
+
+Identity = Tuple[str, Optional[str], str, str, Optional[str]]  # collection, source, field, value, repo
+
+_INDEXED: set = set()
+
+
+def _remember(state: Dict[str, Any], identity: Optional[Identity], pid: str) -> None:
+    if identity is not None:
+        state["written"].setdefault(identity, set()).add(pid)
+
+
+def identity_filter(source: Optional[str], field: str, value: str, repo: Optional[str] = None,
+                    by_repo: bool = False) -> qm.Filter:
+    """Points of one doc identity. ``source=None`` matches points stored without a source."""
+    must: List[Any] = [qm.FieldCondition(key=field, match=qm.MatchValue(value=value))]
+    if source is None:
+        must.append(qm.IsNullCondition(is_null=qm.PayloadField(key="source")))
+    else:
+        must.append(qm.FieldCondition(key="source", match=qm.MatchValue(value=source)))
+    if by_repo:
+        if repo:
+            must.append(qm.FieldCondition(key="repo", match=qm.MatchValue(value=repo)))
+        else:
+            must.append(qm.IsNullCondition(is_null=qm.PayloadField(key="repo")))
+    return qm.Filter(must=must)
+
+
+async def ensure_payload_indexes(q: AsyncQdrantClient, collection: str, fields: Iterable[str]) -> None:
+    """Keyword indexes so identity filters stay cheap. Best effort, once per process."""
+    for field in fields:
+        if (collection, field) in _INDEXED:
+            continue
+        try:
+            await q.create_payload_index(collection_name=collection, field_name=field,
+                                         field_schema=qm.PayloadSchemaType.KEYWORD, wait=True)
+        except Exception as e:  # already there with another schema, or Qdrant trouble
+            log.debug("payload index %s.%s not created: %s", collection, field, e)
+        _INDEXED.add((collection, field))
+
+
+async def _prune_replaced(q: AsyncQdrantClient, state: Dict[str, Any]) -> int:
+    """Delete each written identity's points that this request didn't write. Returns the count."""
+    pruned = 0
+    for (collection, source, field, value, repo), keep in state["written"].items():
+        by_repo = field == "path"
+        await ensure_payload_indexes(q, collection, ["doc_id", "source"] + (["path", "repo"] if by_repo else []))
+        flt = identity_filter(source, field, value, repo, by_repo)
+        flt.must_not = [qm.HasIdCondition(has_id=sorted(keep))]
+        stale = (await q.count(collection_name=collection, count_filter=flt, exact=True)).count
+        if stale:
+            await q.delete(collection_name=collection, points_selector=qm.FilterSelector(filter=flt), wait=True)
+            pruned += stale
+    return pruned
+
+
+async def delete_docs(doc_ids: List[str], *, source: Optional[str], collection: str) -> Dict[str, Any]:
+    """Remove every point of the given doc ids (for ``source``) from ``collection``."""
+    q = AsyncQdrantClient(url=QDRANT_URL)
+    try:
+        await ensure_payload_indexes(q, collection, ["doc_id", "source"])
+        deleted = 0
+        for doc_id in dict.fromkeys(doc_ids):
+            flt = identity_filter(source, "doc_id", doc_id)
+            n = (await q.count(collection_name=collection, count_filter=flt, exact=True)).count
+            if n:
+                await q.delete(collection_name=collection, points_selector=qm.FilterSelector(filter=flt), wait=True)
+                deleted += n
+    finally:
+        await q.close()
+    return {"ok": True, "collection": collection, "docs": len(set(doc_ids)), "deleted": deleted}
+
+
 # ---- Per-doc ingest helpers --------------------------------------------------
 
 async def _flush_batch(
@@ -284,7 +365,9 @@ async def _ingest_text_doc(
             "chunk_index": idx,
             "meta": meta,
             "truncated_for_embedding": was_truncated,
+            "ingested_at": state["ingested_at"],
         }
+        _remember(state, (coll, source, "doc_id", doc_id, None) if doc_id else None, pid)
         state["batches"][coll].append(
             qm.PointStruct(id=pid, vector=emb, payload=payload)
         )
@@ -340,7 +423,8 @@ async def _ingest_code_doc(
         if was_trunc:
             state["truncated_chunks"] += 1
 
-        pid = _point_id(source, doc_id or path, idx, chunk.text)
+        # repo is part of a path-keyed id: the same file in two repos must not share points.
+        pid = _point_id(source, doc_id or (f"{repo}|{path}" if repo else path), idx, chunk.text)
         payload: Dict[str, Any] = {
             "text": chunk.text,
             "source": source,
@@ -357,7 +441,12 @@ async def _ingest_code_doc(
             "end_line": chunk.end_line,
             "commit_sha": commit_sha,
             "truncated_for_embedding": was_trunc,
+            "ingested_at": state["ingested_at"],
         }
+        if doc_id:
+            _remember(state, (QDRANT_COLLECTION_CODE, source, "doc_id", doc_id, None), pid)
+        elif path:
+            _remember(state, (QDRANT_COLLECTION_CODE, source, "path", path, repo), pid)
 
         vector: Dict[str, Any] = {"dense": dvec}
         if svec is not None:
@@ -395,6 +484,8 @@ async def ingest_docs(
         "text_collection": text_collection,
         "batches": {text_collection: [], QDRANT_COLLECTION_CODE: []},
         "created_collections": {},
+        "written": {},
+        "ingested_at": int(time.time()),
         "total_chunks": 0,
         "upserted": 0,
         "skipped_chunks": 0,
@@ -431,13 +522,19 @@ async def ingest_docs(
     # Final flush of both batches.
     await _flush_batch(q, state, text_collection, force=True)
     await _flush_batch(q, state, QDRANT_COLLECTION_CODE, force=True)
-    await q.close()
+    try:
+        # Only now, with every new chunk stored, retire the old versions.
+        pruned = await _prune_replaced(q, state)
+    finally:
+        await q.close()
 
     target_collection = QDRANT_COLLECTION_CODE if profile_default_code else text_collection
     return {
         "ok": True,
         "chunks": state["total_chunks"],
         "upserted": state["upserted"],
+        "docs_with_id": len(state["written"]),
+        "pruned": pruned,
         "skipped_chunks": state["skipped_chunks"],
         "truncated_chunks": state["truncated_chunks"],
         "collection": target_collection,

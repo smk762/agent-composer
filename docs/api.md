@@ -239,7 +239,8 @@ These are server-rendered HTML pages. The pages themselves are open, and the API
 |---|---|---|---|
 | GET | `/health` | open | |
 | GET | `/ui/ingest` | open | Browser form that signs requests client-side. It only works when `INGEST_REQUIRE_ENCRYPTION=0`. |
-| POST | `/ingest` | HMAC | `{docs: [...], source?, tags?}` |
+| POST | `/ingest` | HMAC | `{docs: [...], source?, tags?, collection?}` |
+| POST | `/delete` | HMAC | `{doc_ids: [...], source, collection?, kind?}`: remove docs that no longer exist |
 
 Each doc accepts:
 - **Text:** one of `text`, `content`, `page_content` or `body`, plus optional `id`, `doc_id`, `title`, `url` and `source`, which are stored as point payload. A doc with none of the text fields is indexed as its JSON.
@@ -255,7 +256,18 @@ Routing works per doc. An explicit `kind` wins. Otherwise a `path` with a known 
 
 rag-chat's `/chat` RAG context and `/search` read only `QDRANT_COLLECTION`. The code collection is consumed by ai-code-auditor.
 
-The response contains `ok`, `chunks`, `upserted`, `skipped_chunks`, `truncated_chunks`, `collection`, `embed_model`, `retrieval_profile`, `hybrid_sparse`, `code_docs` and `text_docs`.
+The response contains `ok`, `chunks`, `upserted`, `skipped_chunks`, `truncated_chunks`, `collection`, `embed_model`, `retrieval_profile`, `hybrid_sparse`, `code_docs`, `text_docs`, `docs_with_id` and `pruned`.
+
+**Re-sending a doc replaces it.**
+- **Identity:** a doc's identity is its `id` (or `doc_id`) plus the request's `source`. Code docs without an id fall back to `repo` + `path`.
+- **Prune:** after every chunk in the request is stored, rag-ingest deletes that identity's older points that the request didn't write, and reports them as `pruned`. Point ids stay content-addressed, so a request that fails part-way deletes nothing and each doc keeps its previous version.
+- **Edge cases:** an unchanged re-send prunes nothing. Two docs with the same id in one request are both kept. Docs with neither id nor path stay append-only.
+- **Payload:** each point carries `ingested_at` (unix seconds), and keyword indexes on `doc_id` and `source` (plus `path` and `repo` for code) keep the deletes cheap.
+
+`POST /delete` is signed like `/ingest` and retires docs a sender no longer has, such as a removed wiki section or a resolved pack.
+- **Body:** `{"doc_ids": [...] (1–1000), "source": "<required>", "collection"?: "<allowed text collection>", "kind"?: "text"|"code"}`.
+- **Scope:** only points with that `source` are removed.
+- **Response:** `{ok, collection, docs, deleted}`.
 
 ---
 
