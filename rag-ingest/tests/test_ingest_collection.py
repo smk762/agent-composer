@@ -1,9 +1,16 @@
 """Per-request collection for /ingest: allow-listed, never silently redirected."""
 
 import asyncio
+import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest import mock
+
+# app.main opens its nonce store at import, at /data/nonces.db by default. CI sets
+# INGEST_NONCE_DB; other runners (pytest, the audit validator) may not, so default
+# to a temp dir instead of failing with PermissionError on /data.
+os.environ.setdefault("INGEST_NONCE_DB", os.path.join(tempfile.mkdtemp(prefix="ingest-test-"), "nonces.db"))
 
 from app import ingest_pipeline as ip
 
