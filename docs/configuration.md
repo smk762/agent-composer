@@ -124,12 +124,13 @@ infinity-manager is a small proxy on port 7997. It starts an Infinity child proc
 
 | Variable | Default | Notes |
 |---|---|---|
-| `INFINITY_MODEL_IDS` | `nomic-ai/CodeRankEmbed,BAAI/bge-reranker-v2-m3` | Compose builds it from `EMBED_MODEL_CODE` and `RERANK_MODEL` |
+| `INFINITY_MODEL_IDS` | `nomic-ai/CodeRankEmbed` (compose: `EMBED_MODEL_CODE`) | Models the child loads, comma-separated. Add `BAAI/bge-reranker-v2-m3` to serve `/rerank` (+1.26 GB VRAM); nothing calls it today |
 | `INFINITY_IDLE_TIMEOUT` | `900` (compose: `300`) | Seconds idle before the child is stopped |
 | `INFINITY_PRELOAD` | `0` | Start the child at boot |
 | `INFINITY_STARTUP_TIMEOUT` / `INFINITY_REQUEST_TIMEOUT` | `180` / `300` | |
 | `INFINITY_ENGINE` / `INFINITY_DEVICE` | `torch` / `cuda` | |
-| `INFINITY_EXTRA_ARGS`, `INFINITY_CHILD_CMD` | (empty) | Extra CLI args, or a full override of the child command |
+| `INFINITY_EXTRA_ARGS` | (empty; compose: `--batch-size 8`) | Extra CLI args for the child. Batch size drives peak VRAM: CodeRankEmbed peaks at 1.3 GB with batch 8 and 3.5 GB with batch 32 on 4000-char chunks, and the peak stays reserved until the idle stop |
+| `INFINITY_CHILD_CMD` | (empty) | Full override of the child command |
 | `INFINITY_MANAGER_HOST`/`_PORT`, `INFINITY_CHILD_HOST`/`_PORT` | `0.0.0.0:7997`, `127.0.0.1:7998` | Internal wiring; rarely changed |
 
 ## Client scripts (`scripts/`)

@@ -13,7 +13,7 @@ Three FastAPI services plus sidecars, all wired together in `docker-compose.yml`
 | `modernbert` | 7998 | ModernBERT classifier sidecar (lazy-load GPU, zero-shot or fine-tuned) |
 | `qdrant` | 6333/6334 | Vector store on the stateful node (`<STATEFUL_HOST>`; not in this compose) |
 | `postgres` | 5432 | Chat history DB on the stateful node (AsyncSQLAlchemy + Alembic; not in this compose) |
-| `infinity` | 7997 | Infinity sidecar serving CodeRankEmbed + bge-reranker (code-audit path) |
+| `infinity` | 7997 | Infinity sidecar serving CodeRankEmbed (code-audit path; batch 8 ≈ 1.3 GB VRAM peak; the bge reranker is opt-in via `INFINITY_MODEL_IDS`) |
 | `ollama` | 11434 | Local LLM runtime (internal only) |
 | `whisper` | 8030 | faster-whisper STT sidecar (GPU, CTranslate2, large-v3-turbo) |
 | `xtts` | 8033→8031 | XTTS-v2 sidecar (GPU, zero-shot cloning + streaming) — local TTS engine |
