@@ -116,7 +116,7 @@ services:
       - QDRANT_URL=${QDRANT_URL:?set QDRANT_URL in .env (see env.example)}
       - OLLAMA_URL=http://ollama:11434
       - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-15m}
-      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-project_docs}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-audit_docs}
       # Extra text collections a signed request may target with `collection` (comma list; e.g. audit_docs)
       - INGEST_ALLOWED_COLLECTIONS=${INGEST_ALLOWED_COLLECTIONS:-}
       - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
@@ -173,7 +173,7 @@ services:
       - GUARD_WORKER_CONCURRENCY=${GUARD_WORKER_CONCURRENCY:-1}
       - CHAT_SYSTEM_PROMPT=${CHAT_SYSTEM_PROMPT:-You are a helpful assistant.}
       - QDRANT_URL=${QDRANT_URL:?set QDRANT_URL in .env (see env.example)}
-      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-project_docs}
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION:-audit_docs}
       - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
       - RAG_ENABLED=${RAG_ENABLED:-1}
       - RAG_TOP_K=${RAG_TOP_K:-5}

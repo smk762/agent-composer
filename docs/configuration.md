@@ -30,7 +30,7 @@ Some rag-chat APIs are unauthenticated: guard, `/metrics`, and the read-only and
 | `RAG_TOP_K` | `5` | Qdrant hits injected per turn |
 | `RAG_MAX_CONTEXT_CHARS` | `4000` | Cap on the injected context |
 | `QDRANT_URL` | `http://<STATEFUL_HOST>:6333` | Shared with rag-ingest |
-| `QDRANT_COLLECTION` | `project_docs` | Collection that `/chat` retrieves from and the text ingest path writes to |
+| `QDRANT_COLLECTION` | `audit_docs` | Collection that `/chat` and `/search` retrieve from and the text ingest path writes to (`project_docs` is deprecated) |
 | `EMBED_MODEL` | `nomic-embed-text` | Must match the model the collection was ingested with (same vector size) |
 | `CHAT_DB_URL` / `DATABASE_URL` | `sqlite:////data/chat.db` | Chat history DB. `postgresql://…` is rewritten to `postgresql+asyncpg://`. The DB is created on startup if missing, then Alembic migrates it. |
 | `CHAT_HISTORY_MAX_MSGS` | `100` | Each conversation is pruned to its newest N messages after each turn; `0` keeps everything |
@@ -89,7 +89,7 @@ The sidecar-side settings (`XTTS_PREPROCESS*`, `XTTS_GPT_COND_LEN`, `MISO_KEEP_A
 | Variable | Default | Notes |
 |---|---|---|
 | `RETRIEVAL_PROFILE` | `text` | Default ingest path for docs with no `kind` and no recognised `path`: `text` or `code` |
-| `QDRANT_COLLECTION` | `project_docs` | Text-path collection |
+| `QDRANT_COLLECTION` | `audit_docs` | Text-path collection |
 | `QDRANT_COLLECTION_CODE` | `code_audit` | Code-path collection (named vectors) |
 | `EMBED_BACKEND` | `ollama` | Text-path embedder: `ollama` or `infinity`. The code path always uses Infinity. |
 | `EMBED_BACKEND_URL` | `http://infinity:7997` | Infinity endpoint |
