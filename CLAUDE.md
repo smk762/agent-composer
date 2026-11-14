@@ -43,6 +43,10 @@ python -m pytest tests/test_code_chunker.py::test_python_function -v
 # Endpoint smoke test (requires running stack)
 python3 scripts/test_endpoints.py
 
+# Ingest a repo's code into QDRANT_COLLECTION_CODE (signed; re-run replaces a file's chunks)
+INGEST_URL=http://<host>:9050 python3 scripts/ingest_code.py rag-chat/app rag-ingest/app
+python3 scripts/ingest_code.py --root /path/to/other-repo --repo other-repo --dry-run
+
 # Pull a model once
 docker exec -it ollama ollama pull qwen2.5-coder:32b
 ```
