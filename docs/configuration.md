@@ -30,7 +30,7 @@ Some rag-chat APIs are unauthenticated: guard, `/metrics`, and the read-only and
 | `RAG_TOP_K` | `5` | Qdrant hits injected per turn |
 | `RAG_MAX_CONTEXT_CHARS` | `4000` | Cap on the injected context |
 | `QDRANT_URL` | `http://<STATEFUL_HOST>:6333` | Shared with rag-ingest |
-| `QDRANT_COLLECTION` | `audit_docs` | Collection that `/chat` and `/search` retrieve from and the text ingest path writes to (`project_docs` is deprecated) |
+| `QDRANT_COLLECTION` | `audit_docs` | Collection that `/chat` and `/search` retrieve from and the text ingest path writes to |
 | `EMBED_MODEL` | `nomic-embed-text` | Must match the model the collection was ingested with (same vector size) |
 | `CHAT_DB_URL` / `DATABASE_URL` | `sqlite:////data/chat.db` | Chat history DB. `postgresql://…` is rewritten to `postgresql+asyncpg://`. The DB is created on startup if missing, then Alembic migrates it. |
 | `CHAT_HISTORY_MAX_MSGS` | `100` | Each conversation is pruned to its newest N messages after each turn; `0` keeps everything |

@@ -193,10 +193,12 @@ Runs a multi-model agentic repair loop (fixer → critic → adversary), validat
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
-| POST | `/api/repair/run` | open / auth | SSE stream; events: `started`, `pack_loaded`, `iteration`, `warning`, `error`, `complete`. **Auth is required when `apply: true` or `git_ops.enabled`**, and the call fails with 401 before any work starts. Review, suggest and temp-copy `auto_fix` runs stay open. |
-| GET | `/api/repair/jobs/{job_id}` | open | Final job state |
+| POST | `/api/repair/run` | open / auth | SSE stream; events: `started`, `pack_loaded`, `iteration`, `warning`, `error`, `complete`. **Auth is required when `apply: true` or `git_ops.enabled`**, and the call fails with 401 before any work starts. Review, suggest and temp-copy `auto_fix` runs stay open. 503 when 200 jobs are already running. |
+| GET | `/api/repair/jobs/{job_id}` | open | Job state; the job keeps running if the SSE client disconnects, so poll this for the outcome |
 
 Key fields (`app/repair/models.py`): `repo`, `diff` or `compare_branch`, `pack_id` (an ai-code-auditor pack; `repo` may then be omitted), `audit_api_base`, `errors`, `mode` (`auto_fix`, `review` or `suggest`), `apply`, `git_ops`, `fix_model`, `critique_model`, `adversarial_model`, `max_iterations` (1–10, default 3), `validate_tests`.
+
+Only a patch that no validation rejected is applied: `complete.final_patch` is the last such patch (else the last one proposed, with `patch_validated: false`), and an `apply` run without one applies nothing and says so in `error`. The pack's `resolved` callback fires only after that validated patch was applied.
 
 > **SSRF:** `audit_api_base` is supplied by the client, and the server issues GET requests to it, plus a status-callback POST. Only `http(s)` URLs are accepted, but no host allowlist exists yet, and read-only runs are unauthenticated. Expose this route only to trusted callers. `ai-audit repair` sends its token as a Bearer key, so set it to a rag-chat API key for `apply` runs.
 
@@ -256,18 +258,19 @@ Routing works per doc. An explicit `kind` wins. Otherwise a `path` with a known 
 
 rag-chat's `/chat` RAG context and `/search` read only `QDRANT_COLLECTION`. The code collection is consumed by ai-code-auditor.
 
-The response contains `ok`, `chunks`, `upserted`, `skipped_chunks`, `truncated_chunks`, `collection`, `embed_model`, `retrieval_profile`, `hybrid_sparse`, `code_docs`, `text_docs`, `docs_with_id` and `pruned`.
+The response contains `ok`, `chunks`, `upserted`, `skipped_chunks`, `truncated_chunks`, `collection`, `embed_model`, `retrieval_profile`, `hybrid_sparse`, `code_docs`, `text_docs`, `docs_with_id`, `docs_with_identity` (id- and path-keyed), `pruned`, `incomplete_docs` (ids or paths that lost chunks to context overflow) and `collections` (every collection the request wrote; `collection`/`embed_model` follow the docs when they all went to one, else the profile).
 
 **Re-sending a doc replaces it.**
 - **Identity:** a doc's identity is its `id` (or `doc_id`) plus the request's `source`. Code docs without an id fall back to `repo` + `path`.
-- **Prune:** after every chunk in the request is stored, rag-ingest deletes that identity's older points that the request didn't write, and reports them as `pruned`. Point ids stay content-addressed, so a request that fails part-way deletes nothing and each doc keeps its previous version.
-- **Edge cases:** an unchanged re-send prunes nothing. Two docs with the same id in one request are both kept. Docs with neither id nor path stay append-only.
-- **Payload:** each point carries `ingested_at` (unix seconds), and keyword indexes on `doc_id` and `source` (plus `path` and `repo` for code) keep the deletes cheap.
+- **Prune:** nothing is upserted until every doc in the request is embedded; then rag-ingest stores the chunks and deletes that identity's older points that the request didn't write, reporting them as `pruned`. A request that fails part-way writes and deletes nothing, so each doc keeps its previous version.
+- **Concurrency:** requests that touch the same identity (and `/delete` of it) are serialised, so overlapping re-sends end with exactly one version. A prune only removes points older than its own request (`ingest_seq`).
+- **Edge cases:** an unchanged re-send prunes nothing. One identity sent twice in one request is refused with 400. `id: 0` is an id. A re-send whose chunks all overflow the embedder still replaces the old version and is listed in `incomplete_docs`. Docs with neither id nor path stay append-only.
+- **Payload:** each point carries `ingested_at` (unix seconds) and `ingest_seq` (unix ns, the request's write order), and keyword indexes on `doc_id` and `source` (plus `path` and `repo` for code) keep the deletes cheap.
 
 `POST /delete` is signed like `/ingest` and retires docs a sender no longer has, such as a removed wiki section or a resolved pack.
-- **Body:** `{"doc_ids": [...] (1–1000), "source": "<required>", "collection"?: "<allowed text collection>", "kind"?: "text"|"code"}`.
+- **Body:** `{"doc_ids"?: [...] (≤1000), "paths"?: [...] (≤1000, `kind: "code"` only), "repo"?: "<repo of the paths>", "source": "<required>", "collection"?: "<allowed text collection>", "kind"?: "text"|"code"}`. At least one doc id or path is required. `paths` + `repo` remove code docs that were ingested without an id. `collection` with `kind: "code"` is a 400, not ignored.
 - **Scope:** only points with that `source` are removed.
-- **Response:** `{ok, collection, docs, deleted}`.
+- **Response:** `{ok, collection, docs, deleted}` (plus `paths` when given).
 
 ---
 

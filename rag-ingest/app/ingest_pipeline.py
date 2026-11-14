@@ -3,8 +3,8 @@
 Two paths share most of the code:
 
 * **Text (legacy)** — ``RETRIEVAL_PROFILE=text``. One unnamed dense vector per
-  chunk via Ollama. Writes ``QDRANT_COLLECTION`` (default ``audit_docs``;
-  the old ``project_docs`` is deprecated) in the legacy unnamed-vector layout. No tree-sitter, no sparse vectors.
+  chunk via Ollama. Writes ``QDRANT_COLLECTION`` (default ``audit_docs``)
+  in the legacy unnamed-vector layout. No tree-sitter, no sparse vectors.
 
 * **Code-audit** — ``RETRIEVAL_PROFILE=code``. Tree-sitter chunks per
   function/class, dense vector via the Infinity sidecar (default

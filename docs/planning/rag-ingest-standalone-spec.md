@@ -73,7 +73,7 @@ Must support at minimum:
 - `INGEST_REDIS_URL` (required when nonce store is redis)
 - `INGEST_NONCE_KEY_PREFIX` (default `ingest:nonce:`)
 - `QDRANT_URL` (required; set to `http://<AGENT_HOST>:6333`)
-- `QDRANT_COLLECTION` (default `audit_docs`; `project_docs` is deprecated)
+- `QDRANT_COLLECTION` (default `audit_docs`)
 - `OLLAMA_URL` (required; set to `http://<AGENT_HOST>:11434`)
 - `EMBED_MODEL` (QA profile: `mxbai-embed-large`; must be pulled on Ollama host)
 - `INGEST_CHUNK_SIZE`, `INGEST_CHUNK_OVERLAP`, `INGEST_UPSERT_BATCH_SIZE`
