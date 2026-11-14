@@ -74,6 +74,10 @@ RAG_TOP_K = int(os.getenv("RAG_TOP_K", "5"))
 RAG_MAX_CONTEXT_CHARS = int(os.getenv("RAG_MAX_CONTEXT_CHARS", "4000"))
 DEV_AUTH_BYPASS = os.getenv("DEV_AUTH_BYPASS", "0") == "1"
 DEV_DEFAULT_USER = os.getenv("DEV_DEFAULT_USER", "dev@example.com")
+# Cloudflare Access: identity comes only from a verified Cf-Access-Jwt-Assertion
+# (or CF_Authorization cookie). Both must be set or Access identity is refused.
+CF_ACCESS_TEAM_DOMAIN = os.getenv("CF_ACCESS_TEAM_DOMAIN", "").strip().removeprefix("https://").rstrip("/")
+CF_ACCESS_AUD = os.getenv("CF_ACCESS_AUD", "").strip()
 CHAT_HISTORY_MAX_MSGS = int(os.getenv("CHAT_HISTORY_MAX_MSGS", "100"))
 OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "300"))
 OOM_WAIT_MAX_SECONDS = _env_int("OOM_WAIT_MAX_SECONDS", 180)

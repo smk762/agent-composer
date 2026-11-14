@@ -33,11 +33,12 @@ from typing import Optional
 
 import httpx
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.auth import require_user
+from app.db import get_db
 from app.config import (
     MAX_SENTENCE_PAUSE_MS,
     TTS_DEFAULT_ENGINE,
@@ -564,25 +565,33 @@ _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 
 def _slugify(name: str) -> str:
-    slug = _SLUG_RE.sub("-", (name or "").strip().lower()).strip("-")
+    # TTS sidecars accept companion ids of at most 64 chars ([A-Za-z0-9_-]).
+    slug = _SLUG_RE.sub("-", (name or "").strip().lower()).strip("-")[:64].strip("-")
     return slug or f"voice-{int(time.time())}"
 
 
 @router.post("/clone")
 async def clone_voice(
+    request: Request,
     audio: list[UploadFile] = File(...),
     voice_name: str = Form(...),
     companion_id: Optional[str] = Form(default=None),
     reference_text: str = Form(default=""),
+    replace: bool = Form(default=False),
     engine: Optional[str] = Query(default=None),
+    db=Depends(get_db),
 ):
     """Create a voice clone from one or more reference clips on the chosen engine.
 
     Forwards every uploaded clip to the engine's `/clone-voice`. XTTS averages
     the speaker embedding across clips for a more robust clone than a single
     short take; Miso is one-shot (best single clip). `companion_id` defaults to
-    a slug of `voice_name`.
+    a slug of `voice_name`. An engine that guards existing clones (`tts`)
+    answers 409 unless `replace` is true; overwriting is destructive, so
+    `replace=true` requires an authenticated caller (like clone delete).
     """
+    if replace:
+        await require_user(request, db)
     _require_tts()
     base = _tts_base(engine)
 
@@ -597,7 +606,12 @@ async def clone_voice(
         files.append(
             ("audio", (clip.filename or f"clip-{i}.wav", data, clip.content_type or "audio/wav"))
         )
-    form = {"companion_id": cid, "voice_name": voice_name, "reference_text": reference_text}
+    form = {
+        "companion_id": cid,
+        "voice_name": voice_name,
+        "reference_text": reference_text,
+        "replace": "true" if replace else "false",
+    }
 
     t0 = time.monotonic()
     try:

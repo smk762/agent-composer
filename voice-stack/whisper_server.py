@@ -20,15 +20,33 @@ Env vars:
   STT_VAD_FILTER      — "1" (default) to enable Silero VAD pre-filter
   STT_BEAM_SIZE       — beam size for decoding (default 5)
   STT_KEEP_ALIVE_GPU  — seconds on GPU before eviction. -1 = forever. Default 120.
+  STT_DOWNLOAD_TIMEOUT — seconds allowed for an audio_url download (default 30).
+  STT_AUDIO_URL_ALLOWED_HOSTS — comma-separated `host` or `host:port` entries
+                        that /transcriptions may fetch even though they resolve
+                        to a private/loopback address (e.g. `minio:9000` or the
+                        stateful node's MinIO). Default empty: only http(s) URLs
+                        whose host resolves to public addresses are fetched.
+
+audio_url SSRF policy (/transcriptions):
+  Only http/https URLs are fetched. Unless the host is in
+  STT_AUDIO_URL_ALLOWED_HOSTS, every address the hostname resolves to must be
+  public (no loopback, private, link-local/metadata, CGNAT, reserved, multicast
+  or unspecified ranges, IPv4 or IPv6, incl. IPv4-mapped IPv6), and the request
+  is pinned to the vetted IP (Host header + TLS SNI keep the original name), so
+  a DNS rebind between the check and the fetch can't redirect it. Redirects are
+  not followed, and every failure returns the same generic 400/502 message.
 """
 
 import asyncio
 import base64
 import gc
+import ipaddress
 import os
+import socket
 import tempfile
 import time
 from typing import Optional
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 import structlog
@@ -45,6 +63,13 @@ STT_VAD_FILTER = os.getenv("STT_VAD_FILTER", "1") == "1"
 STT_BEAM_SIZE = int(os.getenv("STT_BEAM_SIZE", "5"))
 STT_DOWNLOAD_TIMEOUT = int(os.getenv("STT_DOWNLOAD_TIMEOUT", "30"))
 STT_KEEP_ALIVE_GPU: float = float(os.getenv("STT_KEEP_ALIVE_GPU", "120"))
+
+
+def _parse_allowed_hosts(raw: str) -> frozenset[str]:
+    return frozenset(h.strip().lower() for h in raw.split(",") if h.strip())
+
+
+STT_AUDIO_URL_ALLOWED_HOSTS = _parse_allowed_hosts(os.getenv("STT_AUDIO_URL_ALLOWED_HOSTS", ""))
 
 _model = None
 _last_used: float = 0.0
@@ -191,6 +216,110 @@ async def _run_transcription(tmp_path: str, language: str | None, endpoint: str)
     return result
 
 
+# ── audio_url fetch (SSRF-guarded) ────────────────────────────────────────────
+
+_AUDIO_URL_REJECTED = "audio_url is not an allowed http(s) URL"
+_AUDIO_URL_FAILED = "Could not download audio_url"
+
+
+class AudioURLError(Exception):
+    """audio_url rejected or not fetchable; `status` is the HTTP code to return."""
+
+    def __init__(self, status: int, detail: str) -> None:
+        super().__init__(detail)
+        self.status = status
+        self.detail = detail
+
+
+def _ip_is_public(addr: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(addr.split("%", 1)[0])
+    except ValueError:
+        return False
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    return ip.is_global and not ip.is_multicast
+
+
+def _host_allowlisted(host: str, port: int, allowed: frozenset[str]) -> bool:
+    host = host.lower()
+    if ":" in host:  # IPv6 literal: entries use the bracketed form
+        host = f"[{host}]"
+    return host in allowed or f"{host}:{port}" in allowed
+
+
+async def _resolve_host(host: str, port: int) -> list[str]:
+    infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    return [info[4][0] for info in infos]
+
+
+async def _vet_audio_url(url: str, allowed: Optional[frozenset[str]] = None) -> tuple[list[str], dict, dict]:
+    """Validate `url` and return (fetch_urls, headers, extensions) for httpx.
+
+    For a non-allowlisted host there is one fetch URL per vetted address, in
+    resolver order, each targeting that IP directly (tried in turn, like a
+    normal connect falls back across a dual-stack host's addresses); the Host
+    header and TLS SNI (``sni_hostname``) keep the original name so virtual
+    hosting and certificate checks still work."""
+    allowed = STT_AUDIO_URL_ALLOWED_HOSTS if allowed is None else allowed
+    try:
+        parts = urlsplit(url)
+        scheme = parts.scheme.lower()
+        host = parts.hostname
+        port = parts.port or (443 if scheme == "https" else 80)
+    except ValueError:
+        raise AudioURLError(400, _AUDIO_URL_REJECTED)
+    if scheme not in ("http", "https") or not host or parts.username or parts.password:
+        raise AudioURLError(400, _AUDIO_URL_REJECTED)
+
+    if _host_allowlisted(host, port, allowed):
+        return [url], {}, {}
+
+    try:
+        addrs = await _resolve_host(host, port)
+    except (OSError, UnicodeError):
+        raise AudioURLError(400, _AUDIO_URL_REJECTED)
+    if not addrs or not all(_ip_is_public(a) for a in addrs):
+        logger.warning("stt_audio_url_rejected", host=host, reason="non_public_address")
+        raise AudioURLError(400, _AUDIO_URL_REJECTED)
+
+    pinned: list[str] = []
+    for addr in addrs:
+        ip = addr.split("%", 1)[0]
+        ip_host = f"[{ip}]" if ":" in ip else ip
+        netloc = f"{ip_host}:{parts.port}" if parts.port else ip_host
+        target = urlunsplit((scheme, netloc, parts.path or "/", parts.query, ""))
+        if target not in pinned:
+            pinned.append(target)
+    host_header = parts.netloc.rsplit("@", 1)[-1]
+    extensions = {"sni_hostname": host} if scheme == "https" else {}
+    return pinned, {"Host": host_header}, extensions
+
+
+async def _fetch_audio_url(url: str) -> bytes:
+    fetch_urls, headers, extensions = await _vet_audio_url(url)
+    resp = None
+    try:
+        async with httpx.AsyncClient(
+            timeout=STT_DOWNLOAD_TIMEOUT, follow_redirects=False, trust_env=False
+        ) as client:
+            for i, fetch_url in enumerate(fetch_urls):
+                try:
+                    resp = await client.get(fetch_url, headers=headers, extensions=extensions)
+                    break
+                except (httpx.ConnectError, httpx.ConnectTimeout):
+                    # This address is unreachable (e.g. IPv6 in an IPv4-only network): try the next.
+                    if i == len(fetch_urls) - 1:
+                        raise
+    except httpx.HTTPError as exc:
+        logger.warning("stt_audio_url_fetch_failed", error_type=type(exc).__name__)
+        raise AudioURLError(502, _AUDIO_URL_FAILED)
+    if resp is None or resp.status_code != 200:
+        logger.warning("stt_audio_url_fetch_failed", status=getattr(resp, "status_code", None))
+        raise AudioURLError(502, _AUDIO_URL_FAILED)
+    return resp.content
+
+
 # ── App ───────────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Voice Stack — Whisper STT", version="1.1.0")
@@ -246,20 +375,12 @@ async def transcriptions(req: TranscriptionRequest):
 
     if req.audio_url:
         try:
-            async with httpx.AsyncClient(timeout=STT_DOWNLOAD_TIMEOUT) as client:
-                resp = await client.get(req.audio_url)
-                resp.raise_for_status()
-                audio_bytes = resp.content
-        except httpx.ConnectError as exc:
-            raise HTTPException(502, detail=f"Cannot reach audio URL: {exc}")
-        except httpx.HTTPStatusError as exc:
-            raise HTTPException(502, detail=f"Audio download failed: HTTP {exc.response.status_code}")
-        except httpx.TimeoutException:
-            raise HTTPException(502, detail=f"Audio download timed out ({STT_DOWNLOAD_TIMEOUT}s)")
+            audio_bytes = await _fetch_audio_url(req.audio_url)
+        except AudioURLError as exc:
+            raise HTTPException(exc.status, detail=exc.detail)
 
         # Infer suffix from URL path or content-type
-        from urllib.parse import urlparse
-        url_path = urlparse(req.audio_url).path
+        url_path = urlsplit(req.audio_url).path
         ext = os.path.splitext(url_path)[1]
         if ext:
             suffix = ext

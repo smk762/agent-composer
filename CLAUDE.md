@@ -112,7 +112,7 @@ See `scripts/example_tool_calling_client.py` and `scripts/test_endpoints.py` for
 
 ## Cloudflare
 
-`cloudflared` is on the `cloud` compose profile and only starts with `docker compose --profile cloud up`. For LAN-only dev, omit the profile. Published ports bind to loopback by default; set `BIND_ADDR` (all services) or a per-service `RAG_INGEST_BIND_IP` / `RAG_CHAT_BIND_IP` / `OLLAMA_BIND_IP` / `WYOMING_{TTS,MISO,STT}_BIND_IP` to expose them on the LAN.
+`cloudflared` is on the `cloud` compose profile and only starts with `docker compose --profile cloud up`. For LAN-only dev, omit the profile. rag-chat accepts a Cloudflare Access user only from a verified Access JWT (`Cf-Access-Jwt-Assertion` / `CF_Authorization` cookie; needs `CF_ACCESS_TEAM_DOMAIN` + `CF_ACCESS_AUD`), never from the bare `Cf-Access-Authenticated-User-Email` header. Published ports bind to loopback by default; set `BIND_ADDR` (all services) or a per-service `RAG_INGEST_BIND_IP` / `RAG_CHAT_BIND_IP` / `OLLAMA_BIND_IP` / `WYOMING_{TTS,MISO,STT}_BIND_IP` to expose them on the LAN.
 
 ## Branches
 

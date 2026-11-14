@@ -48,15 +48,24 @@ class Classifier:
         self.labels = labels
         self._label_embeddings = None
         if self.manager.state in (ModelState.CPU, ModelState.GPU):
-            await self._embed_labels()
+            async with self.manager.use():
+                await self._embed_labels()
 
-    async def _embed_labels(self) -> None:
-        if not self.labels:
-            return
+    async def _embed_labels(self, labels: Optional[List[str]] = None) -> Optional[torch.Tensor]:
+        """Embed ``labels`` (default: the current set) and return the embeddings.
+
+        Caller must hold a manager.use() lease. The result is cached only if the label set
+        hasn't been replaced meanwhile, so the cache always matches ``self.labels``."""
+        labels = self.labels if labels is None else labels
+        if not labels:
+            return None
         loop = asyncio.get_event_loop()
-        embs = await loop.run_in_executor(None, lambda: self._encode_sync(self.labels))
-        self._label_embeddings = F.normalize(embs, dim=-1)
-        logger.debug("Label embeddings ready (%d labels)", len(self.labels))
+        embs = await loop.run_in_executor(None, lambda: self._encode_sync(labels))
+        embs = F.normalize(embs, dim=-1)
+        if self.labels is labels:
+            self._label_embeddings = embs
+            logger.debug("Label embeddings ready (%d labels)", len(labels))
+        return embs
 
     # ----------------------------------------------------------------- encode
 
@@ -91,22 +100,25 @@ class Classifier:
         return await self._zero_shot(text, top_k, threshold)
 
     async def _zero_shot(self, text: str, top_k: int, threshold: float) -> ClassifyResponse:
-        if not self.labels:
+        # Snapshot the label set and its embeddings together (no await in between): a
+        # concurrent update_labels() replaces both, and must not mix into this request.
+        labels, label_embs = self.labels, self._label_embeddings
+        if not labels:
             return ClassifyResponse(labels=[], scores=[], raw={}, task="zero_shot",
                                     model=self.manager.model_id, model_state=self.manager.state)
 
-        await self.manager.ensure_ready()
-        if self._label_embeddings is None:
-            await self._embed_labels()
+        async with self.manager.use():
+            if label_embs is None:
+                label_embs = await self._embed_labels(labels)
 
-        loop = asyncio.get_event_loop()
-        text_emb = await loop.run_in_executor(
-            None, lambda: F.normalize(self._encode_sync([text]), dim=-1)
-        )
-        label_embs = self._label_embeddings.to(text_emb.device)
-        scores = (text_emb @ label_embs.T).squeeze(0).cpu().tolist()
+            loop = asyncio.get_event_loop()
+            text_emb = await loop.run_in_executor(
+                None, lambda: F.normalize(self._encode_sync([text]), dim=-1)
+            )
+            label_embs = label_embs.to(text_emb.device)
+            scores = (text_emb @ label_embs.T).squeeze(0).cpu().tolist()
 
-        ranked = sorted(zip(self.labels, scores), key=lambda x: -x[1])
+        ranked = sorted(zip(labels, scores), key=lambda x: -x[1])
         top = [(l, s) for l, s in ranked if s >= threshold][:top_k]
 
         return ClassifyResponse(
@@ -120,8 +132,6 @@ class Classifier:
 
     async def _supervised(self, text: str, top_k: int, threshold: float) -> ClassifyResponse:
         num_labels = len(self.labels) or 2
-        await self.manager.ensure_ready(num_labels=num_labels)
-
         loop = asyncio.get_event_loop()
 
         def _run():
@@ -136,7 +146,8 @@ class Classifier:
                 return torch.softmax(logits, dim=-1).squeeze(0).cpu().tolist()
             return torch.sigmoid(logits).squeeze(0).cpu().tolist()
 
-        probs = await loop.run_in_executor(None, _run)
+        async with self.manager.use(num_labels=num_labels):
+            probs = await loop.run_in_executor(None, _run)
         named = list(zip(self.labels or [f"class_{i}" for i in range(len(probs))], probs))
         ranked = sorted(named, key=lambda x: -x[1])
         top = [(l, s) for l, s in ranked if s >= threshold][:top_k]
@@ -153,8 +164,8 @@ class Classifier:
     # ----------------------------------------------------------------- embed
 
     async def embed(self, req: EmbedRequest) -> EmbedResponse:
-        await self.manager.ensure_ready()
-        loop = asyncio.get_event_loop()
-        embs = await loop.run_in_executor(None, lambda: self._encode_sync(req.texts))
-        vecs = embs.cpu().tolist()
+        async with self.manager.use():
+            loop = asyncio.get_event_loop()
+            embs = await loop.run_in_executor(None, lambda: self._encode_sync(req.texts))
+            vecs = embs.cpu().tolist()
         return EmbedResponse(embeddings=vecs, model=self.manager.model_id, dim=embs.shape[-1])

@@ -515,21 +515,25 @@ def history_ui():
             return;
           }}
           statusEl.textContent = "";
+          // Titles and summaries come from chat content and the LLM: text only, never markup.
+          const el = (tag, text, cls) => {{
+            const node = document.createElement(tag);
+            if (cls) node.className = cls;
+            if (text !== undefined) node.textContent = text;
+            return node;
+          }};
           convs.forEach((c) => {{
-            const card = document.createElement("div");
-            card.className = "item";
-            const title = c.title || "Untitled conversation";
-            const summary = c.summary || "\u2014";
-            const updated = c.updated_at || c.created_at || "\u2014";
-            card.innerHTML = `
-              <h3>${{title}}</h3>
-              <div class="muted">${{summary}}</div>
-              <div class="muted">Updated: ${{updated}}</div>
-              <div class="actions">
-                <button class="secondary" data-open="${{c.id}}">Open</button>
-                <button data-del="${{c.id}}">Delete</button>
-              </div>
-            `;
+            const card = el("div", undefined, "item");
+            card.appendChild(el("h3", c.title || "Untitled conversation"));
+            card.appendChild(el("div", c.summary || "\u2014", "muted"));
+            card.appendChild(el("div", "Updated: " + (c.updated_at || c.created_at || "\u2014"), "muted"));
+            const actions = el("div", undefined, "actions");
+            const openBtn = el("button", "Open", "secondary");
+            openBtn.dataset.open = c.id;
+            const delBtn = el("button", "Delete");
+            delBtn.dataset.del = c.id;
+            actions.append(openBtn, delBtn);
+            card.appendChild(actions);
             gridEl.appendChild(card);
           }});
         }}
@@ -553,7 +557,7 @@ def history_ui():
           if (!confirm("Delete this conversation?")) return;
           statusEl.textContent = "Deleting...";
           try {{
-            const r = await fetch("/conversations/" + id, {{ method: "DELETE", headers: authHeaders() }});
+            const r = await fetch("/conversations/" + encodeURIComponent(id), {{ method: "DELETE", headers: authHeaders() }});
             if (!r.ok) {{
               statusEl.textContent = "Delete failed (" + r.status + ").";
               return;
@@ -4039,15 +4043,24 @@ def voice_clone_ui():
           return;
         }
 
-        const fd = new FormData();
-        fd.append("voice_name", name);
-        fd.append("reference_text", transcript);
-        chosen.forEach(c => fd.append("audio", c.blob, c.name));
+        function cloneForm(replace) {
+          const fd = new FormData();
+          fd.append("voice_name", name);
+          fd.append("reference_text", transcript);
+          if (replace) fd.append("replace", "true");
+          chosen.forEach(c => fd.append("audio", c.blob, c.name));
+          return fd;
+        }
 
         createBtn.disabled = true;
         createStatus.textContent = "Cloning voice from " + chosen.length + " clip(s) (GPU may need to wake)…";
         try {
-          const r = await fetch("/api/voice/clone" + engineQuery(), { method: "POST", body: fd });
+          let r = await fetch("/api/voice/clone" + engineQuery(), { method: "POST", body: cloneForm(false) });
+          // The engine keeps existing clones unless told to replace them (needs the saved API key).
+          if (r.status === 409 && confirm('A voice named "' + name + '" already exists. Overwrite it?')) {
+            createStatus.textContent = "Replacing existing voice…";
+            r = await fetch("/api/voice/clone" + engineQuery(), { method: "POST", body: cloneForm(true), headers: authHeaders() });
+          }
           if (!r.ok) { let m = "HTTP " + r.status; try { m = (await r.text()) || m; } catch (e) {} throw new Error(m); }
           const d = await r.json();
           createStatus.textContent = 'Created "' + (d.name || name) + '" (' + (d.num_clips || chosen.length) + ' clips). Loaded into the tester.';

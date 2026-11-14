@@ -15,7 +15,26 @@ log = logging.getLogger("rag-chat.provider.stability")
 
 _API_BASE = "https://api.stability.ai/v2beta"
 
-_IMAGE_MODELS = ["sd3-large", "sd3-large-turbo", "sd3-medium", "core"]
+_IMAGE_MODELS = ["sd3-large", "sd3-large-turbo", "sd3-medium", "core", "ultra"]
+_SD3_MODELS = {m for m in _IMAGE_MODELS if m.startswith("sd3")}
+_DEFAULT_SD3 = "sd3-large"
+_INPAINT_MODEL = "core"
+# Mask-less edits run SD3 image-to-image; how far the result may move from the input.
+_EDIT_STRENGTH = "0.7"
+
+
+def _generate_target(model: str) -> tuple[str, dict]:
+    """Endpoint and extra form fields for a generation model.
+
+    v2beta serves every SD3 variant from ``/generate/sd3`` with the variant in a
+    ``model`` field; ``/generate/sd3-large`` does not exist.
+    """
+    if model in _SD3_MODELS:
+        return f"{_API_BASE}/stable-image/generate/sd3", {"model": (None, model)}
+    if model in ("core", "ultra"):
+        return f"{_API_BASE}/stable-image/generate/{model}", {}
+    # LookupError: the generation router answers it with a 400.
+    raise LookupError(f"Unknown Stability model {model!r}; expected one of {', '.join(_IMAGE_MODELS)}")
 
 
 class StabilityAIProvider(ImageProvider):
@@ -43,8 +62,12 @@ class StabilityAIProvider(ImageProvider):
             return False
 
     def available_models(self, capability: Capability) -> List[str]:
-        if capability in (Capability.IMAGE_GENERATE, Capability.IMAGE_EDIT, Capability.IMAGE_INPAINT):
+        if capability == Capability.IMAGE_GENERATE:
             return list(_IMAGE_MODELS)
+        if capability == Capability.IMAGE_EDIT:
+            return [m for m in _IMAGE_MODELS if m in _SD3_MODELS]
+        if capability == Capability.IMAGE_INPAINT:
+            return [_INPAINT_MODEL]
         return []
 
     async def generate_image(
@@ -57,13 +80,12 @@ class StabilityAIProvider(ImageProvider):
         n: int = 1,
         style: Optional[str] = None,
     ) -> GenerationResult:
-        model = model or "sd3-large"
+        model = model or _DEFAULT_SD3
+        endpoint, extra = _generate_target(model)
         parts = size.split("x")
         w = int(parts[0]) if len(parts) >= 1 else 1024
         h = int(parts[1]) if len(parts) >= 2 else w
         aspect = _closest_aspect(w, h)
-
-        endpoint = f"{_API_BASE}/stable-image/generate/{model}" if model != "core" else f"{_API_BASE}/stable-image/generate/core"
 
         all_media: list[GeneratedMedia] = []
         for _ in range(n):
@@ -71,6 +93,7 @@ class StabilityAIProvider(ImageProvider):
                 "prompt": (None, prompt),
                 "output_format": (None, "png"),
                 "aspect_ratio": (None, aspect),
+                **extra,
             }
             if negative_prompt:
                 form["negative_prompt"] = (None, negative_prompt)
@@ -103,15 +126,30 @@ class StabilityAIProvider(ImageProvider):
         model: Optional[str] = None,
         size: Optional[str] = None,
     ) -> GenerationResult:
-        endpoint = f"{_API_BASE}/stable-image/edit/inpaint" if mask else f"{_API_BASE}/stable-image/edit/search-and-replace"
-
         form: dict = {
             "image": ("input.png", image, "image/png"),
             "prompt": (None, prompt),
             "output_format": (None, "png"),
         }
         if mask:
+            # The inpaint endpoint has no model choice: it always runs Stable Image Core.
+            if model not in (None, _INPAINT_MODEL):
+                raise LookupError(f"Stability inpainting only runs {_INPAINT_MODEL!r}, not {model!r}")
+            model = _INPAINT_MODEL
+            endpoint = f"{_API_BASE}/stable-image/edit/inpaint"
             form["mask"] = ("mask.png", mask, "image/png")
+        else:
+            # search-and-replace needs a search_prompt this interface doesn't carry,
+            # so a mask-less edit is SD3 image-to-image (core/ultra have no such mode).
+            model = model or _DEFAULT_SD3
+            if model not in _SD3_MODELS:
+                raise LookupError(
+                    f"Mask-less Stability edits need an SD3 model ({', '.join(sorted(_SD3_MODELS))}), not {model!r}"
+                )
+            endpoint, extra = _generate_target(model)
+            form.update(extra)
+            form["mode"] = (None, "image-to-image")
+            form["strength"] = (None, _EDIT_STRENGTH)
 
         async with httpx.AsyncClient(timeout=120) as c:
             r = await c.post(
@@ -129,7 +167,7 @@ class StabilityAIProvider(ImageProvider):
                 mime_type="image/png",
                 filename=f"stability_edit_{uuid4().hex[:8]}.png",
             )],
-            model=model or "core",
+            model=model,
             provider=self.name,
         )
 
