@@ -36,6 +36,8 @@ from app.embeddings import (
     CODE_EMBEDDER,
     EMBED_MODEL,
     EMBED_MODEL_CODE,
+    EMBEDDER_STRICT,
+    TEXT_DOC_PREFIX,
     TEXT_EMBEDDER,
     InfinityEmbeddingClient,
     OllamaEmbeddingClient,
@@ -65,7 +67,7 @@ EMBED_MAX_CHARS = _env_int("EMBED_MAX_CHARS", 4000)
 # Each path has exactly one embedder. Text always goes through Ollama because rag-chat embeds
 # its queries there (one vector space, one place it's decided); code always goes through
 # Infinity because Ollama doesn't host code-specialized embedders.
-_text_client = OllamaEmbeddingClient()
+_text_client = OllamaEmbeddingClient(prefix=TEXT_DOC_PREFIX)
 _code_client: Optional[InfinityEmbeddingClient] = None
 
 
@@ -408,30 +410,32 @@ async def delete_docs(doc_ids: List[str], *, source: Optional[str], collection: 
 _EMBEDDER_OK: set = set()  # (collection, embedder) pairs already checked in this process
 
 
-def other_embedders_filter(embedder: str) -> qm.Filter:
-    """Points labelled with an embedder other than ``embedder`` (unlabelled points don't match)."""
-    return qm.Filter(must_not=[
-        qm.FieldCondition(key="embedder", match=qm.MatchValue(value=embedder)),
-        qm.IsEmptyCondition(is_empty=qm.PayloadField(key="embedder")),
-    ])
+def other_embedders_filter(embedder: str, *, strict: bool = False) -> qm.Filter:
+    """Points labelled with an embedder other than ``embedder``. Unlabelled points match only when ``strict``."""
+    must_not: List[Any] = [qm.FieldCondition(key="embedder", match=qm.MatchValue(value=embedder))]
+    if not strict:
+        must_not.append(qm.IsEmptyCondition(is_empty=qm.PayloadField(key="embedder")))
+    return qm.Filter(must_not=must_not)
 
 
-async def _check_embedder(q: AsyncQdrantClient, collection: str, embedder: str) -> None:
-    if (collection, embedder) in _EMBEDDER_OK:
+async def _check_embedder(q: AsyncQdrantClient, collection: str, embedder: str, *,
+                          strict: Optional[bool] = None) -> None:
+    strict = EMBEDDER_STRICT if strict is None else strict
+    if (collection, embedder, strict) in _EMBEDDER_OK:
         return
     if await _collection_exists(q, collection):
-        flt = other_embedders_filter(embedder)
+        flt = other_embedders_filter(embedder, strict=strict)
         n = (await q.count(collection_name=collection, count_filter=flt, exact=True)).count
         if n:
             pts, _ = await q.scroll(collection_name=collection, scroll_filter=flt, limit=20,
                                     with_payload=["embedder"], with_vectors=False)
-            found = sorted({str((p.payload or {}).get("embedder")) for p in pts})
+            found = sorted({str((p.payload or {}).get("embedder") or "(unlabelled)") for p in pts})
             raise EmbedderMismatchError(
                 f"collection {collection!r} holds {n} point(s) embedded by {', '.join(found)}; this "
                 f"rag-ingest embeds with {embedder}. Their vectors aren't comparable: point "
                 f"EMBED_MODEL back at the model that wrote the collection, or use a new collection."
             )
-    _EMBEDDER_OK.add((collection, embedder))
+    _EMBEDDER_OK.add((collection, embedder, strict))
 
 
 # ---- Per-doc ingest helpers --------------------------------------------------
@@ -472,7 +476,8 @@ async def _ingest_text_doc(
     text, meta = extract_doc_fields(doc)
     doc_id = _doc_id(doc)
 
-    effective_max = EMBED_MAX_CHARS if EMBED_MAX_CHARS > 0 else 4000
+    # Leave room for the task prefix so a full-size chunk isn't truncated to fit it.
+    effective_max = (EMBED_MAX_CHARS if EMBED_MAX_CHARS > 0 else 4000) - len(TEXT_DOC_PREFIX)
     effective_chunk_size = min(CHUNK_SIZE if CHUNK_SIZE > 0 else effective_max, effective_max)
     effective_overlap = max(0, min(CHUNK_OVERLAP, max(0, effective_chunk_size - 1)))
     state["effective_chunk_size"] = effective_chunk_size

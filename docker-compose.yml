@@ -120,6 +120,9 @@ services:
       # Extra text collections a signed request may target with `collection` (comma list; e.g. audit_docs)
       - INGEST_ALLOWED_COLLECTIONS=${INGEST_ALLOWED_COLLECTIONS:-}
       - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
+      # One setting for both services: rag-ingest prefixes chunks, rag-chat prefixes queries (#32).
+      - EMBED_TASK_PREFIXES=${EMBED_TASK_PREFIXES:-none}
+      - EMBEDDER_STRICT=${EMBEDDER_STRICT:-0}
       - INGEST_CHUNK_SIZE=${INGEST_CHUNK_SIZE:-1000}
       - INGEST_CHUNK_OVERLAP=${INGEST_CHUNK_OVERLAP:-120}
       - INGEST_UPSERT_BATCH_SIZE=${INGEST_UPSERT_BATCH_SIZE:-64}
@@ -174,6 +177,9 @@ services:
       - QDRANT_URL=${QDRANT_URL:?set QDRANT_URL in .env (see .env.example)}
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-audit_docs}
       - EMBED_MODEL=${EMBED_MODEL:-nomic-embed-text}
+      # One setting for both services: rag-ingest prefixes chunks, rag-chat prefixes queries (#32).
+      - EMBED_TASK_PREFIXES=${EMBED_TASK_PREFIXES:-none}
+      - EMBEDDER_STRICT=${EMBEDDER_STRICT:-0}
       - RAG_ENABLED=${RAG_ENABLED:-1}
       - RAG_TOP_K=${RAG_TOP_K:-5}
       - RAG_MAX_CONTEXT_CHARS=${RAG_MAX_CONTEXT_CHARS:-4000}

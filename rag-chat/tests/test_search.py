@@ -81,7 +81,7 @@ class SearchEndpointTests(unittest.TestCase):
 
     def test_search_returns_hits(self):
         q = FakeQdrant([WIKI])
-        with patch.object(self.search, "ollama_embed", _embed), \
+        with patch.object(self.search, "embed_query", _embed), \
                 patch("app.retrieval.AsyncQdrantClient", lambda url: q), \
                 patch.object(FakeQdrant, "close", create=True, new=lambda self: asyncio.sleep(0)):
             r = self.client.post("/search", json={"query": "http server", "repo": "argus-mint", "kind": "wiki", "top_k": 2})
@@ -102,7 +102,7 @@ class SearchEndpointTests(unittest.TestCase):
             async def close(self):
                 pass
 
-        with patch.object(self.search, "ollama_embed", _embed), patch("app.retrieval.AsyncQdrantClient", lambda url: Broken([])):
+        with patch.object(self.search, "embed_query", _embed), patch("app.retrieval.AsyncQdrantClient", lambda url: Broken([])):
             r = self.client.post("/search", json={"query": "q"})
         self.assertEqual(r.status_code, 502)
         self.assertIn("collection not found", r.json()["detail"])
@@ -165,6 +165,25 @@ class EmbedderCheckTests(unittest.TestCase):
         self.assertIn("error", st)
         self.assertIsNone(retrieval.cached_embedder_status("missing"))
 
+    def test_strict_mode_counts_unlabelled_points(self):
+        self._put(retrieval.TEXT_EMBEDDER, None)
+        st = self._status(strict=True)
+        self.assertEqual((st["ok"], st["mismatched"], st["found"], st["strict"]), (False, 1, ["(unlabelled)"], True))
+
+    def test_query_prefix(self):
+        from app.routers import chat
+
+        seen = []
+
+        async def fake(text):
+            seen.append(text)
+            return [0.0]
+        with patch.object(chat, "ollama_embed", fake), patch.object(chat, "QUERY_PREFIX", "search_query: "):
+            asyncio.run(chat.embed_query("how is auth done?"))
+        with patch.object(chat, "ollama_embed", fake), patch.object(chat, "QUERY_PREFIX", ""):
+            asyncio.run(chat.embed_query("plain"))
+        self.assertEqual(seen, ["search_query: how is auth done?", "plain"])
+
     def test_search_and_chat_refuse_a_mismatched_collection(self):
         from app.routers import chat, search
 
@@ -181,7 +200,7 @@ class EmbedderCheckTests(unittest.TestCase):
         app.include_router(search.router)
         app.dependency_overrides[require_user] = lambda: AuthContext(user_id="u", via="dev")
         with patch.object(retrieval, "embedder_status", status), \
-                patch.object(search, "ollama_embed", embed_must_not_run), \
+                patch.object(search, "embed_query", embed_must_not_run), \
                 patch.object(chat, "ollama_embed", embed_must_not_run), \
                 patch.object(chat, "RAG_ENABLED", True):
             r = TestClient(app).post("/search", json={"query": "q"})

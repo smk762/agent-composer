@@ -95,6 +95,8 @@ The sidecar-side settings (`XTTS_PREPROCESS*`, `XTTS_GPT_COND_LEN`, `MISO_KEEP_A
 | `EMBED_BACKEND_URL` | `http://infinity:7997` | Infinity endpoint (code path) |
 | `EMBED_MODEL` | `nomic-embed-text` | Text-path embedding model, always served by Ollama. rag-chat embeds queries with the same Ollama model, so set it identically in both services. (`EMBED_BACKEND` is retired: it is ignored, with a warning, if set to anything but `ollama`.) |
 | `EMBEDDER_CHECK_TTL_S` | `60` | rag-chat: how often the RAG collection's `embedder` labels are re-checked |
+| `EMBED_TASK_PREFIXES` | `none` | Both services: `nomic` embeds chunks as `search_document: …` and queries as `search_query: …`. Changes the vector space, so migrate with `python -m app.reembed` rather than flipping it on a populated collection (see docs/api.md). |
+| `EMBEDDER_STRICT` | `0` | Both services: `1` treats points without an `embedder` label as a mismatch |
 | `EMBED_MODEL_CODE` | `nomic-ai/CodeRankEmbed` | Code-path embedding model (also preloaded by the `infinity` service) |
 | `HYBRID_SPARSE` | `0` | `1` adds a `bm25` sparse vector to code points |
 | `INGEST_CHUNK_SIZE` / `INGEST_CHUNK_OVERLAP` | `1000` / `120` | Text-path window, in characters |

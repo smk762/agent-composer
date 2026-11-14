@@ -258,7 +258,20 @@ Routing works per doc. An explicit `kind` wins. Otherwise a `path` with a known 
 
 rag-chat's `/chat` RAG context and `/search` read only `QDRANT_COLLECTION`. The code collection is consumed by ai-code-auditor.
 
-**One embedder per collection.** Text is always embedded with Ollama + `EMBED_MODEL` (the backend rag-chat queries with) and code with Infinity + `EMBED_MODEL_CODE`. Every point carries `embedder` (`ollama:<EMBED_MODEL>` or `infinity:<EMBED_MODEL_CODE>`, also returned in the ingest response). `/ingest` answers **409** instead of writing into a collection that holds points labelled with another embedder; rag-chat checks the same at startup and before searching (cached `EMBEDDER_CHECK_TTL_S`): on a mismatch `/search` answers **409** and `/chat` answers without RAG context. Points written before the label are unlabelled and accepted.
+**One embedder per collection.** Text is always embedded with Ollama + `EMBED_MODEL` (the backend rag-chat queries with) and code with Infinity + `EMBED_MODEL_CODE`. Every point carries `embedder` (`ollama:<EMBED_MODEL>` or `infinity:<EMBED_MODEL_CODE>`, also returned in the ingest response). `/ingest` answers **409** instead of writing into a collection that holds points labelled with another embedder; rag-chat checks the same at startup and before searching (cached `EMBEDDER_CHECK_TTL_S`): on a mismatch `/search` answers **409** and `/chat` answers without RAG context. Points written before the label are unlabelled and accepted, unless `EMBEDDER_STRICT=1` (both services), which counts them as a mismatch.
+
+**Task prefixes.** `EMBED_TASK_PREFIXES` (`none` or `nomic`, one setting shared by both services) makes rag-ingest embed each chunk as `search_document: <chunk>` and rag-chat embed each query as `search_query: <query>`, as nomic-embed-text was trained. The stored `text` never carries the prefix. Prefixed points are labelled `ollama:<EMBED_MODEL>+nomic-prefix`, so flipping the setting on a populated collection trips the 409s above. Migrate instead:
+
+```bash
+# 1. Fill a new collection from the old one's stored text (same ids and payloads; repeatable sync).
+docker compose exec rag-ingest python -m app.reembed --src audit_docs --dst audit_docs_v2 --prefixes nomic
+# 2. Compare retrieval before switching.
+docker compose exec -T rag-chat python - --baseline audit_docs:none --candidate audit_docs_v2:nomic < scripts/eval_retrieval.py
+# 3. Cut over: EMBED_TASK_PREFIXES=nomic and QDRANT_COLLECTION=audit_docs_v2 in .env, restart both
+#    services, then run step 1 again to carry over writes that reached audit_docs in between.
+```
+
+`app.reembed` re-embeds new or changed points, rewrites changed payloads without re-embedding, deletes points gone from the source, and refuses a destination holding any other (or unlabelled) points.
 
 The response contains `ok`, `chunks`, `upserted`, `skipped_chunks`, `truncated_chunks`, `collection`, `embed_model`, `retrieval_profile`, `hybrid_sparse`, `code_docs`, `text_docs`, `docs_with_id`, `docs_with_identity` (id- and path-keyed), `pruned`, `incomplete_docs` (ids or paths that lost chunks to context overflow) and `collections` (every collection the request wrote; `collection`/`embed_model` follow the docs when they all went to one, else the profile).
 

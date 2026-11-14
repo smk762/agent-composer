@@ -20,7 +20,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http import models as qm
 
-from app.config import EMBEDDER_CHECK_TTL_S, QDRANT_COLLECTION, QDRANT_URL, TEXT_EMBEDDER
+from app.config import EMBEDDER_CHECK_TTL_S, EMBEDDER_STRICT, QDRANT_COLLECTION, QDRANT_URL, TEXT_EMBEDDER
 
 log = logging.getLogger("rag-chat")
 
@@ -85,12 +85,12 @@ async def search(query: str, *, embed: Embed, top_k: int, tags: Sequence[str] = 
 _embedder_cache: Dict[str, tuple] = {}  # collection -> (monotonic time, status)
 
 
-def _other_embedders_filter(embedder: str) -> qm.Filter:
-    """Points labelled with another embedder. Unlabelled (pre-label) points don't match."""
-    return qm.Filter(must_not=[
-        qm.FieldCondition(key="embedder", match=qm.MatchValue(value=embedder)),
-        qm.IsEmptyCondition(is_empty=qm.PayloadField(key="embedder")),
-    ])
+def _other_embedders_filter(embedder: str, strict: bool = False) -> qm.Filter:
+    """Points labelled with another embedder. Unlabelled (pre-label) points match only when ``strict``."""
+    must_not: List[Any] = [qm.FieldCondition(key="embedder", match=qm.MatchValue(value=embedder))]
+    if not strict:
+        must_not.append(qm.IsEmptyCondition(is_empty=qm.PayloadField(key="embedder")))
+    return qm.Filter(must_not=must_not)
 
 
 def cached_embedder_status(collection: str = QDRANT_COLLECTION) -> Optional[Dict[str, Any]]:
@@ -100,21 +100,23 @@ def cached_embedder_status(collection: str = QDRANT_COLLECTION) -> Optional[Dict
 
 
 async def embedder_status(*, collection: str = QDRANT_COLLECTION, client: Any = None,
-                          force: bool = False) -> Dict[str, Any]:
+                          force: bool = False, strict: Optional[bool] = None) -> Dict[str, Any]:
     """Whether ``collection`` holds only vectors from the embedder our queries use.
 
     ``ok`` is True when no labelled point names another embedder, False when some do, and None
     when the check couldn't run (Qdrant down, collection missing): callers then carry on and
-    let the search itself fail or succeed. Successful checks are cached for EMBEDDER_CHECK_TTL_S."""
+    let the search itself fail or succeed. Successful checks are cached for EMBEDDER_CHECK_TTL_S.
+    With ``strict`` (default EMBEDDER_STRICT) unlabelled points count as mismatched."""
+    strict = EMBEDDER_STRICT if strict is None else strict
     now = time.monotonic()
     cached = _embedder_cache.get(collection)
     if cached and not force and now - cached[0] < EMBEDDER_CHECK_TTL_S:
         return cached[1]
-    status: Dict[str, Any] = {"collection": collection, "expected": TEXT_EMBEDDER, "ok": None,
-                              "mismatched": 0, "unlabelled": 0, "found": []}
+    status: Dict[str, Any] = {"collection": collection, "expected": TEXT_EMBEDDER, "strict": strict,
+                              "ok": None, "mismatched": 0, "unlabelled": 0, "found": []}
     qc = client or AsyncQdrantClient(url=QDRANT_URL)
     try:
-        flt = _other_embedders_filter(TEXT_EMBEDDER)
+        flt = _other_embedders_filter(TEXT_EMBEDDER, strict)
         mismatched = (await qc.count(collection_name=collection, count_filter=flt, exact=True)).count
         unlabelled = (await qc.count(
             collection_name=collection, exact=True,
@@ -124,7 +126,7 @@ async def embedder_status(*, collection: str = QDRANT_COLLECTION, client: Any = 
         if mismatched:
             pts, _ = await qc.scroll(collection_name=collection, scroll_filter=flt, limit=20,
                                      with_payload=["embedder"], with_vectors=False)
-            found = sorted({str((p.payload or {}).get("embedder")) for p in pts})
+            found = sorted({str((p.payload or {}).get("embedder") or "(unlabelled)") for p in pts})
         status.update(ok=mismatched == 0, mismatched=mismatched, unlabelled=unlabelled, found=found)
         _embedder_cache[collection] = (now, status)
         if mismatched:

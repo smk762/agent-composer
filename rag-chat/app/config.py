@@ -45,11 +45,20 @@ SYSTEM_PROMPT = os.getenv("CHAT_SYSTEM_PROMPT", "You are a helpful assistant.")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_COLLECTION = os.getenv("QDRANT_COLLECTION", "audit_docs")
 EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
-# rag-chat embeds queries with Ollama + EMBED_MODEL. rag-ingest stamps text points with the
-# same label (``embedder`` payload), so retrieval can refuse a collection whose vectors came
-# from another embedder.
-TEXT_EMBEDDER = f"ollama:{EMBED_MODEL}"
+# Task prefixes (#32), the same setting rag-ingest reads: ``nomic`` embeds retrieval queries
+# as "search_query: <query>" (rag-ingest embeds chunks as "search_document: <chunk>").
+_QUERY_PREFIXES = {"none": "", "nomic": "search_query: "}
+EMBED_TASK_PREFIXES = (os.getenv("EMBED_TASK_PREFIXES", "none").strip().lower() or "none")
+if EMBED_TASK_PREFIXES not in _QUERY_PREFIXES:
+    raise RuntimeError(f"EMBED_TASK_PREFIXES must be one of {sorted(_QUERY_PREFIXES)}, not {EMBED_TASK_PREFIXES!r}")
+QUERY_PREFIX = _QUERY_PREFIXES[EMBED_TASK_PREFIXES]
+# rag-chat embeds queries with Ollama + EMBED_MODEL (+ prefix scheme). rag-ingest stamps text
+# points with the same label (``embedder`` payload), so retrieval can refuse a collection whose
+# vectors came from another embedder.
+TEXT_EMBEDDER = f"ollama:{EMBED_MODEL}" + ("" if EMBED_TASK_PREFIXES == "none" else f"+{EMBED_TASK_PREFIXES}-prefix")
 EMBEDDER_CHECK_TTL_S = float(os.getenv("EMBEDDER_CHECK_TTL_S", "60"))
+# Strict: unlabelled points (written before labels existed) count as a mismatch too.
+EMBEDDER_STRICT = os.getenv("EMBEDDER_STRICT", "0").strip().lower() in ("1", "true", "yes")
 RAG_ENABLED = os.getenv("RAG_ENABLED", "1") == "1"
 RAG_TOP_K = int(os.getenv("RAG_TOP_K", "5"))
 RAG_MAX_CONTEXT_CHARS = int(os.getenv("RAG_MAX_CONTEXT_CHARS", "4000"))
