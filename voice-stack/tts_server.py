@@ -39,6 +39,7 @@ import asyncio
 import gc
 import io
 import os
+import re
 import tempfile
 import threading
 import time
@@ -46,7 +47,7 @@ import uuid
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from enum import Enum
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 import structlog
 from fastapi import FastAPI, File, Form, UploadFile
@@ -147,6 +148,10 @@ class TTSModelManager:
     that move and generation becomes ~50× real time.
     After keep_alive_gpu seconds of idle the models demote to CPU.
     After keep_alive_cpu seconds on CPU the models fully unload.
+
+    Generation must hold a lease (``async with _mgr.use(): ...``) for as long as
+    it touches the models. Demotion and unload wait until no lease is held, and
+    the idle timer only starts when the last lease is released.
     """
 
     def __init__(self) -> None:
@@ -159,6 +164,9 @@ class TTSModelManager:
         self._last_used: float = 0.0
         self._lock = asyncio.Lock()
         self._evict_task: Optional[asyncio.Task] = None
+        self._in_use = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
 
     @property
     def state(self) -> TTSState:
@@ -230,67 +238,104 @@ class TTSModelManager:
         if device == "cpu":
             torch.cuda.empty_cache()
 
+    async def _make_ready(self) -> None:
+        # Caller holds self._lock.
+        if self._state == TTSState.GPU:
+            return
+
+        if self._state in (TTSState.UNLOADED, TTSState.ERROR):
+            self._state = TTSState.LOADING
+            try:
+                await asyncio.to_thread(self._load, DEVICE)
+                self._state = TTSState.GPU
+                self._error = None
+            except Exception as exc:
+                self._state = TTSState.ERROR
+                self._error = str(exc)
+                logger.error("tts_load_failed", error=str(exc))
+                raise
+            return
+
+        if self._state == TTSState.CPU:
+            if DEVICE.startswith("cuda"):
+                logger.info("tts_promoting_to_gpu", device=DEVICE)
+                await asyncio.to_thread(self._move_to_device, DEVICE)
+                self._state = TTSState.GPU
+                logger.info("tts_on_gpu")
+            else:
+                self._state = TTSState.GPU  # CPU-only: treat as "ready"
+
     async def ensure_gpu(self) -> None:
-        """Guarantee models are on GPU and reset the idle timer."""
+        """Guarantee models are on GPU and reset the idle timer.
+
+        Does not protect a following generation; use ``use()`` for that.
+        """
         async with self._lock:
-            if self._state == TTSState.GPU:
-                self._last_used = time.time()
-                self._arm_evict()
-                return
-
-            if self._state in (TTSState.UNLOADED, TTSState.ERROR):
-                self._state = TTSState.LOADING
-                try:
-                    await asyncio.to_thread(self._load, DEVICE)
-                    self._state = TTSState.GPU
-                    self._error = None
-                except Exception as exc:
-                    self._state = TTSState.ERROR
-                    self._error = str(exc)
-                    logger.error("tts_load_failed", error=str(exc))
-                    raise
-                self._last_used = time.time()
-                self._arm_evict()
-                return
-
-            if self._state == TTSState.CPU:
-                if DEVICE.startswith("cuda"):
-                    logger.info("tts_promoting_to_gpu", device=DEVICE)
-                    await asyncio.to_thread(self._move_to_device, DEVICE)
-                    self._state = TTSState.GPU
-                    logger.info("tts_on_gpu")
-                else:
-                    self._state = TTSState.GPU  # CPU-only: treat as "ready"
-
+            await self._make_ready()
             self._last_used = time.time()
-            self._arm_evict()
+            if self._in_use == 0:
+                self._arm_evict()
 
-    async def demote_to_cpu(self) -> None:
-        async with self._lock:
-            if self._state != TTSState.GPU:
-                return
-            if DEVICE == "cpu":
-                return
-            logger.info("tts_demoting_to_cpu")
-            await asyncio.to_thread(self._move_to_device, "cpu")
-            self._state = TTSState.CPU
-            logger.info("tts_on_cpu")
+    @asynccontextmanager
+    async def use(self) -> AsyncIterator["TTSModelManager"]:
+        """Put the models on GPU and hold them there for the whole block.
 
-    async def unload(self) -> None:
+        Don't call ensure_gpu/demote_to_cpu/unload inside the block: they take
+        the lock a waiting demote/unload holds, which would deadlock.
+        """
         async with self._lock:
+            await self._make_ready()
+            self._in_use += 1
+            self._idle.clear()
             if self._evict_task and not self._evict_task.done():
                 self._evict_task.cancel()
-            for attr in ("_base_model", "_custom_model"):
-                model = getattr(self, attr)
-                if model is not None:
-                    del model
-                    setattr(self, attr, None)
-            gc.collect()
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            self._state = TTSState.UNLOADED
-            logger.info("tts_fully_unloaded")
+        try:
+            yield self
+        finally:
+            self._in_use -= 1
+            self._last_used = time.time()
+            if self._in_use == 0:
+                self._idle.set()
+                self._arm_evict()
+
+    async def _demote_locked(self) -> None:
+        if self._state != TTSState.GPU:
+            return
+        if DEVICE == "cpu":
+            self._state = TTSState.CPU  # nothing to move; lets the CPU stage run
+            return
+        logger.info("tts_demoting_to_cpu")
+        await asyncio.to_thread(self._move_to_device, "cpu")
+        self._state = TTSState.CPU
+        logger.info("tts_on_cpu")
+
+    async def demote_to_cpu(self) -> None:
+        """Move GPU → CPU (waits for in-flight generations)."""
+        async with self._lock:
+            await self._idle.wait()
+            await self._demote_locked()
+
+    def _unload_locked(self) -> None:
+        for attr in ("_base_model", "_custom_model"):
+            model = getattr(self, attr)
+            if model is not None:
+                del model
+                setattr(self, attr, None)
+        gc.collect()
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        self._state = TTSState.UNLOADED
+        logger.info("tts_fully_unloaded")
+
+    async def unload(self) -> None:
+        """Full unload (waits for in-flight generations)."""
+        async with self._lock:
+            await self._idle.wait()
+            if (self._evict_task and not self._evict_task.done()
+                    and self._evict_task is not asyncio.current_task()):
+                self._evict_task.cancel()
+            self._unload_locked()
 
     def _arm_evict(self) -> None:
         if self._evict_task and not self._evict_task.done():
@@ -298,22 +343,31 @@ class TTSModelManager:
         self._evict_task = asyncio.create_task(self._eviction_loop())
 
     async def _eviction_loop(self) -> None:
+        # Armed when the models go idle; any new lease cancels it. A stage that
+        # finds a lease held just stops: the lease's release re-arms the timer.
         try:
             # GPU keep-alive
-            if self.keep_alive_gpu == 0:
-                await self.demote_to_cpu()
-            elif self.keep_alive_gpu > 0:
-                await asyncio.sleep(self.keep_alive_gpu)
-                if time.time() - self._last_used >= self.keep_alive_gpu:
-                    await self.demote_to_cpu()
+            if self.keep_alive_gpu < 0:
+                return  # stay on GPU forever
+            if self._state == TTSState.GPU:
+                if self.keep_alive_gpu > 0:
+                    await asyncio.sleep(self.keep_alive_gpu)
+                async with self._lock:
+                    if self._state != TTSState.GPU or self._in_use:
+                        return
+                    await self._demote_locked()
+            elif self._state != TTSState.CPU:
+                return
 
-            # CPU keep-alive
-            if self.keep_alive_cpu == 0:
-                await self.unload()
-            elif self.keep_alive_cpu > 0:
+            # CPU keep-alive (only once the models are actually on CPU)
+            if self.keep_alive_cpu < 0:
+                return
+            if self.keep_alive_cpu > 0:
                 await asyncio.sleep(self.keep_alive_cpu)
-                if time.time() - self._last_used >= self.keep_alive_gpu + self.keep_alive_cpu:
-                    await self.unload()
+            async with self._lock:
+                if self._state != TTSState.CPU or self._in_use:
+                    return
+                self._unload_locked()
         except asyncio.CancelledError:
             pass
 
@@ -447,8 +501,12 @@ async def _generate_audio(req: SynthesiseRequest):
     if _mgr.state == TTSState.LOADING:
         return JSONResponse(status_code=503, content={"error": "Models still loading"})
 
-    await _mgr.ensure_gpu()
+    async with _mgr.use():
+        return await _generate_audio_leased(req)
 
+
+async def _generate_audio_leased(req: SynthesiseRequest):
+    """Body of ``_generate_audio``; the caller holds a ``_mgr.use()`` lease."""
     instruction = req.instruction
     if instruction is None:
         instruction = EMOTION_TO_INSTRUCTION.get(req.emotion, "")
@@ -617,18 +675,62 @@ async def synthesise_stream(req: SynthesiseRequest):
 # ── POST /clone-voice ─────────────────────────────────────────────────────────
 
 
+_COMPANION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _clone_key(companion_id: str) -> str:
+    """S3 key of a companion's clone prompt; ``companion_id`` must be validated."""
+    return f"voice_clones/{companion_id}/prompt.pt"
+
+
+def _s3_object_exists(key: str) -> bool:
+    from botocore.exceptions import ClientError
+
+    try:
+        _get_s3_client().head_object(Bucket=S3_BUCKET_NAME, Key=key)
+    except ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        if code in ("404", "NoSuchKey", "NotFound"):
+            return False
+        raise
+    return True
+
+
 @app.post("/clone-voice")
 async def clone_voice(
     audio: UploadFile = File(...),
     reference_text: str = Form(""),
     companion_id: str = Form(...),
+    replace: bool = Form(False),
 ):
-    """Extract voice clone prompt from reference audio and store in S3."""
+    """Extract voice clone prompt from reference audio and store in S3.
+
+    ``companion_id`` must match ``^[A-Za-z0-9_-]{1,64}$`` (422 otherwise). An
+    existing clone is only overwritten when ``replace`` is true (409 otherwise).
+    This sidecar has no caller identity; ownership is enforced by the gateway.
+    """
+    if not _COMPANION_ID_RE.fullmatch(companion_id):
+        return JSONResponse(
+            status_code=422,
+            content={"error": "companion_id must be 1-64 characters of A-Z, a-z, 0-9, '_' or '-'"},
+        )
+    s3_key = _clone_key(companion_id)
+
     if _mgr.state == TTSState.LOADING:
         return JSONResponse(status_code=503, content={"error": "Models still loading"})
 
-    await _mgr.ensure_gpu()
+    if not replace and await asyncio.to_thread(_s3_object_exists, s3_key):
+        return JSONResponse(
+            status_code=409,
+            content={"error": f"Voice clone {companion_id!r} already exists; send replace=true to overwrite"},
+        )
 
+    async with _mgr.use():
+        return await _clone_voice_leased(audio, reference_text, companion_id, s3_key)
+
+
+async def _clone_voice_leased(audio: UploadFile, reference_text: str, companion_id: str, s3_key: str):
+    """Body of ``clone_voice``; the caller holds a ``_mgr.use()`` lease."""
     if _mgr.base_model is None:
         return JSONResponse(status_code=503, content={"error": "Base model not loaded (TTS_LOAD_MODELS=custom_voice)"})
 
@@ -670,7 +772,6 @@ async def clone_voice(
     torch.save(clone_prompt, buf)
     prompt_bytes = buf.getvalue()
 
-    s3_key = f"voice_clones/{companion_id}/prompt.pt"
     await asyncio.to_thread(_upload_to_s3, prompt_bytes, s3_key, "application/octet-stream")
 
     with _clone_cache_lock:
@@ -696,12 +797,11 @@ async def list_speakers():
     if _mgr.state == TTSState.LOADING:
         return JSONResponse(status_code=503, content={"error": "Models still loading"})
 
-    await _mgr.ensure_gpu()
+    async with _mgr.use():
+        if _mgr.custom_model is None:
+            return JSONResponse(status_code=503, content={"error": "CustomVoice model not loaded"})
 
-    if _mgr.custom_model is None:
-        return JSONResponse(status_code=503, content={"error": "CustomVoice model not loaded"})
-
-    raw_speakers = await asyncio.to_thread(_mgr.custom_model.get_supported_speakers)
+        raw_speakers = await asyncio.to_thread(_mgr.custom_model.get_supported_speakers)
     supported_langs = _get_supported_languages()
 
     speakers = [

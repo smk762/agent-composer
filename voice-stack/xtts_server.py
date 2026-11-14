@@ -24,6 +24,10 @@ GPU memory lifecycle (three-state, like the Qwen sidecar / ModernBERT):
   On request the model is promoted to GPU; after XTTS_KEEP_ALIVE_GPU idle
   seconds it demotes to CPU, after a further XTTS_KEEP_ALIVE_CPU it fully
   unloads. XTTS is a single nn.Module so device moves are a plain .to().
+  Work that touches the model holds a lease (XTTSModelManager.lease) for its
+  whole duration, including a stream's full lifetime; demotion/unload are
+  deferred while any lease is held and the idle timer restarts on release.
+  A negative keep-alive pins that stage (GPU < 0 never demotes or unloads).
 
 A "voice clone" here is the pair (gpt_cond_latent, speaker_embedding) computed
 from the reference clip by get_conditioning_latents(); we torch.save it to S3
@@ -48,6 +52,7 @@ import io
 import json
 import math
 import os
+import queue
 import tempfile
 import threading
 import time
@@ -123,6 +128,9 @@ ISO_TO_XTTS: dict[str, str] = {
 }
 
 _CLONE_CACHE_MAX = 50
+_STREAM_QUEUE_MAX = 64      # buffered PCM chunks per stream (backpressure bound)
+_STREAM_PUT_POLL_S = 0.5    # producer/consumer poll slice for disconnect checks
+_STREAM_STALL_TIMEOUT_S = 300.0  # give up on a consumer that takes nothing this long
 
 # ── GPU memory lifecycle ─────────────────────────────────────────────────────
 
@@ -146,6 +154,7 @@ class XTTSModelManager:
         self._model = None
         self._config = None
         self._last_used: float = 0.0
+        self._active = 0  # leases held by in-flight work (see lease())
         self._lock = asyncio.Lock()
         self._evict_task: Optional[asyncio.Task] = None
 
@@ -207,53 +216,96 @@ class XTTSModelManager:
         else:
             self._model.to(torch.device(device))
 
+    async def _ensure_gpu_locked(self) -> None:
+        """Promote to GPU (loading first if needed). Caller holds ``_lock``."""
+        if self._state == TTSState.GPU:
+            return
+
+        if self._state in (TTSState.UNLOADED, TTSState.ERROR):
+            self._state = TTSState.LOADING
+            try:
+                await asyncio.to_thread(self._load_to_cpu)
+                self._state = TTSState.CPU
+                self._error = None
+            except Exception as exc:
+                self._state = TTSState.ERROR
+                self._error = str(exc)
+                logger.error("xtts_load_failed", error=str(exc))
+                raise
+
+        if self._state == TTSState.CPU:
+            if DEVICE.startswith("cuda"):
+                logger.info("xtts_promoting_to_gpu", device=DEVICE)
+                await asyncio.to_thread(self._move_to_device, DEVICE)
+                self._state = TTSState.GPU
+                logger.info("xtts_on_gpu")
+            else:
+                self._state = TTSState.GPU  # CPU-only: treat as ready
+
     async def ensure_gpu(self) -> None:
-        """Guarantee the model is on GPU and reset the idle timer."""
+        """Guarantee the model is on GPU and reset the idle timer.
+
+        This takes no lease, so it only suits callers that don't then use the
+        model (preload, /admin/wake). Inference must go through ``lease()``."""
         async with self._lock:
-            if self._state == TTSState.GPU:
-                self._last_used = time.time()
-                self._arm_evict()
-                return
-
-            if self._state in (TTSState.UNLOADED, TTSState.ERROR):
-                self._state = TTSState.LOADING
-                try:
-                    await asyncio.to_thread(self._load_to_cpu)
-                    self._state = TTSState.CPU
-                    self._error = None
-                except Exception as exc:
-                    self._state = TTSState.ERROR
-                    self._error = str(exc)
-                    logger.error("xtts_load_failed", error=str(exc))
-                    raise
-
-            if self._state == TTSState.CPU:
-                if DEVICE.startswith("cuda"):
-                    logger.info("xtts_promoting_to_gpu", device=DEVICE)
-                    await asyncio.to_thread(self._move_to_device, DEVICE)
-                    self._state = TTSState.GPU
-                    logger.info("xtts_on_gpu")
-                else:
-                    self._state = TTSState.GPU  # CPU-only: treat as ready
-
+            await self._ensure_gpu_locked()
             self._last_used = time.time()
+            if self._active == 0:
+                self._arm_evict()
+
+    @property
+    def active(self) -> int:
+        return self._active
+
+    async def acquire(self) -> None:
+        """Promote to GPU and take a lease: until the matching ``release()``
+        the model is neither demoted nor unloaded."""
+        async with self._lock:
+            await self._ensure_gpu_locked()
+            self._active += 1
+            self._last_used = time.time()
+            self._cancel_evict()
+
+    def release(self) -> None:
+        """Drop a lease (event-loop thread only). The idle timer starts from
+        the end of the work, and eviction is re-armed once nothing is in flight."""
+        self._active = max(0, self._active - 1)
+        self._last_used = time.time()
+        if self._active == 0:
             self._arm_evict()
 
-    async def demote_to_cpu(self) -> None:
+    @asynccontextmanager
+    async def lease(self):
+        await self.acquire()
+        try:
+            yield self._model
+        finally:
+            self.release()
+
+    async def demote_to_cpu(self) -> bool:
+        """Move the model to CPU. Skipped (False) while a lease is held."""
         async with self._lock:
+            if self._active > 0:
+                logger.info("xtts_demote_deferred", active=self._active)
+                return False
             if self._state != TTSState.GPU:
-                return
+                return False
             if DEVICE == "cpu":
-                return
+                return False
             logger.info("xtts_demoting_to_cpu")
             await asyncio.to_thread(self._move_to_device, "cpu")
             self._state = TTSState.CPU
             logger.info("xtts_on_cpu")
+            return True
 
-    async def unload(self) -> None:
+    async def unload(self, force: bool = False) -> bool:
+        """Drop the model entirely. Skipped (False) while a lease is held,
+        unless ``force`` (app shutdown)."""
         async with self._lock:
-            if self._evict_task and not self._evict_task.done():
-                self._evict_task.cancel()
+            if self._active > 0 and not force:
+                logger.info("xtts_unload_deferred", active=self._active)
+                return False
+            self._cancel_evict()
             if self._model is not None:
                 del self._model
                 self._model = None
@@ -264,27 +316,42 @@ class XTTSModelManager:
                 torch.cuda.empty_cache()
             self._state = TTSState.UNLOADED
             logger.info("xtts_fully_unloaded")
+            return True
+
+    def _cancel_evict(self) -> None:
+        task = self._evict_task
+        if task and not task.done() and task is not asyncio.current_task():
+            task.cancel()
 
     def _arm_evict(self) -> None:
-        if self._evict_task and not self._evict_task.done():
-            self._evict_task.cancel()
+        self._cancel_evict()
         self._evict_task = asyncio.create_task(self._eviction_loop())
 
     async def _eviction_loop(self) -> None:
         try:
-            if self.keep_alive_gpu == 0:
-                await self.demote_to_cpu()
-            elif self.keep_alive_gpu > 0:
+            # A negative keep-alive pins the model on GPU: never fall through
+            # to the CPU/unload stage.
+            if self.keep_alive_gpu < 0:
+                return
+            if self.keep_alive_gpu > 0:
                 await asyncio.sleep(self.keep_alive_gpu)
-                if time.time() - self._last_used >= self.keep_alive_gpu:
-                    await self.demote_to_cpu()
+                if time.time() - self._last_used < self.keep_alive_gpu:
+                    return
+            if self._state == TTSState.GPU and DEVICE != "cpu":
+                # A held lease defers this; release() re-arms the timer.
+                if not await self.demote_to_cpu():
+                    return
+            # On a CPU-only device "GPU" is the resident state: unload from it.
+            if self._active > 0 or self._state not in (TTSState.CPU, TTSState.GPU):
+                return
 
-            if self.keep_alive_cpu == 0:
-                await self.unload()
-            elif self.keep_alive_cpu > 0:
+            if self.keep_alive_cpu < 0:
+                return
+            if self.keep_alive_cpu > 0:
                 await asyncio.sleep(self.keep_alive_cpu)
-                if time.time() - self._last_used >= self.keep_alive_gpu + self.keep_alive_cpu:
-                    await self.unload()
+                if time.time() - self._last_used < self.keep_alive_gpu + self.keep_alive_cpu:
+                    return
+            await self.unload()
         except asyncio.CancelledError:
             pass
 
@@ -338,6 +405,31 @@ def _device_tensor(value, device):
     return value
 
 
+def _load_prompt(data) -> dict:
+    """Deserialize and validate a stored clone (``prompt.pt``).
+
+    Clone blobs come from S3 or an uploaded archive, so they're untrusted:
+    ``weights_only=True`` restricts unpickling to tensors and plain containers
+    (no arbitrary objects, so no code execution). Clones this server writes
+    are ``{"gpt_cond_latent": Tensor, "speaker_embedding": Tensor}``, which
+    loads as-is without any extra safe globals. Raises ``ValueError``."""
+    import torch
+
+    buf = data if hasattr(data, "read") else io.BytesIO(data)
+    try:
+        loaded = torch.load(buf, map_location="cpu", weights_only=True)
+    except Exception as exc:
+        raise ValueError("Invalid or untrusted prompt.pt (not a tensor archive)") from exc
+
+    if not (isinstance(loaded, dict) and "gpt_cond_latent" in loaded and "speaker_embedding" in loaded):
+        raise ValueError("prompt.pt must contain gpt_cond_latent and speaker_embedding")
+    gpt, spk = loaded["gpt_cond_latent"], loaded["speaker_embedding"]
+    for t in (gpt, spk):
+        if not (torch.is_tensor(t) and t.is_floating_point() and t.numel() > 0):
+            raise ValueError("prompt.pt latents must be non-empty float tensors")
+    return {"gpt_cond_latent": gpt.detach().cpu(), "speaker_embedding": spk.detach().cpu()}
+
+
 def _get_clone_latents(clone_id: str):
     """Load (gpt_cond_latent, speaker_embedding) for a stored clone, cached."""
     with _clone_cache_lock:
@@ -345,7 +437,6 @@ def _get_clone_latents(clone_id: str):
             _clone_cache.move_to_end(clone_id)
             return _clone_cache[clone_id]
 
-    import torch
     from botocore.exceptions import ClientError
 
     client = _get_s3_client()
@@ -357,7 +448,11 @@ def _get_clone_latents(clone_id: str):
         logger.error("clone_latent_s3_error", clone_id=clone_id, error_code=error_code)
         raise ValueError(f"Voice clone not found: {clone_id}") from exc
     buf.seek(0)
-    prompt = torch.load(buf, map_location="cpu", weights_only=False)
+    try:
+        prompt = _load_prompt(buf)
+    except ValueError as exc:
+        logger.error("clone_latent_invalid", clone_id=clone_id, error=str(exc))
+        raise ValueError(f"Voice clone is not a valid XTTS clone: {clone_id}") from exc
 
     with _clone_cache_lock:
         _clone_cache[clone_id] = prompt
@@ -461,7 +556,7 @@ async def lifespan(app: FastAPI):
     if PRELOAD:
         await _mgr.ensure_gpu()
     yield
-    await _mgr.unload()
+    await _mgr.unload(force=True)
 
 
 app = FastAPI(title="Voice Stack — XTTS-v2", version="1.0.0", lifespan=lifespan)
@@ -507,32 +602,34 @@ async def synthesise(req: SynthesiseRequest):
         return JSONResponse(status_code=503, content={"error": "Model still loading"})
 
     t_req = time.monotonic()
-    await _mgr.ensure_gpu()
-    t_ready = time.monotonic()
+    # The lease keeps the model on GPU from latent resolution to the end of
+    # inference; the idle eviction can't move it mid-synthesis.
+    async with _mgr.lease():
+        t_ready = time.monotonic()
 
-    try:
-        language = _normalise_language(req.language)
-        gpt, spk = await asyncio.to_thread(_resolve_latents, req)
-    except ValueError as exc:
-        return JSONResponse(status_code=422, content={"error": str(exc)})
+        try:
+            language = _normalise_language(req.language)
+            gpt, spk = await asyncio.to_thread(_resolve_latents, req)
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"error": str(exc)})
 
-    job_id = str(uuid.uuid4())
-    speed = req.speed if req.speed and req.speed > 0 else 1.0
+        job_id = str(uuid.uuid4())
+        speed = req.speed if req.speed and req.speed > 0 else 1.0
 
-    t_gen0 = time.monotonic()
-    try:
-        wav = await asyncio.to_thread(_run_inference, req.text, language, gpt, spk, speed)
-    except RuntimeError as exc:
-        err_str = str(exc).lower()
-        if "out of memory" in err_str or "cuda" in err_str:
-            gpu_info = _gpu_memory_info()
-            logger.error("xtts_gpu_oom", error=str(exc), gpu=gpu_info)
-            return JSONResponse(status_code=503, content={"error": "GPU OOM", "detail": str(exc), "gpu": gpu_info})
-        raise
-    except Exception as exc:
-        logger.error("xtts_generation_failed", error=str(exc), exc_info=True)
-        return JSONResponse(status_code=500, content={"error": f"TTS generation failed: {exc}"})
-    t_gen1 = time.monotonic()
+        t_gen0 = time.monotonic()
+        try:
+            wav = await asyncio.to_thread(_run_inference, req.text, language, gpt, spk, speed)
+        except RuntimeError as exc:
+            err_str = str(exc).lower()
+            if "out of memory" in err_str or "cuda" in err_str:
+                gpu_info = _gpu_memory_info()
+                logger.error("xtts_gpu_oom", error=str(exc), gpu=gpu_info)
+                return JSONResponse(status_code=503, content={"error": "GPU OOM", "detail": str(exc), "gpu": gpu_info})
+            raise
+        except Exception as exc:
+            logger.error("xtts_generation_failed", error=str(exc), exc_info=True)
+            return JSONResponse(status_code=500, content={"error": f"TTS generation failed: {exc}"})
+        t_gen1 = time.monotonic()
 
     import numpy as np
 
@@ -582,20 +679,43 @@ async def synthesise_stream(req: SynthesiseRequest):
     if _mgr.state == TTSState.LOADING:
         return JSONResponse(status_code=503, content={"error": "Model still loading"})
 
-    await _mgr.ensure_gpu()
-
-    try:
-        language = _normalise_language(req.language)
-        gpt, spk = await asyncio.to_thread(_resolve_latents, req)
-    except ValueError as exc:
-        return JSONResponse(status_code=422, content={"error": str(exc)})
+    # Resolve (and validate) the voice up front so a bad clone id is a 422,
+    # not a truncated 200 stream.
+    async with _mgr.lease():
+        try:
+            language = _normalise_language(req.language)
+            gpt, spk = await asyncio.to_thread(_resolve_latents, req)
+        except ValueError as exc:
+            return JSONResponse(status_code=422, content={"error": str(exc)})
 
     speed = req.speed if req.speed and req.speed > 0 else 1.0
     loop = asyncio.get_running_loop()
 
-    def _produce(queue: asyncio.Queue):
+    def _produce(chunks: queue.Queue, stop: threading.Event, gpt, spk):
+        """Worker thread: owns the stream's model lease until it returns.
+
+        ``chunks`` is bounded, so a slow client applies backpressure: the
+        put blocks (in short slices, so a disconnect is noticed via ``stop``)
+        instead of dropping audio, and the end-of-stream sentinel is always
+        delivered unless the consumer has already gone."""
         import torch
 
+        def _put(item) -> bool:
+            deadline = time.monotonic() + _STREAM_STALL_TIMEOUT_S
+            while not stop.is_set():
+                try:
+                    chunks.put(item, timeout=_STREAM_PUT_POLL_S)
+                    return True
+                except queue.Full:
+                    if time.monotonic() > deadline:
+                        # Consumer stalled (or vanished without closing the
+                        # generator): give up rather than hold the lease forever.
+                        logger.warning("xtts_stream_consumer_stalled")
+                        stop.set()
+                        return False
+            return False
+
+        stream = None
         try:
             stream = _mgr.model.inference_stream(
                 req.text,
@@ -610,23 +730,49 @@ async def synthesise_stream(req: SynthesiseRequest):
             for chunk in stream:
                 if isinstance(chunk, torch.Tensor):
                     chunk = chunk.detach().cpu().to(torch.float32).numpy()
-                loop.call_soon_threadsafe(queue.put_nowait, chunk.tobytes())
+                if not _put(chunk.tobytes()):
+                    break  # client went away: stop generating
         except Exception as exc:  # surface as stream termination
             logger.error("xtts_stream_failed", error=str(exc), exc_info=True)
         finally:
-            loop.call_soon_threadsafe(queue.put_nowait, None)
+            close = getattr(stream, "close", None)
+            if close is not None:
+                try:
+                    close()
+                except Exception:
+                    pass
+            _put(None)
+            try:
+                loop.call_soon_threadsafe(_mgr.release)
+            except RuntimeError:  # loop already closed (shutdown)
+                pass
 
     async def event_stream():
-        queue: asyncio.Queue = asyncio.Queue(maxsize=64)
-        worker = asyncio.create_task(asyncio.to_thread(_produce, queue))
+        chunks: queue.Queue = queue.Queue(maxsize=_STREAM_QUEUE_MAX)
+        stop = threading.Event()
+        # This lease spans the whole generation; it is handed to the worker
+        # thread, which releases it only once it is done with the model.
+        await _mgr.acquire()
+        try:
+            device = next(_mgr.model.parameters()).device
+            g, k = _device_tensor(gpt, device), _device_tensor(spk, device)
+            worker = loop.run_in_executor(None, _produce, chunks, stop, g, k)
+        except BaseException:
+            _mgr.release()
+            raise
         try:
             while True:
-                item = await queue.get()
+                try:
+                    item = await asyncio.to_thread(chunks.get, True, _STREAM_PUT_POLL_S)
+                except queue.Empty:
+                    if worker.done():
+                        break  # defensive: worker exited without a sentinel
+                    continue
                 if item is None:
                     break
                 yield item
         finally:
-            await worker
+            stop.set()
 
     return StreamingResponse(
         event_stream(),
@@ -981,8 +1127,6 @@ async def analyze_clips(audio: list[UploadFile] = File(...)):
     if not clips:
         return JSONResponse(status_code=422, content={"error": "No clips provided"})
 
-    await _mgr.ensure_gpu()
-
     raw_paths: list[str] = []
     names: list[str] = []
     try:
@@ -993,7 +1137,8 @@ async def analyze_clips(audio: list[UploadFile] = File(...)):
                 f.write(data)
                 raw_paths.append(f.name)
             names.append(clip.filename or f"clip-{len(names) + 1}")
-        result = await asyncio.to_thread(_analyze_clips, raw_paths, names)
+        async with _mgr.lease():
+            result = await asyncio.to_thread(_analyze_clips, raw_paths, names)
     except RuntimeError as exc:
         err_str = str(exc).lower()
         if "out of memory" in err_str or "cuda" in err_str:
@@ -1041,8 +1186,6 @@ async def clone_voice(
     if not clips:
         return JSONResponse(status_code=422, content={"error": "At least one reference clip is required"})
 
-    await _mgr.ensure_gpu()
-
     raw_paths: list[str] = []
     latent_paths: list[str] = []  # what we feed to XTTS (preprocessed when enabled)
     reports: list[dict] = []
@@ -1081,9 +1224,10 @@ async def clone_voice(
             )
 
         try:
-            gpt_cond_latent, speaker_embedding = await asyncio.to_thread(
-                _conditioning_latents, latent_paths
-            )
+            async with _mgr.lease():
+                gpt_cond_latent, speaker_embedding = await asyncio.to_thread(
+                    _conditioning_latents, latent_paths
+                )
         except RuntimeError as exc:
             err_str = str(exc).lower()
             if "out of memory" in err_str or "cuda" in err_str:
@@ -1306,16 +1450,7 @@ def _import_clone(zip_bytes: bytes, companion_override: str, name_override: str)
     if z.getinfo(prompt_name).file_size > _MAX_PROMPT_BYTES:
         raise ValueError("prompt.pt is unexpectedly large")
 
-    try:
-        loaded = torch.load(io.BytesIO(z.read(prompt_name)), map_location="cpu", weights_only=True)
-    except Exception as exc:
-        raise ValueError(f"Invalid or untrusted prompt.pt (not a tensor archive): {exc}") from exc
-
-    if not (isinstance(loaded, dict) and "gpt_cond_latent" in loaded and "speaker_embedding" in loaded):
-        raise ValueError("prompt.pt must contain gpt_cond_latent and speaker_embedding")
-    gpt, spk = loaded["gpt_cond_latent"], loaded["speaker_embedding"]
-    if not (torch.is_tensor(gpt) and torch.is_tensor(spk)):
-        raise ValueError("prompt.pt latents are not tensors")
+    prompt = _load_prompt(z.read(prompt_name))
 
     src_meta: dict = {}
     meta_name = next((n for n in names if n.rsplit("/", 1)[-1] == "meta.json"), None)
@@ -1328,7 +1463,6 @@ def _import_clone(zip_bytes: bytes, companion_override: str, name_override: str)
     companion_id = (companion_override or src_meta.get("companion_id") or "").strip()
     companion_id = _slug_id(companion_id or name_override or src_meta.get("name") or "imported-voice")
 
-    prompt = {"gpt_cond_latent": gpt.detach().cpu(), "speaker_embedding": spk.detach().cpu()}
     buf = io.BytesIO()
     torch.save(prompt, buf)
     s3_key = f"voice_clones/{companion_id}/prompt.pt"
@@ -1381,9 +1515,8 @@ async def list_speakers():
     if _mgr.state == TTSState.LOADING:
         return JSONResponse(status_code=503, content={"error": "Model still loading"})
 
-    await _mgr.ensure_gpu()
-
-    names = _list_speakers()
+    async with _mgr.lease():
+        names = _list_speakers()
     supported_langs = sorted(set(ISO_TO_XTTS.values()))
     speakers = [
         {"id": name, "name": name, "language": "en", "languages": supported_langs}
@@ -1414,14 +1547,23 @@ async def health():
 @app.post("/admin/evict")
 async def admin_evict():
     """Force-demote the model from GPU to CPU, freeing VRAM immediately."""
-    await _mgr.demote_to_cpu()
+    if not await _mgr.demote_to_cpu() and _mgr.active:
+        # In-flight work holds the model; its release re-arms idle eviction.
+        return JSONResponse(
+            status_code=409,
+            content={"status": "busy", "active": _mgr.active, "model_state": _mgr.state.value},
+        )
     return {"status": "evicted", "model_state": _mgr.state.value}
 
 
 @app.post("/admin/unload")
 async def admin_unload():
     """Fully unload the model from memory (GPU + CPU)."""
-    await _mgr.unload()
+    if not await _mgr.unload():
+        return JSONResponse(
+            status_code=409,
+            content={"status": "busy", "active": _mgr.active, "model_state": _mgr.state.value},
+        )
     return {"status": "unloaded", "model_state": _mgr.state.value}
 
 
