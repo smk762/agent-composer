@@ -52,7 +52,6 @@ import io
 import json
 import math
 import os
-import queue
 import tempfile
 import threading
 import time
@@ -679,97 +678,108 @@ async def synthesise_stream(req: SynthesiseRequest):
     if _mgr.state == TTSState.LOADING:
         return JSONResponse(status_code=503, content={"error": "Model still loading"})
 
-    # Resolve (and validate) the voice up front so a bad clone id is a 422,
-    # not a truncated 200 stream.
-    async with _mgr.lease():
+    speed = req.speed if req.speed and req.speed > 0 else 1.0
+    loop = asyncio.get_running_loop()
+
+    # One lease spans validation and the whole generation: the model can't be
+    # demoted or unloaded between the 422 check and the stream starting (which
+    # would mean a reload, or a failure after the 200 headers went out). It is
+    # handed to the producer thread, which releases it when it is done.
+    await _mgr.acquire()
+    handed_off = False
+    try:
+        # Resolve (and validate) the voice up front so a bad clone id is a 422,
+        # not a truncated 200 stream.
         try:
             language = _normalise_language(req.language)
             gpt, spk = await asyncio.to_thread(_resolve_latents, req)
         except ValueError as exc:
             return JSONResponse(status_code=422, content={"error": str(exc)})
+        device = next(_mgr.model.parameters()).device
+        gpt, spk = _device_tensor(gpt, device), _device_tensor(spk, device)
 
-    speed = req.speed if req.speed and req.speed > 0 else 1.0
-    loop = asyncio.get_running_loop()
+        # Chunks travel on an asyncio.Queue (filled via call_soon_threadsafe), so
+        # the consumer awaits without holding an executor thread; ``slots`` bounds
+        # the in-flight chunks so a slow client applies backpressure.
+        chunks: asyncio.Queue = asyncio.Queue()
+        slots = threading.BoundedSemaphore(_STREAM_QUEUE_MAX)
+        stop = threading.Event()
 
-    def _produce(chunks: queue.Queue, stop: threading.Event, gpt, spk):
-        """Worker thread: owns the stream's model lease until it returns.
+        def _deliver(item) -> bool:
+            try:
+                loop.call_soon_threadsafe(chunks.put_nowait, item)
+                return True
+            except RuntimeError:  # loop closed (shutdown)
+                stop.set()
+                return False
 
-        ``chunks`` is bounded, so a slow client applies backpressure: the
-        put blocks (in short slices, so a disconnect is noticed via ``stop``)
-        instead of dropping audio, and the end-of-stream sentinel is always
-        delivered unless the consumer has already gone."""
-        import torch
-
-        def _put(item) -> bool:
+        def _put(item: bytes) -> bool:
             deadline = time.monotonic() + _STREAM_STALL_TIMEOUT_S
             while not stop.is_set():
-                try:
-                    chunks.put(item, timeout=_STREAM_PUT_POLL_S)
-                    return True
-                except queue.Full:
-                    if time.monotonic() > deadline:
-                        # Consumer stalled (or vanished without closing the
-                        # generator): give up rather than hold the lease forever.
-                        logger.warning("xtts_stream_consumer_stalled")
-                        stop.set()
-                        return False
+                if slots.acquire(timeout=_STREAM_PUT_POLL_S):
+                    return _deliver(item)
+                if time.monotonic() > deadline:
+                    # Consumer stalled (or never started): give up rather than
+                    # hold the lease forever.
+                    logger.warning("xtts_stream_consumer_stalled")
+                    stop.set()
+                    return False
             return False
 
-        stream = None
-        try:
-            stream = _mgr.model.inference_stream(
-                req.text,
-                language,
-                gpt,
-                spk,
-                temperature=TEMPERATURE,
-                speed=speed,
-                stream_chunk_size=STREAM_CHUNK_SIZE,
-                enable_text_splitting=True,
-            )
-            for chunk in stream:
-                if isinstance(chunk, torch.Tensor):
-                    chunk = chunk.detach().cpu().to(torch.float32).numpy()
-                if not _put(chunk.tobytes()):
-                    break  # client went away: stop generating
-        except Exception as exc:  # surface as stream termination
-            logger.error("xtts_stream_failed", error=str(exc), exc_info=True)
-        finally:
-            close = getattr(stream, "close", None)
-            if close is not None:
-                try:
-                    close()
-                except Exception:
-                    pass
-            _put(None)
+        def _produce():
+            """Producer thread: owns the stream's model lease until it returns.
+
+            It runs on its own thread, not the default executor, so concurrent
+            streams can't starve the pool that every ``to_thread`` call shares."""
+            import torch
+
+            stream = None
             try:
-                loop.call_soon_threadsafe(_mgr.release)
-            except RuntimeError:  # loop already closed (shutdown)
-                pass
+                stream = _mgr.model.inference_stream(
+                    req.text,
+                    language,
+                    gpt,
+                    spk,
+                    temperature=TEMPERATURE,
+                    speed=speed,
+                    stream_chunk_size=STREAM_CHUNK_SIZE,
+                    enable_text_splitting=True,
+                )
+                for chunk in stream:
+                    if isinstance(chunk, torch.Tensor):
+                        chunk = chunk.detach().cpu().to(torch.float32).numpy()
+                    if not _put(chunk.tobytes()):
+                        break  # client went away: stop generating
+            except Exception as exc:  # surface as stream termination
+                logger.error("xtts_stream_failed", error=str(exc), exc_info=True)
+            finally:
+                close = getattr(stream, "close", None)
+                if close is not None:
+                    try:
+                        close()
+                    except Exception:
+                        pass
+                # The end-of-stream sentinel bypasses ``slots``: it is always
+                # delivered, so a consumer can never wait forever.
+                _deliver(None)
+                try:
+                    loop.call_soon_threadsafe(_mgr.release)
+                except RuntimeError:  # loop already closed (shutdown)
+                    pass
+
+        threading.Thread(target=_produce, name="xtts-stream", daemon=True).start()
+        handed_off = True
+    finally:
+        if not handed_off:
+            _mgr.release()
 
     async def event_stream():
-        chunks: queue.Queue = queue.Queue(maxsize=_STREAM_QUEUE_MAX)
-        stop = threading.Event()
-        # This lease spans the whole generation; it is handed to the worker
-        # thread, which releases it only once it is done with the model.
-        await _mgr.acquire()
-        try:
-            device = next(_mgr.model.parameters()).device
-            g, k = _device_tensor(gpt, device), _device_tensor(spk, device)
-            worker = loop.run_in_executor(None, _produce, chunks, stop, g, k)
-        except BaseException:
-            _mgr.release()
-            raise
         try:
             while True:
-                try:
-                    item = await asyncio.to_thread(chunks.get, True, _STREAM_PUT_POLL_S)
-                except queue.Empty:
-                    if worker.done():
-                        break  # defensive: worker exited without a sentinel
-                    continue
+                item = await chunks.get()
                 if item is None:
                     break
+                slots.release()
                 yield item
         finally:
             stop.set()

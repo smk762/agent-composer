@@ -4043,15 +4043,24 @@ def voice_clone_ui():
           return;
         }
 
-        const fd = new FormData();
-        fd.append("voice_name", name);
-        fd.append("reference_text", transcript);
-        chosen.forEach(c => fd.append("audio", c.blob, c.name));
+        function cloneForm(replace) {
+          const fd = new FormData();
+          fd.append("voice_name", name);
+          fd.append("reference_text", transcript);
+          if (replace) fd.append("replace", "true");
+          chosen.forEach(c => fd.append("audio", c.blob, c.name));
+          return fd;
+        }
 
         createBtn.disabled = true;
         createStatus.textContent = "Cloning voice from " + chosen.length + " clip(s) (GPU may need to wake)…";
         try {
-          const r = await fetch("/api/voice/clone" + engineQuery(), { method: "POST", body: fd });
+          let r = await fetch("/api/voice/clone" + engineQuery(), { method: "POST", body: cloneForm(false) });
+          // The engine keeps existing clones unless told to replace them (needs the saved API key).
+          if (r.status === 409 && confirm('A voice named "' + name + '" already exists. Overwrite it?')) {
+            createStatus.textContent = "Replacing existing voice…";
+            r = await fetch("/api/voice/clone" + engineQuery(), { method: "POST", body: cloneForm(true), headers: authHeaders() });
+          }
           if (!r.ok) { let m = "HTTP " + r.status; try { m = (await r.text()) || m; } catch (e) {} throw new Error(m); }
           const d = await r.json();
           createStatus.textContent = 'Created "' + (d.name || name) + '" (' + (d.num_clips || chosen.length) + ' clips). Loaded into the tester.';

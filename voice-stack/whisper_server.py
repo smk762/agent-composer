@@ -253,12 +253,14 @@ async def _resolve_host(host: str, port: int) -> list[str]:
     return [info[4][0] for info in infos]
 
 
-async def _vet_audio_url(url: str, allowed: Optional[frozenset[str]] = None) -> tuple[str, dict, dict]:
-    """Validate `url` and return (fetch_url, headers, extensions) for httpx.
+async def _vet_audio_url(url: str, allowed: Optional[frozenset[str]] = None) -> tuple[list[str], dict, dict]:
+    """Validate `url` and return (fetch_urls, headers, extensions) for httpx.
 
-    For a non-allowlisted host the fetch URL targets the vetted IP directly;
-    the Host header and TLS SNI (``sni_hostname``) keep the original name so
-    virtual hosting and certificate checks still work."""
+    For a non-allowlisted host there is one fetch URL per vetted address, in
+    resolver order, each targeting that IP directly (tried in turn, like a
+    normal connect falls back across a dual-stack host's addresses); the Host
+    header and TLS SNI (``sni_hostname``) keep the original name so virtual
+    hosting and certificate checks still work."""
     allowed = STT_AUDIO_URL_ALLOWED_HOSTS if allowed is None else allowed
     try:
         parts = urlsplit(url)
@@ -271,7 +273,7 @@ async def _vet_audio_url(url: str, allowed: Optional[frozenset[str]] = None) -> 
         raise AudioURLError(400, _AUDIO_URL_REJECTED)
 
     if _host_allowlisted(host, port, allowed):
-        return url, {}, {}
+        return [url], {}, {}
 
     try:
         addrs = await _resolve_host(host, port)
@@ -281,27 +283,39 @@ async def _vet_audio_url(url: str, allowed: Optional[frozenset[str]] = None) -> 
         logger.warning("stt_audio_url_rejected", host=host, reason="non_public_address")
         raise AudioURLError(400, _AUDIO_URL_REJECTED)
 
-    ip = addrs[0].split("%", 1)[0]
-    ip_host = f"[{ip}]" if ":" in ip else ip
-    netloc = f"{ip_host}:{parts.port}" if parts.port else ip_host
-    pinned = urlunsplit((scheme, netloc, parts.path or "/", parts.query, ""))
+    pinned: list[str] = []
+    for addr in addrs:
+        ip = addr.split("%", 1)[0]
+        ip_host = f"[{ip}]" if ":" in ip else ip
+        netloc = f"{ip_host}:{parts.port}" if parts.port else ip_host
+        target = urlunsplit((scheme, netloc, parts.path or "/", parts.query, ""))
+        if target not in pinned:
+            pinned.append(target)
     host_header = parts.netloc.rsplit("@", 1)[-1]
     extensions = {"sni_hostname": host} if scheme == "https" else {}
     return pinned, {"Host": host_header}, extensions
 
 
 async def _fetch_audio_url(url: str) -> bytes:
-    fetch_url, headers, extensions = await _vet_audio_url(url)
+    fetch_urls, headers, extensions = await _vet_audio_url(url)
+    resp = None
     try:
         async with httpx.AsyncClient(
             timeout=STT_DOWNLOAD_TIMEOUT, follow_redirects=False, trust_env=False
         ) as client:
-            resp = await client.get(fetch_url, headers=headers, extensions=extensions)
+            for i, fetch_url in enumerate(fetch_urls):
+                try:
+                    resp = await client.get(fetch_url, headers=headers, extensions=extensions)
+                    break
+                except (httpx.ConnectError, httpx.ConnectTimeout):
+                    # This address is unreachable (e.g. IPv6 in an IPv4-only network): try the next.
+                    if i == len(fetch_urls) - 1:
+                        raise
     except httpx.HTTPError as exc:
         logger.warning("stt_audio_url_fetch_failed", error_type=type(exc).__name__)
         raise AudioURLError(502, _AUDIO_URL_FAILED)
-    if resp.status_code != 200:
-        logger.warning("stt_audio_url_fetch_failed", status=resp.status_code)
+    if resp is None or resp.status_code != 200:
+        logger.warning("stt_audio_url_fetch_failed", status=getattr(resp, "status_code", None))
         raise AudioURLError(502, _AUDIO_URL_FAILED)
     return resp.content
 

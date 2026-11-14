@@ -160,6 +160,41 @@ class CloneVoiceTests(unittest.TestCase):
             tts_server._mgr._state = TTSState.UNLOADED
             tts_server._mgr._idle.set()
 
+    def test_concurrent_clones_of_one_id_are_serialised(self):
+        # The existence check and the upload run under one per-id lock, so the
+        # second replace=false request sees the first one's clone and gets 409.
+        import asyncio
+
+        stored = set()
+
+        def exists(key):
+            return key in stored
+
+        async def fake_leased(audio, reference_text, companion_id, s3_key):
+            await asyncio.sleep(0.05)  # "compute latents"
+            stored.add(s3_key)
+            return {"voice_clone_id": s3_key}
+
+        async def run():
+            files = {"audio": ("a.wav", b"RIFF0000", "audio/wav")}
+            import httpx
+
+            transport = httpx.ASGITransport(app=tts_server.app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+                return await asyncio.gather(*(
+                    c.post("/clone-voice", files=files, data={"companion_id": "bob"}) for _ in range(2)
+                ))
+
+        tts_server._mgr._state = TTSState.GPU
+        try:
+            with mock.patch.object(tts_server, "_s3_object_exists", side_effect=exists), \
+                    mock.patch.object(tts_server, "_clone_voice_leased", side_effect=fake_leased):
+                codes = sorted(r.status_code for r in asyncio.run(run()))
+            self.assertEqual(codes, [200, 409])
+        finally:
+            tts_server._mgr._state = TTSState.UNLOADED
+            tts_server._mgr._idle.set()
+
 
 if __name__ == "__main__":
     unittest.main()

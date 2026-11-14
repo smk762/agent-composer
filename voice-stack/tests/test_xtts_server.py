@@ -245,3 +245,51 @@ def test_stream_bad_clone_is_422_and_releases(monkeypatch, mgr):
         assert mgr.active == 0
 
     asyncio.run(run())
+
+
+def test_stream_holds_one_lease_from_validation(monkeypatch, mgr):
+    # With keep_alive_gpu=0 the old code released after validation (arming an
+    # immediate demote) and re-acquired inside the generator.
+    mgr.fake.n_chunks = 10_000
+    _install(monkeypatch, mgr)
+    mgr.keep_alive_gpu, mgr.keep_alive_cpu = 0, -1
+
+    async def run():
+        resp = await xs.synthesise_stream(xs.SynthesiseRequest(text="hi"))
+        assert mgr.active == 1
+        await asyncio.sleep(0.1)
+        assert mgr.moves == [] and mgr.state == xs.TTSState.GPU
+        it = resp.body_iterator
+        await it.__anext__()
+        await it.aclose()
+        for _ in range(100):
+            if mgr.active == 0:
+                break
+            await asyncio.sleep(0.05)
+        assert mgr.active == 0
+
+    asyncio.run(asyncio.wait_for(run(), 30))
+
+
+def test_concurrent_streams_do_not_starve_default_executor(monkeypatch, mgr):
+    # A one-thread default executor: the old producer-in-executor + to_thread
+    # consumer design deadlocked here as soon as two streams overlapped.
+    from concurrent.futures import ThreadPoolExecutor
+
+    n = xs._STREAM_QUEUE_MAX * 2
+    mgr.fake.n_chunks = n
+    _install(monkeypatch, mgr)
+    mgr.keep_alive_gpu, mgr.keep_alive_cpu = -1, -1
+
+    async def run():
+        asyncio.get_running_loop().set_default_executor(ThreadPoolExecutor(1))
+        resps = [await xs.synthesise_stream(xs.SynthesiseRequest(text="hi")) for _ in range(4)]
+        await asyncio.sleep(0.2)  # producers fill their bounded queues
+
+        async def drain(resp):
+            return len([item async for item in resp.body_iterator])
+
+        assert await asyncio.gather(*(drain(r) for r in resps)) == [n] * 4
+
+    asyncio.run(asyncio.wait_for(run(), 30))
+

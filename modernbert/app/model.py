@@ -223,13 +223,19 @@ class ModelManager:
             # --- GPU keep-alive ---
             if self.keep_alive_gpu < 0:
                 return  # stay resident forever
-            if self._state == ModelState.GPU:
+            # On a CPU-only device the model lives in CPU state, which is its resident
+            # state: it gets the same keep-alive before the CPU stage below.
+            resident_cpu = self._state == ModelState.CPU and self.effective_device() == "cpu"
+            if self._state == ModelState.GPU or resident_cpu:
                 if self.keep_alive_gpu > 0:
                     await asyncio.sleep(self.keep_alive_gpu)
                 async with self._lock:
-                    if self._state != ModelState.GPU or self._in_use:
+                    if self._in_use:
                         return
-                    await self._demote()
+                    if self._state == ModelState.GPU:
+                        await self._demote()
+                    elif not (resident_cpu and self._state == ModelState.CPU):
+                        return
             elif self._state != ModelState.CPU:
                 return  # unloaded / error: nothing to evict
 

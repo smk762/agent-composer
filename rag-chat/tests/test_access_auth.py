@@ -95,6 +95,19 @@ class AccessAuthTest(unittest.TestCase):
     def test_no_credentials_is_401(self) -> None:
         self.assertEqual(self._get().status_code, 401)
 
+    def test_dev_bypass_ignores_unverifiable_access_credentials(self) -> None:
+        with patch.object(auth, "DEV_AUTH_BYPASS", True), patch.object(auth, "CF_ACCESS_AUD", ""):
+            self.client.cookies.set("CF_Authorization", _token())
+            r = self._get()
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.json()["via"], "dev")
+        with patch.object(auth, "DEV_AUTH_BYPASS", True):
+            r = self._get(**{"Cf-Access-Jwt-Assertion": _token(key=_OTHER_KEY)})
+            self.assertEqual(r.json()["via"], "dev")
+            # A valid token still wins over the dev user.
+            r = self._get(**{"Cf-Access-Jwt-Assertion": _token()})
+            self.assertEqual(r.json(), {"user": "alice@example.com", "via": "access"})
+
 
 if __name__ == "__main__":
     unittest.main()

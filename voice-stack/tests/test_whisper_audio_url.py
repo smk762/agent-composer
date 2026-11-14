@@ -17,6 +17,7 @@ def resolver(monkeypatch):
         "public.example": ["93.184.216.34"],
         "internal.example": ["10.0.0.5"],
         "mixed.example": ["93.184.216.34", "127.0.0.1"],
+        "dual.example": ["2606:2800:220:1:248:1893:25c8:1946", "93.184.216.34"],
         "minio": ["172.18.0.4"],
     }
 
@@ -87,21 +88,21 @@ def test_vet_rejects(url, resolver):
 
 
 def test_vet_pins_public_host(resolver):
-    url, headers, ext = asyncio.run(ws._vet_audio_url("https://public.example:8443/x/a.wav?sig=1", frozenset()))
-    assert url == "https://93.184.216.34:8443/x/a.wav?sig=1"
+    urls, headers, ext = asyncio.run(ws._vet_audio_url("https://public.example:8443/x/a.wav?sig=1", frozenset()))
+    assert urls == ["https://93.184.216.34:8443/x/a.wav?sig=1"]
     assert headers == {"Host": "public.example:8443"}
     assert ext == {"sni_hostname": "public.example"}
 
-    url, headers, ext = asyncio.run(ws._vet_audio_url("http://public.example/a.wav", frozenset()))
-    assert url == "http://93.184.216.34/a.wav"
+    urls, headers, ext = asyncio.run(ws._vet_audio_url("http://public.example/a.wav", frozenset()))
+    assert urls == ["http://93.184.216.34/a.wav"]
     assert headers == {"Host": "public.example"}
     assert ext == {}
 
 
 def test_vet_allowlist_bypasses_private_check(resolver):
     allowed = ws._parse_allowed_hosts(" minio:9000 , Internal.Example ")
-    assert asyncio.run(ws._vet_audio_url("http://minio:9000/voice/a.wav", allowed))[0] == "http://minio:9000/voice/a.wav"
-    assert asyncio.run(ws._vet_audio_url("http://internal.example/a.wav", allowed))[0] == "http://internal.example/a.wav"
+    assert asyncio.run(ws._vet_audio_url("http://minio:9000/voice/a.wav", allowed))[0] == ["http://minio:9000/voice/a.wav"]
+    assert asyncio.run(ws._vet_audio_url("http://internal.example/a.wav", allowed))[0] == ["http://internal.example/a.wav"]
     # host:port entries only cover that port
     with pytest.raises(ws.AudioURLError):
         asyncio.run(ws._vet_audio_url("http://minio:6333/", allowed))
@@ -183,3 +184,17 @@ def test_endpoint_connect_error_is_generic(client, monkeypatch):
     r = client.post("/transcriptions", json={"audio_url": "http://public.example/a.wav"})
     assert r.status_code == 502
     assert r.json() == {"detail": ws._AUDIO_URL_FAILED}
+
+
+def test_endpoint_falls_back_across_resolved_addresses(client, monkeypatch):
+    def handler(request):
+        if request.url.host.startswith("2606:"):
+            raise httpx.ConnectError("Network is unreachable")
+        return httpx.Response(200, content=b"v4")
+
+    seen = _mock_upstream(monkeypatch, handler)
+    r = client.post("/transcriptions", json={"audio_url": "http://dual.example/a.wav"})
+    assert r.status_code == 200, r.text
+    assert r.json()["text"] == "v4"
+    assert [req.url.host for req in seen] == ["2606:2800:220:1:248:1893:25c8:1946", "93.184.216.34"]
+    assert all(req.headers["host"] == "dual.example" for req in seen)

@@ -79,6 +79,16 @@ class StabilityTests(unittest.TestCase):
         self.assertTrue(url.endswith("/stable-image/edit/inpaint"))
         self.assertIn("mask", form)
 
+    def test_edit_models_are_not_silently_swapped(self) -> None:
+        # Mask-less edits only run SD3; inpaint only runs core. Anything else is a 400, not a swap.
+        with self.assertRaises(LookupError):
+            _run(self.provider.edit_image("x", b"img", model="core"))
+        with self.assertRaises(LookupError):
+            _run(self.provider.edit_image("x", b"img", mask=b"m", model="sd3-large"))
+        self.assertEqual(_Client.calls, [])
+        self.assertEqual(_run(self.provider.edit_image("x", b"img", model="sd3-medium")).model, "sd3-medium")
+        self.assertEqual(_run(self.provider.edit_image("x", b"img", mask=b"m")).model, "core")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -164,6 +164,19 @@ class KeepAliveTests(unittest.IsolatedAsyncioTestCase):
         await _spin(0.05)
         self.assertEqual(mgr.state, ModelState.UNLOADED)
 
+    async def test_cpu_resident_honours_gpu_keep_alive_first(self):
+        # CPU-only device with the defaults' shape (gpu keep-alive > 0, cpu = 0): the model must
+        # stay resident for the keep-alive, not unload as soon as each request finishes.
+        mgr = _manager(gpu=0.05, cpu=0, state=ModelState.CPU)
+        mgr._target_device = "cpu"
+        async with mgr.use():
+            pass
+        await _spin(0.02)
+        self.assertEqual(mgr.state, ModelState.CPU)
+        self.assertIsNotNone(mgr.model)
+        await _spin(0.06)
+        self.assertEqual(mgr.state, ModelState.UNLOADED)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -44,6 +44,7 @@ import tempfile
 import threading
 import time
 import uuid
+import weakref
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from enum import Enum
@@ -696,6 +697,20 @@ def _s3_object_exists(key: str) -> bool:
     return True
 
 
+# One lock per companion_id spans the existence check through the upload, so two
+# concurrent replace=false clones of the same id can't both pass the check. The
+# sidecar runs a single uvicorn worker, so an in-process lock is enough.
+_clone_locks: "weakref.WeakValueDictionary[str, asyncio.Lock]" = weakref.WeakValueDictionary()
+
+
+def _clone_lock(companion_id: str) -> asyncio.Lock:
+    lock = _clone_locks.get(companion_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _clone_locks[companion_id] = lock
+    return lock
+
+
 @app.post("/clone-voice")
 async def clone_voice(
     audio: UploadFile = File(...),
@@ -719,14 +734,16 @@ async def clone_voice(
     if _mgr.state == TTSState.LOADING:
         return JSONResponse(status_code=503, content={"error": "Models still loading"})
 
-    if not replace and await asyncio.to_thread(_s3_object_exists, s3_key):
-        return JSONResponse(
-            status_code=409,
-            content={"error": f"Voice clone {companion_id!r} already exists; send replace=true to overwrite"},
-        )
+    lock = _clone_lock(companion_id)
+    async with lock:
+        if not replace and await asyncio.to_thread(_s3_object_exists, s3_key):
+            return JSONResponse(
+                status_code=409,
+                content={"error": f"Voice clone {companion_id!r} already exists; send replace=true to overwrite"},
+            )
 
-    async with _mgr.use():
-        return await _clone_voice_leased(audio, reference_text, companion_id, s3_key)
+        async with _mgr.use():
+            return await _clone_voice_leased(audio, reference_text, companion_id, s3_key)
 
 
 async def _clone_voice_leased(audio: UploadFile, reference_text: str, companion_id: str, s3_key: str):

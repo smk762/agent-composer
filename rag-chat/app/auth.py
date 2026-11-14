@@ -67,9 +67,6 @@ def _get_header(request: Request, name: str) -> Optional[str]:
 
 log = logging.getLogger("rag-chat.auth")
 
-_ACCESS_HEADERS = ("Cf-Access-Jwt-Assertion", "Cf-Access-Authenticated-User-Email")
-
-
 @lru_cache(maxsize=4)
 def _jwks_client(team_domain: str) -> jwt.PyJWKClient:
     # Caches the signing keys and refetches on an unknown kid (key rotation).
@@ -94,15 +91,25 @@ def verify_access_jwt(token: str, *, team_domain: str, audience: str) -> str:
     return email.strip()
 
 
+def _refuse_access(detail: str) -> None:
+    """A credential that can't be verified is a 401, except under DEV_AUTH_BYPASS, where it is
+    ignored (logged) so a stale ``CF_Authorization`` cookie doesn't lock out the dev user."""
+    if DEV_AUTH_BYPASS:
+        log.info("ignoring unverifiable Cloudflare Access credential (dev bypass): %s", detail)
+        return None
+    raise HTTPException(401, detail)
+
+
 async def _access_identity(request: Request) -> Optional[str]:
-    """Verified Access email, None when no Access credential was sent; 401 on a bad one."""
+    """Verified Access email; None when no usable Access credential was sent; 401 on a bad one
+    (unless DEV_AUTH_BYPASS, see ``_refuse_access``)."""
     token = _get_header(request, "Cf-Access-Jwt-Assertion") or request.cookies.get("CF_Authorization")
     if not token:
         if _get_header(request, "Cf-Access-Authenticated-User-Email"):
-            raise HTTPException(401, "Cloudflare Access email without an Access token")
+            return _refuse_access("Cloudflare Access email without an Access token")
         return None
     if not (CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD):
-        raise HTTPException(401, "Cloudflare Access is not configured (CF_ACCESS_TEAM_DOMAIN, CF_ACCESS_AUD)")
+        return _refuse_access("Cloudflare Access is not configured (CF_ACCESS_TEAM_DOMAIN, CF_ACCESS_AUD)")
     try:
         # The first call (and a key rotation) fetches the certs over the network.
         return await asyncio.to_thread(
@@ -110,7 +117,7 @@ async def _access_identity(request: Request) -> Optional[str]:
         )
     except jwt.PyJWTError as e:
         log.warning("rejected Cloudflare Access token: %s", e)
-        raise HTTPException(401, "Invalid Cloudflare Access token") from None
+        return _refuse_access("Invalid Cloudflare Access token")
 
 
 async def require_user(

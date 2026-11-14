@@ -18,6 +18,7 @@ _API_BASE = "https://api.stability.ai/v2beta"
 _IMAGE_MODELS = ["sd3-large", "sd3-large-turbo", "sd3-medium", "core", "ultra"]
 _SD3_MODELS = {m for m in _IMAGE_MODELS if m.startswith("sd3")}
 _DEFAULT_SD3 = "sd3-large"
+_INPAINT_MODEL = "core"
 # Mask-less edits run SD3 image-to-image; how far the result may move from the input.
 _EDIT_STRENGTH = "0.7"
 
@@ -61,8 +62,12 @@ class StabilityAIProvider(ImageProvider):
             return False
 
     def available_models(self, capability: Capability) -> List[str]:
-        if capability in (Capability.IMAGE_GENERATE, Capability.IMAGE_EDIT, Capability.IMAGE_INPAINT):
+        if capability == Capability.IMAGE_GENERATE:
             return list(_IMAGE_MODELS)
+        if capability == Capability.IMAGE_EDIT:
+            return [m for m in _IMAGE_MODELS if m in _SD3_MODELS]
+        if capability == Capability.IMAGE_INPAINT:
+            return [_INPAINT_MODEL]
         return []
 
     async def generate_image(
@@ -127,13 +132,20 @@ class StabilityAIProvider(ImageProvider):
             "output_format": (None, "png"),
         }
         if mask:
+            # The inpaint endpoint has no model choice: it always runs Stable Image Core.
+            if model not in (None, _INPAINT_MODEL):
+                raise LookupError(f"Stability inpainting only runs {_INPAINT_MODEL!r}, not {model!r}")
+            model = _INPAINT_MODEL
             endpoint = f"{_API_BASE}/stable-image/edit/inpaint"
             form["mask"] = ("mask.png", mask, "image/png")
-            model = model or "core"
         else:
             # search-and-replace needs a search_prompt this interface doesn't carry,
             # so a mask-less edit is SD3 image-to-image (core/ultra have no such mode).
-            model = model if model in _SD3_MODELS else _DEFAULT_SD3
+            model = model or _DEFAULT_SD3
+            if model not in _SD3_MODELS:
+                raise LookupError(
+                    f"Mask-less Stability edits need an SD3 model ({', '.join(sorted(_SD3_MODELS))}), not {model!r}"
+                )
             endpoint, extra = _generate_target(model)
             form.update(extra)
             form["mode"] = (None, "image-to-image")
