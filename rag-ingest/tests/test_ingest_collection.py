@@ -27,6 +27,12 @@ class FakeQdrant:
     async def upsert(self, collection_name, points, wait=True):
         self.upserts.append((collection_name, len(points)))
 
+    async def count(self, collection_name, count_filter=None, exact=True):
+        return SimpleNamespace(count=0)
+
+    async def delete(self, collection_name, points_selector, wait=True):
+        raise AssertionError("nothing to delete in these tests")
+
     async def close(self):
         pass
 

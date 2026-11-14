@@ -15,7 +15,7 @@ import os
 import time
 from contextlib import asynccontextmanager
 from textwrap import dedent
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -23,7 +23,9 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from app.inference_retry import RetryableOomError
-from app.ingest_pipeline import allowed_collections, ensure_collections_on_startup, ingest_docs
+from app.ingest_pipeline import (
+    QDRANT_COLLECTION, QDRANT_COLLECTION_CODE, allowed_collections, delete_docs, ensure_collections_on_startup, ingest_docs,
+)
 from app.metrics import MetricsMiddleware, metrics_router
 from app.nonce_store import (
     NonceStore,
@@ -482,13 +484,8 @@ def ingest_ui():
     return HTMLResponse(html)
 
 
-@app.post("/ingest")
-async def ingest(
-    request: Request,
-    x_timestamp: str = Header(..., alias="X-Timestamp"),
-    x_nonce: str = Header(..., alias="X-Nonce"),
-    x_signature: str = Header(..., alias="X-Signature"),
-):
+async def _signed_json(request: Request, x_timestamp: str, x_nonce: str, x_signature: str) -> Dict[str, Any]:
+    """Verify the HMAC signature and nonce, then return the JSON body (decrypting an envelope)."""
     body = await request.body()
     verify_signature(x_timestamp, x_nonce, x_signature, body)
 
@@ -517,6 +514,18 @@ async def ingest(
         else:
             data = payload_json
 
+    return data
+
+
+@app.post("/ingest")
+async def ingest(
+    request: Request,
+    x_timestamp: str = Header(..., alias="X-Timestamp"),
+    x_nonce: str = Header(..., alias="X-Nonce"),
+    x_signature: str = Header(..., alias="X-Signature"),
+):
+    data = await _signed_json(request, x_timestamp, x_nonce, x_signature)
+
     try:
         ingest_doc = IngestDoc.model_validate(data)
     except Exception as e:
@@ -541,3 +550,38 @@ async def ingest(
 
     result.update({"received_docs": len(ingest_doc.docs), "source": ingest_doc.source, "tags": ingest_doc.tags or []})
     return result
+
+
+class DeleteDocs(BaseModel):
+    doc_ids: list[str] = Field(..., min_length=1, max_length=1000, description="Doc ids to remove (the `id` they were ingested with)")
+    source: str = Field(..., min_length=1, description="Only points ingested with this source are removed")
+    collection: Optional[str] = Field(None, description="Text collection (default QDRANT_COLLECTION; must be allowed)")
+    kind: Literal["text", "code"] = Field("text", description="'code' targets QDRANT_COLLECTION_CODE")
+
+
+@app.post("/delete")
+async def delete(
+    request: Request,
+    x_timestamp: str = Header(..., alias="X-Timestamp"),
+    x_nonce: str = Header(..., alias="X-Nonce"),
+    x_signature: str = Header(..., alias="X-Signature"),
+):
+    """Retire docs that no longer exist (a removed wiki section, a resolved pack). Signed like /ingest."""
+    data = await _signed_json(request, x_timestamp, x_nonce, x_signature)
+    try:
+        req = DeleteDocs.model_validate(data)
+    except Exception as e:
+        raise HTTPException(422, f"Invalid delete payload: {e}")
+    if req.kind == "code":
+        collection = QDRANT_COLLECTION_CODE
+    else:
+        collection = req.collection or QDRANT_COLLECTION
+        if collection not in allowed_collections():
+            raise HTTPException(400, f"Collection {collection!r} is not allowed (INGEST_ALLOWED_COLLECTIONS)")
+    doc_ids = [d.strip() for d in req.doc_ids if d and d.strip()]
+    if not doc_ids:
+        raise HTTPException(422, "doc_ids are empty")
+    try:
+        return await delete_docs(doc_ids, source=req.source, collection=collection)
+    except Exception as e:
+        raise HTTPException(502, f"Delete failed: {e}")

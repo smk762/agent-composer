@@ -71,6 +71,7 @@ GPU passthrough requires NVIDIA Container Toolkit on the host. Remove `gpus: all
 
 - **Text path** (`RETRIEVAL_PROFILE=text` or `kind: "text"`): slides a char-level window over the document, embeds each chunk via Ollama, upserts into `QDRANT_COLLECTION` using an unnamed dense vector (legacy layout). A request may name another text `collection`, but only one listed in `INGEST_ALLOWED_COLLECTIONS` (anything else is a 400, never a silent redirect); ai-code-auditor sends `audit_docs`.
 - **Code path** (`RETRIEVAL_PROFILE=code` or `kind: "code"`, or inferred from `path`): splits via tree-sitter in `code_chunker.py` (per function/class), embeds via Infinity in `embeddings.py`, upserts into `QDRANT_COLLECTION_CODE` using named vectors (`dense` + optional `bm25`). These two collections are completely separate so both paths can coexist.
+- **Replace on re-send:** a doc with an `id` (code: else `repo`+`path`) is identified by that plus `source`. Once all of a request's upserts succeed, `_prune_replaced` deletes the identity's points the request didn't write (`pruned` in the response). Ids stay content-addressed, so a failed request leaves old versions intact; id-less docs stay append-only. Points carry `ingested_at`. Signed `POST /delete {doc_ids, source, collection?, kind?}` retires docs (`delete_docs`).
 
 `embeddings.py` defines `OllamaEmbeddingClient` and `InfinityEmbeddingClient` both conforming to the same `EmbeddingClient` protocol. `make_client()` selects based on `EMBED_BACKEND`.
 
