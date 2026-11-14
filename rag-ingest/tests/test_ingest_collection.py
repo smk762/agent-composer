@@ -89,6 +89,24 @@ class IngestCollectionTests(unittest.TestCase):
 
 
 class IngestEndpointTests(unittest.TestCase):
+    def test_endpoint_refuses_one_doc_sent_twice_with_400(self) -> None:
+        import json
+
+        from fastapi.testclient import TestClient
+
+        with mock.patch.dict("os.environ", {"INGEST_SHARED_SECRET": "test-only"}):
+            from app import main
+
+        body = json.dumps({"docs": [{"id": "d", "text": "x"}, {"id": "d", "text": "y"}]}).encode()
+        with mock.patch.object(main, "verify_signature", lambda *a, **k: None), \
+                mock.patch.object(ip, "AsyncQdrantClient", FakeQdrant):
+            FakeQdrant.instances.clear()
+            r = TestClient(main.app).post("/ingest", content=body, headers={
+                "X-Timestamp": "1", "X-Nonce": "n", "X-Signature": "s", "Content-Type": "application/json"})
+        self.assertEqual(r.status_code, 400, r.text)
+        self.assertIn("same doc", r.text)
+        self.assertEqual(FakeQdrant.instances, [])
+
     def test_endpoint_rejects_disallowed_collection_with_400(self) -> None:
         import json
 

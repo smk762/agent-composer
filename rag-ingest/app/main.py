@@ -24,7 +24,8 @@ from pydantic import BaseModel, Field
 
 from app.inference_retry import RetryableOomError
 from app.ingest_pipeline import (
-    QDRANT_COLLECTION, QDRANT_COLLECTION_CODE, allowed_collections, delete_docs, ensure_collections_on_startup, ingest_docs,
+    QDRANT_COLLECTION, QDRANT_COLLECTION_CODE, IngestRequestError, allowed_collections, delete_docs,
+    ensure_collections_on_startup, ingest_docs,
 )
 from app.metrics import MetricsMiddleware, metrics_router
 from app.nonce_store import (
@@ -541,6 +542,8 @@ async def ingest(
     try:
         result = await ingest_docs(ingest_doc.docs, source=ingest_doc.source, tags=ingest_doc.tags or [],
                                    collection=ingest_doc.collection)
+    except IngestRequestError as e:
+        raise HTTPException(400, str(e))
     except RetryableOomError as e:
         raise HTTPException(503, str(e))
     except HTTPException:
@@ -553,7 +556,12 @@ async def ingest(
 
 
 class DeleteDocs(BaseModel):
-    doc_ids: list[str] = Field(..., min_length=1, max_length=1000, description="Doc ids to remove (the `id` they were ingested with)")
+    doc_ids: list[str] = Field(default_factory=list, max_length=1000, description="Doc ids to remove (the `id` they were ingested with)")
+    paths: list[str] = Field(
+        default_factory=list, max_length=1000,
+        description="kind='code' only: paths of code docs ingested without an id (matched together with `repo`)",
+    )
+    repo: Optional[str] = Field(None, description="Repo of the `paths` (omit for docs ingested without a repo)")
     source: str = Field(..., min_length=1, description="Only points ingested with this source are removed")
     collection: Optional[str] = Field(None, description="Text collection (default QDRANT_COLLECTION; must be allowed)")
     kind: Literal["text", "code"] = Field("text", description="'code' targets QDRANT_COLLECTION_CODE")
@@ -573,15 +581,22 @@ async def delete(
     except Exception as e:
         raise HTTPException(422, f"Invalid delete payload: {e}")
     if req.kind == "code":
+        if req.collection and req.collection != QDRANT_COLLECTION_CODE:
+            raise HTTPException(400, "kind='code' always targets QDRANT_COLLECTION_CODE; drop `collection`")
         collection = QDRANT_COLLECTION_CODE
     else:
+        if req.paths:
+            raise HTTPException(400, "`paths` only applies to kind='code'")
         collection = req.collection or QDRANT_COLLECTION
         if collection not in allowed_collections():
             raise HTTPException(400, f"Collection {collection!r} is not allowed (INGEST_ALLOWED_COLLECTIONS)")
     doc_ids = [d.strip() for d in req.doc_ids if d and d.strip()]
-    if not doc_ids:
-        raise HTTPException(422, "doc_ids are empty")
+    paths = [p.strip() for p in req.paths if p and p.strip()]
+    if not doc_ids and not paths:
+        raise HTTPException(422, "nothing to delete: doc_ids (and paths) are empty")
     try:
+        if paths:
+            return await delete_docs(doc_ids, source=req.source, collection=collection, paths=paths, repo=req.repo)
         return await delete_docs(doc_ids, source=req.source, collection=collection)
     except Exception as e:
         raise HTTPException(502, f"Delete failed: {e}")
