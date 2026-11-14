@@ -80,6 +80,7 @@ The sidecar-side settings (`XTTS_PREPROCESS*`, `XTTS_GPT_COND_LEN`, `MISO_KEEP_A
 | `AUDIT_API_URL` | `http://127.0.0.1:8765` | ai-code-auditor API for diff validation between repair iterations; empty disables validation |
 | `AI_AUDIT_PUBLIC_BASE_URL` | falls back to `AUDIT_API_URL` | Base URL for fetching `pack_id` packs |
 | `AUDIT_PACK_TIMEOUT_S` | `10` | Per-request timeout for pack fetches |
+| `AUDIT_API_ALLOWED_HOSTS` | (empty) | Extra origins a repair request's `audit_api_url` / `audit_api_base` may name: comma-separated `host` (any port) or `host:port`, `*` for any. The configured `AUDIT_API_URL` and `AI_AUDIT_PUBLIC_BASE_URL` origins are always allowed; link-local hosts never are. Others get a 422. |
 | `REPAIR_PACK_STATUS_CALLBACK` | `1` | Report `resolved` to the audit API after a clean applied `auto_fix` |
 | `AI_AUDIT_API_TOKEN` | (empty) | Sent as `X-API-Token` on audit API writes |
 | `ECOSYSTEM_CONFIG_PATH` | `/home/smk/ai-code-auditor/config/ecosystem.yaml` | Resolves repo paths for `apply` and `compare_branch` |

@@ -200,7 +200,7 @@ Key fields (`app/repair/models.py`): `repo`, `diff` or `compare_branch`, `pack_i
 
 Only a patch that no validation rejected is applied: `complete.final_patch` is the last such patch (else the last one proposed, with `patch_validated: false`), and an `apply` run without one applies nothing and says so in `error`. The pack's `resolved` callback fires only after that validated patch was applied.
 
-> **SSRF:** `audit_api_base` is supplied by the client, and the server issues GET requests to it, plus a status-callback POST. Only `http(s)` URLs are accepted, but no host allowlist exists yet, and read-only runs are unauthenticated. Expose this route only to trusted callers. `ai-audit repair` sends its token as a Bearer key, so set it to a rag-chat API key for `apply` runs.
+> **Audit URLs:** `audit_api_base` and `audit_api_url` are supplied by the client, and the server sends requests to them (pack fetch, status callback, patch validation, git ops). Each must be an `http(s)` URL whose `host:port` matches a configured audit API (`AUDIT_API_URL`, `AI_AUDIT_PUBLIC_BASE_URL`) or an `AUDIT_API_ALLOWED_HOSTS` entry; link-local hosts are always refused. Anything else is a **422** before any work. Read-only runs are unauthenticated and hostnames aren't resolved, so expose this route only to trusted callers. `ai-audit repair` sends its token as a Bearer key, so set it to a rag-chat API key for `apply` runs.
 
 ### Runtime controls (`routers/runtime.py`)
 

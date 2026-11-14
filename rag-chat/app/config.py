@@ -230,6 +230,11 @@ AUDIT_PACK_BASE_URL = (
     or "http://127.0.0.1:8765"
 )
 AUDIT_PACK_TIMEOUT_S = float(os.getenv("AUDIT_PACK_TIMEOUT_S", "10"))
+# Extra origins a repair request's audit_api_url / audit_api_base may name, comma-separated
+# ``host`` (any port) or ``host:port``; ``*`` allows any. The configured AUDIT_API_URL and
+# AI_AUDIT_PUBLIC_BASE_URL origins are always allowed; link-local hosts never are.
+# See app/repair/url_policy.py.
+AUDIT_API_ALLOWED_HOSTS = os.getenv("AUDIT_API_ALLOWED_HOSTS", "")
 # After a clean, applied auto_fix, POST /audit/packs/{id}/status {"status": "resolved"}.
 # Fails soft (404/405 from older audit APIs is ignored).  Set to 0 to disable.
 REPAIR_PACK_STATUS_CALLBACK = os.getenv("REPAIR_PACK_STATUS_CALLBACK", "1").lower() in ("1", "true", "yes")
