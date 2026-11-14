@@ -307,7 +307,7 @@ class RepairEndpointTests(unittest.TestCase):
         async def fake_generate(prompt: str, model: str, system: str) -> str:
             return "```diff\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n```"
 
-        async def fake_path(repo: str, url: str):
+        async def fake_path(repo: str):
             return "/tmp/repo"
 
         with patch.object(multi_model, "_generate", fake_generate), \
@@ -322,6 +322,75 @@ class RepairEndpointTests(unittest.TestCase):
         self.assertEqual(len(posts), 1)
         self.assertEqual(posts[0].url.path, f"/audit/packs/{PACK_ID}/status")
         self.assertEqual(json.loads(posts[0].content)["status"], "resolved")
+
+    def test_rejected_patch_is_never_applied_or_resolved(self) -> None:
+        """Iteration 1 proposes a patch the audit rejects; iteration 2 proposes nothing."""
+        posts: list[httpx.Request] = []
+        applied: list[str] = []
+        replies = iter(["```diff\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n```", ""])
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                posts.append(request)
+                return httpx.Response(200, json={})
+            return _ok_handler(request)
+
+        async def fake_generate(prompt: str, model: str, system: str) -> str:
+            return next(replies, "")
+
+        async def rejected(patch_text: str, repo: str, url: str):
+            return False, ["audit: new HIGH finding"]
+
+        async def fake_path(repo: str):
+            return "/tmp/repo"
+
+        with patch.object(multi_model, "_generate", fake_generate), \
+                patch.object(multi_model, "_validate_via_api", rejected), \
+                patch.object(self.router_mod, "_resolve_repo_path", fake_path), \
+                patch.object(self.router_mod, "apply_inplace", lambda path, p: applied.append(p)):
+            _, events = self._post(
+                {"pack_id": PACK_ID, "diff": "--- a\n+++ b\n", "apply": True, "mode": "auto_fix",
+                 "max_iterations": 2, "audit_api_url": "http://audit.test:8765"},
+                handler=handler,
+            )
+        done = events[-1][1]
+        self.assertEqual(events[-1][0], "complete")
+        self.assertEqual((done["applied"], done["patch_validated"], done["iterations"]), (False, False, 2))
+        self.assertIn("No patch passed validation", done["error"])
+        self.assertEqual(applied, [])
+        self.assertFalse(any(p.url.path.endswith("/status") for p in posts))
+
+    def test_job_survives_client_disconnect(self) -> None:
+        import asyncio
+
+        from app.repair.models import RepairRequest as Req
+
+        async def scenario():
+            resp = await self.router_mod.run_repair(
+                Req(repo="argus-cortex", diff="--- a\n+++ b\n", validate_tests=False), None, None)
+            it = resp.body_iterator
+            first = await it.__anext__()
+            job_id = json.loads(first.split("data:", 1)[1])["job_id"]
+            await it.aclose()  # the client goes away after the first event
+            await asyncio.gather(*list(self.router_mod._tasks))
+            return self.router_mod._get_job(job_id)
+
+        job = asyncio.run(scenario())
+        self.assertEqual(job["status"], "completed")
+
+    def test_full_store_evicts_finished_jobs_never_running_ones(self) -> None:
+        from app.repair.models import RepairResult
+
+        mod = self.router_mod
+        with patch.object(mod, "_jobs", {}), patch.object(mod, "_MAX_JOBS", 2):
+            def job(i):
+                return RepairResult(job_id=f"j{i}", repo="r", status="pending", mode="review", created_at="t")
+            self.assertTrue(mod._store_job(job(1)))
+            self.assertTrue(mod._store_job(job(2)))
+            self.assertFalse(mod._store_job(job(3)))  # both still running
+            mod._update_job("j2", status="completed")
+            self.assertTrue(mod._store_job(job(3)))
+            self.assertEqual(sorted(mod._jobs), ["j1", "j3"])
 
     def test_review_mode_does_not_report_status(self) -> None:
         posts: list[httpx.Request] = []

@@ -2,9 +2,14 @@
 
 POST /api/repair/run  — start a repair job, stream SSE events
 GET  /api/repair/jobs/{job_id}  — retrieve final job state
+
+The job runs in its own task; the SSE response only relays its events. A client that
+disconnects stops receiving events but doesn't stop the job (an in-place apply is never
+left half-done), and ``GET /jobs/{job_id}`` still reports how it ended.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import secrets
@@ -36,23 +41,36 @@ log = logging.getLogger("rag-chat.repair")
 router = APIRouter(prefix="/api/repair", tags=["repair"])
 
 # ── In-memory job store ───────────────────────────────────────────────────────
-# Keyed by job_id.  Capped at 200 entries (oldest evicted first).
+# Keyed by job_id.  Capped at 200 entries: the oldest *finished* job is evicted first, and
+# a new job is refused (503) rather than evicting one that is still running.
 
 _jobs: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.Lock()
 _MAX_JOBS = 200
+_FINISHED = ("completed", "failed")
+_tasks: set[asyncio.Task] = set()  # strong refs so running jobs aren't garbage-collected
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _store_job(result: RepairResult) -> None:
+def _store_job(result: RepairResult) -> bool:
+    """Store a new job. False when the store is full of jobs that are still running."""
     with _jobs_lock:
         if len(_jobs) >= _MAX_JOBS:
-            oldest = next(iter(_jobs))
-            _jobs.pop(oldest)
+            finished = next((k for k, j in _jobs.items() if j.get("status") in _FINISHED), None)
+            if finished is None:
+                return False
+            _jobs.pop(finished)
         _jobs[result.job_id] = result.model_dump()
+        return True
+
+
+def _patch_passed(iteration: RepairIteration) -> bool:
+    """A patch may be applied only if no validation that ran rejected it."""
+    return bool(iteration.patch) and iteration.validation_passed is not False \
+        and iteration.test_validation_passed is not False
 
 
 def _update_job(job_id: str, **kwargs: Any) -> None:
@@ -87,7 +105,8 @@ async def run_repair(
     - ``pack_loaded`` — ``pack_id`` resolved (title, repo); only when ``pack_id`` was sent
     - ``warning``   — non-fatal problem (pack fetch failed, repo override); loop continues
     - ``iteration`` — one repair pass completed, contains ``RepairIteration`` fields
-    - ``complete``  — loop finished, contains ``final_patch`` and whether it was applied
+    - ``complete``  — loop finished, contains ``final_patch`` (the last patch that passed
+      validation, else the last one proposed), ``patch_validated`` and whether it was applied
     - ``error``     — unrecoverable failure
     """
     # Read-only runs (review/suggest, or auto_fix on a temp copy) stay open.
@@ -111,17 +130,24 @@ async def run_repair(
         mode=request.mode,
         created_at=_now_iso(),
     )
-    _store_job(result)
+    if not _store_job(result):
+        raise HTTPException(status_code=503, detail="Too many repair jobs are running; try again later.")
 
     # Use configured AUDIT_API_URL as default when the client doesn't override it
     effective_audit_url = request.audit_api_url or AUDIT_API_URL
 
-    async def event_stream():
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+    async def emit(event: str, data: Any) -> None:
+        queue.put_nowait(_sse(event, data))
+
+    async def run_job() -> None:
         _update_job(job_id, status="running")
-        yield _sse("started", {"job_id": job_id, "repo": request.repo, "mode": request.mode})
+        await emit("started", {"job_id": job_id, "repo": request.repo, "mode": request.mode})
 
         iterations: list[dict] = []
-        final_patch = ""
+        final_patch = ""     # last patch proposed
+        accepted_patch = ""  # last patch no validation rejected: the only one we may apply
         error_msg = ""
 
         try:
@@ -138,19 +164,19 @@ async def run_repair(
                 )
                 if pack_ctx.warning:
                     log.warning("Repair %s: %s", job_id, pack_ctx.warning)
-                    yield _sse("warning", {"job_id": job_id, "pack_id": request.pack_id, "message": pack_ctx.warning})
+                    await emit("warning", {"job_id": job_id, "pack_id": request.pack_id, "message": pack_ctx.warning})
                 if pack_ctx.ok:
                     write_ops = bool(request.apply or (request.git_ops and request.git_ops.enabled))
                     repo, repo_warning, repo_error = resolve_repo(request.repo, pack_ctx.repo, write_ops=write_ops)
                     if repo_error:
-                        yield _sse("error", {"job_id": job_id, "message": repo_error})
+                        await emit("error", {"job_id": job_id, "message": repo_error})
                         _update_job(job_id, status="failed", error=repo_error, completed_at=_now_iso())
                         return
                     if repo_warning:
-                        yield _sse("warning", {"job_id": job_id, "pack_id": request.pack_id, "message": repo_warning})
+                        await emit("warning", {"job_id": job_id, "pack_id": request.pack_id, "message": repo_warning})
                     pack_block = pack_ctx.block
                     _update_job(job_id, repo=repo)
-                    yield _sse("pack_loaded", {
+                    await emit("pack_loaded", {
                         "job_id": job_id,
                         "pack_id": pack_ctx.pack_id,
                         "title": pack_ctx.title,
@@ -161,7 +187,7 @@ async def run_repair(
                     "No repo: 'repo' was empty and the pack could not be loaded"
                     if request.pack_id else "No repo given."
                 )
-                yield _sse("error", {"job_id": job_id, "message": msg})
+                await emit("error", {"job_id": job_id, "message": msg})
                 _update_job(job_id, status="failed", error=msg, completed_at=_now_iso())
                 return
 
@@ -172,7 +198,7 @@ async def run_repair(
                     repo, request.compare_branch, effective_audit_url
                 )
                 if diff_error:
-                    yield _sse("error", {"message": diff_error})
+                    await emit("error", {"job_id": job_id, "message": diff_error})
                     _update_job(job_id, status="failed", error=diff_error, completed_at=_now_iso())
                     return
 
@@ -187,7 +213,9 @@ async def run_repair(
                 iter_dict = iteration.model_dump()
                 iterations.append(iter_dict)
                 final_patch = iteration.patch or final_patch
-                yield _sse("iteration", iter_dict)
+                if _patch_passed(iteration):
+                    accepted_patch = iteration.patch
+                await emit("iteration", iter_dict)
 
                 # In auto_fix mode, stop once both static audit AND test suite pass.
                 # The multi_model loop also breaks on this condition; this guard
@@ -202,18 +230,23 @@ async def run_repair(
                     if test_ok:
                         break
 
+            # Report (and apply) the last patch that passed, never a rejected one.
+            final_patch = accepted_patch or final_patch
+
             # Apply in-place if requested
             applied = False
             repo_path = None
-            if request.apply and final_patch and request.mode == "auto_fix":
+            if request.apply and request.mode == "auto_fix" and accepted_patch:
                 try:
-                    repo_path = await _resolve_repo_path(repo, request.audit_api_url)
+                    repo_path = await _resolve_repo_path(repo)
                     if repo_path:
-                        apply_inplace(repo_path, final_patch)
+                        apply_inplace(repo_path, accepted_patch)
                         applied = True
                 except Exception as exc:
                     log.warning("apply_inplace failed: %s", exc)
                     error_msg = f"Patch generated but apply failed: {exc}"
+            elif request.apply and request.mode == "auto_fix" and final_patch:
+                error_msg = "No patch passed validation; nothing was applied."
 
             # Git operations after successful apply
             branch = ""
@@ -230,16 +263,14 @@ async def run_repair(
                 )
 
             # Tell the audit API the pack is resolved — only after a clean, applied
-            # auto_fix.  Best-effort: older audit APIs lack the endpoint (404/405).
+            # auto_fix (``applied`` implies the applied patch itself passed validation).
+            # Best-effort: older audit APIs lack the endpoint (404/405).
             if (
                 REPAIR_PACK_STATUS_CALLBACK
                 and request.pack_id
                 and pack_ctx is not None
                 and pack_ctx.ok
                 and applied
-                and iterations
-                and iterations[-1].get("validation_passed") is not False
-                and iterations[-1].get("test_validation_passed") is not False
             ):
                 status_err = await report_pack_status(
                     request.pack_id,
@@ -261,6 +292,7 @@ async def run_repair(
                 status="completed",
                 iterations=iterations,
                 final_patch=final_patch,
+                patch_validated=bool(accepted_patch),
                 applied=applied,
                 branch=branch,
                 commit_sha=commit_sha,
@@ -269,9 +301,10 @@ async def run_repair(
                 error=error_msg,
                 completed_at=_now_iso(),
             )
-            yield _sse("complete", {
+            await emit("complete", {
                 "job_id":      job_id,
                 "final_patch": final_patch,
+                "patch_validated": bool(accepted_patch),
                 "applied":     applied,
                 "branch":      branch,
                 "commit_sha":  commit_sha,
@@ -281,10 +314,25 @@ async def run_repair(
                 "error":       error_msg,
             })
 
+        except asyncio.CancelledError:  # server shutdown
+            _update_job(job_id, status="failed", error="cancelled", completed_at=_now_iso())
+            raise
         except Exception as exc:
             log.exception("Repair job %s failed: %s", job_id, exc)
             _update_job(job_id, status="failed", error=str(exc), completed_at=_now_iso())
-            yield _sse("error", {"job_id": job_id, "message": str(exc)})
+            await emit("error", {"job_id": job_id, "message": str(exc)})
+        finally:
+            queue.put_nowait(None)  # end of stream
+
+    task = asyncio.create_task(run_job(), name=job_id)
+    _tasks.add(task)
+    task.add_done_callback(_tasks.discard)
+
+    async def event_stream():
+        # Only relays events: a disconnect cancels this generator, not the job.
+        while (item := await queue.get()) is not None:
+            yield item
+
 
     return StreamingResponse(
         event_stream(),
@@ -366,7 +414,7 @@ async def _fetch_diff_from_branch(
     return diff_text, ""
 
 
-async def _resolve_repo_path(repo: str, audit_api_url: str):
+async def _resolve_repo_path(repo: str):
     """Best-effort: find the local path for a named repo.
 
     Reads the ai-code-auditor ecosystem config if it's on this host.
