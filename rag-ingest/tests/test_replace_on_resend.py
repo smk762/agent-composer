@@ -89,7 +89,7 @@ class ReplaceOnResendTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.ingest([{"id": "a", "text": "new " * 30}, {"id": "b", "text": "BOOM"}])
         after = self.points()
-        self.assertTrue(set(before) <= set(after))  # nothing old was deleted
+        self.assertEqual(after, before)  # nothing old deleted, nothing half-new written
 
     def test_id_less_docs_stay_append_only_and_sources_are_separate(self):
         self.ingest([{"text": "one"}])
@@ -100,9 +100,51 @@ class ReplaceOnResendTests(unittest.TestCase):
         self.ingest([{"id": "a", "text": "mine v2"}], source="s1")
         self.assertEqual(sorted(t[1:] for t in self.points("a")), [("s1", 0, "mine v2"), ("s2", 0, "theirs")])
 
-    def test_same_id_twice_in_one_request_keeps_both(self):
-        res = self.ingest([{"id": "a", "text": "first"}, {"id": "a", "text": "second"}])
-        self.assertEqual((res["pruned"], len(self.points("a"))), (0, 2))
+    def test_same_id_twice_in_one_request_is_refused(self):
+        self.ingest([{"id": "a", "text": "old"}])
+        with self.assertRaises(ip.IngestRequestError):
+            self.ingest([{"id": "a", "text": "first"}, {"id": "a", "text": "second"}])
+        self.assertEqual([t[3] for t in self.points("a")], ["old"])
+
+    def test_id_zero_is_an_identity(self):
+        self.ingest([{"id": 0, "text": "v1"}])
+        self.ingest([{"id": 0, "text": "v2"}])
+        self.assertEqual([t[3] for t in self.points("0")], ["v2"])
+
+    def test_concurrent_resends_of_one_doc_leave_one_version(self):
+        self.ingest([{"id": "a", "text": "v0"}])
+        real = self.q
+
+        class Yielding:  # yields before every Qdrant call, like a network client
+            def __getattr__(self, name):
+                attr = getattr(real, name)
+                if not callable(attr):
+                    return attr
+
+                async def call(*a, **kw):
+                    await asyncio.sleep(0)
+                    return await attr(*a, **kw)
+                return call
+
+        async def both():
+            await asyncio.gather(
+                ip.ingest_docs([{"id": "a", "text": "v1"}], source="ai-code-auditor", tags=[]),
+                ip.ingest_docs([{"id": "a", "text": "v2"}], source="ai-code-auditor", tags=[]),
+            )
+        with mock.patch.object(ip, "AsyncQdrantClient", lambda url=None: Yielding()):
+            asyncio.run(both())
+        self.assertEqual(len(self.points("a")), 1)
+
+    def test_unembeddable_resend_replaces_and_is_reported(self):
+        self.ingest([{"id": "a", "text": "old"}])
+
+        class Overflow(Embedder):
+            async def embed(self, texts, profile="text"):
+                raise RuntimeError("input length exceeds the context length")
+        with mock.patch.object(ip, "_text_client", Overflow()):
+            res = self.ingest([{"id": "a", "text": "new"}])
+        self.assertEqual((res["skipped_chunks"], res["incomplete_docs"], res["pruned"]), (1, ["a"], 1))
+        self.assertEqual(self.points("a"), [])
 
     def test_payload_carries_ingested_at_and_indexes_exist(self):
         self.ingest([{"id": "a", "text": "x"}])
@@ -158,6 +200,24 @@ class CodeReplaceTests(ReplaceOnResendTests.__base__):
         self.assertEqual(res["pruned"], 2)
         self.assertEqual(self._symbols(), [("r1", "a"), ("r2", "a")])
 
+    def test_delete_by_path(self):
+        self._code("def a():\n    return 1\n")
+        self._code("def a():\n    return 1\n", repo="r2")
+        res = asyncio.run(ip.delete_docs([], source="ai-code-auditor", collection=ip.QDRANT_COLLECTION_CODE,
+                                         paths=["pkg/mod.py"], repo="r1"))
+        self.assertEqual((res["deleted"], res["paths"]), (1, 1))
+        self.assertEqual(self._symbols(), [("r2", "a")])
+
+    def test_mixed_request_reports_both_collections(self):
+        with mock.patch.object(ip, "_text_client", Embedder()), mock.patch.object(ip, "RETRIEVAL_PROFILE", "text"):
+            res = asyncio.run(ip.ingest_docs(
+                [{"id": "t", "text": "prose"}, {"kind": "code", "path": "m.py", "text": "def f():\n    return 1\n"}],
+                source="s", tags=[]))
+        self.assertEqual(res["collections"], [ip.QDRANT_COLLECTION, ip.QDRANT_COLLECTION_CODE])
+        res = asyncio.run(ip.ingest_docs([{"kind": "code", "path": "m.py", "text": "def g():\n    return 2\n"}],
+                                         source="s", tags=[]))
+        self.assertEqual((res["collection"], res["embed_model"]), (ip.QDRANT_COLLECTION_CODE, ip.EMBED_MODEL_CODE))
+
 
 class DeleteEndpointTests(unittest.TestCase):
     def _post(self, body):
@@ -183,6 +243,12 @@ class DeleteEndpointTests(unittest.TestCase):
         self.assertEqual(self._post({"doc_ids": [], "source": "s"})[0].status_code, 422)
         self.assertEqual(self._post({"doc_ids": ["a"]})[0].status_code, 422)  # source is required
         self.assertEqual(self._post({"doc_ids": [" "], "source": "s"})[0].status_code, 422)
+        # code: a collection would be ignored, so it's refused; paths delete id-less code docs
+        self.assertEqual(self._post({"doc_ids": ["a"], "source": "s", "kind": "code", "collection": "x"})[0].status_code, 400)
+        self.assertEqual(self._post({"paths": ["p.py"], "source": "s"})[0].status_code, 400)
+        r, dd = self._post({"paths": ["p.py"], "repo": "r", "source": "s", "kind": "code"})
+        self.assertEqual(r.status_code, 200, r.text)
+        dd.assert_called_once_with([], source="s", collection=ip.QDRANT_COLLECTION_CODE, paths=["p.py"], repo="r")
 
 
 if __name__ == "__main__":
