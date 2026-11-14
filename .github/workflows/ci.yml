@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip ruff
+      - name: ruff (errors only)
+        run: ruff check . --select E9,F63,F7,F82
+
+  tests:
+    # Unit tests per service, with the service's own pinned requirements on the same Python as its
+    # image (python:3.12-slim). No network services: Qdrant runs in-memory, Ollama/Postgres are faked.
+    # modernbert/tests are live smoke tests against a running container, so they're not run here.
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service: [rag-chat, rag-ingest]
+    defaults:
+      run:
+        working-directory: ${{ matrix.service }}
+    env:
+      DATABASE_URL: sqlite+aiosqlite:////tmp/ci.db
+      # rag-ingest opens its nonce store at import; the image's /data doesn't exist on the runner.
+      INGEST_NONCE_DB: /tmp/ci-nonces.db
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: ${{ matrix.service }}/requirements.txt
+      - run: python -m pip install --upgrade pip && pip install -r requirements.txt
+      - name: unittest
+        run: python -m unittest discover -s tests -v
