@@ -15,7 +15,7 @@ from app import retrieval
 from app.auth import require_user
 from app.config import QDRANT_COLLECTION
 from app.models.schemas import AuthContext
-from app.routers.chat import ollama_embed
+from app.routers.chat import embed_query
 
 router = APIRouter()
 
@@ -58,7 +58,7 @@ async def search(req: SearchRequest, auth: AuthContext = Depends(require_user)) 
     if status["ok"] is False:
         raise HTTPException(409, retrieval.mismatch_message(status))
     try:
-        hits = await retrieval.search(query, embed=ollama_embed, top_k=req.top_k, tags=tags)
+        hits = await retrieval.search(query, embed=embed_query, top_k=req.top_k, tags=tags)
     except HTTPException:
         raise
     except Exception as e:  # Qdrant down, collection missing, ...

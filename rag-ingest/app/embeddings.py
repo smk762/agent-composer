@@ -37,11 +37,33 @@ EMBED_BACKEND_URL = os.getenv("EMBED_BACKEND_URL", "http://infinity:7997").rstri
 EMBED_MODEL = os.getenv("EMBED_MODEL", "nomic-embed-text")
 EMBED_MODEL_CODE = os.getenv("EMBED_MODEL_CODE", "nomic-ai/CodeRankEmbed")
 
+# Task prefixes some embedders were trained with (#32). ``nomic``: stored text is embedded as
+# "search_document: <text>" and queries as "search_query: <text>". The prefix only goes into the
+# embedding input; the stored ``text`` payload stays clean. rag-chat reads the same setting.
+PREFIX_SCHEMES = {"none": ("", ""), "nomic": ("search_document: ", "search_query: ")}
+EMBED_TASK_PREFIXES = (os.getenv("EMBED_TASK_PREFIXES", "none").strip().lower() or "none")
+if EMBED_TASK_PREFIXES not in PREFIX_SCHEMES:
+    raise RuntimeError(f"EMBED_TASK_PREFIXES must be one of {sorted(PREFIX_SCHEMES)}, not {EMBED_TASK_PREFIXES!r}")
+
+
+def text_embedder_label(scheme: str = EMBED_TASK_PREFIXES) -> str:
+    """The ``embedder`` label of text points embedded under ``scheme``."""
+    return f"ollama:{EMBED_MODEL}" + ("" if scheme == "none" else f"+{scheme}-prefix")
+
+
+def doc_prefix(scheme: str = EMBED_TASK_PREFIXES) -> str:
+    return PREFIX_SCHEMES[scheme][0]
+
+
 # Which embedder wrote a point, stored on every point as ``embedder``. rag-chat embeds its
-# queries with Ollama + EMBED_MODEL and builds the same label, so it can tell when a
-# collection holds vectors its queries can't be compared with.
-TEXT_EMBEDDER = f"ollama:{EMBED_MODEL}"
+# queries with Ollama + EMBED_MODEL (+ the same prefix scheme) and builds the same label, so it
+# can tell when a collection holds vectors its queries can't be compared with.
+TEXT_EMBEDDER = text_embedder_label()
+TEXT_DOC_PREFIX = doc_prefix()
 CODE_EMBEDDER = f"infinity:{EMBED_MODEL_CODE}"
+# Strict: points without an ``embedder`` label (written before labels existed) count as a
+# mismatch too. Turn on once every point of the collection is labelled.
+EMBEDDER_STRICT = os.getenv("EMBEDDER_STRICT", "0").strip().lower() in ("1", "true", "yes")
 
 if os.getenv("EMBED_BACKEND", "ollama").strip().lower() not in ("", "ollama"):
     logging.getLogger("rag-ingest.embed").warning(
@@ -85,21 +107,25 @@ class EmbeddingClient:
 class OllamaEmbeddingClient(EmbeddingClient):
     """Single-text /api/embeddings calls with prompt-shrinking on context overflow."""
 
-    def __init__(self, *, model: str = EMBED_MODEL):
+    def __init__(self, *, model: str = EMBED_MODEL, prefix: str = ""):
         self.model = model
+        self.prefix = prefix  # task prefix prepended to every input (see PREFIX_SCHEMES)
 
     async def _embed_one(self, client: httpx.AsyncClient, text: str) -> tuple[List[float], bool]:
-        prompt = (text or "").strip()
-        if not prompt:
+        body = (text or "").strip()
+        if not body:
             raise RuntimeError("Empty text cannot be embedded")
-        original_len = len(prompt)
-        if EMBED_MAX_CHARS > 0 and len(prompt) > EMBED_MAX_CHARS:
-            prompt = prompt[:EMBED_MAX_CHARS].strip()
+        original_len = len(body)
+        # The prefix counts against the char budget, and shrinking never cuts into it.
+        budget = EMBED_MAX_CHARS - len(self.prefix) if EMBED_MAX_CHARS > 0 else 0
+        if budget > 0 and len(body) > budget:
+            body = body[:budget].strip()
 
         tries = max(1, EMBED_RETRIES)
         min_len = max(1, EMBED_MIN_CHARS)
         last_r: httpx.Response | None = None
         for _ in range(tries):
+            prompt = self.prefix + body
             payload = {"model": self.model, "prompt": prompt, "keep_alive": OLLAMA_KEEP_ALIVE}
             r = await _EMBED_WORKERS.run(
                 lambda: run_with_oom_wait(
@@ -115,13 +141,13 @@ class OllamaEmbeddingClient(EmbeddingClient):
                 emb = data.get("embedding")
                 if not isinstance(emb, list) or not emb:
                     raise RuntimeError("Ollama embeddings returned empty embedding")
-                return [float(x) for x in emb], len(prompt) != original_len
+                return [float(x) for x in emb], len(body) != original_len
 
-            body = r.text or ""
-            if _is_context_len_error(r.status_code, body) and len(prompt) > min_len:
-                prompt = prompt[: max(min_len, len(prompt) // 2)].strip()
+            err = r.text or ""
+            if _is_context_len_error(r.status_code, err) and len(body) > min_len:
+                body = body[: max(min_len, len(body) // 2)].strip()
                 continue
-            raise RuntimeError(f"Ollama embeddings failed: {r.status_code} {body}")
+            raise RuntimeError(f"Ollama embeddings failed: {r.status_code} {err}")
 
         if last_r is not None:
             raise RuntimeError(

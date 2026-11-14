@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import (
     CHAT_HISTORY_MAX_MSGS, CHAT_MODEL, DEV_AUTH_BYPASS, EMBED_MODEL,
-    OLLAMA_KEEP_ALIVE, OLLAMA_TIMEOUT, OLLAMA_URL,
+    OLLAMA_KEEP_ALIVE, OLLAMA_TIMEOUT, OLLAMA_URL, QUERY_PREFIX,
     RAG_ENABLED, RAG_MAX_CONTEXT_CHARS, RAG_TOP_K, SYSTEM_PROMPT, UTC,
 )
 from app import retrieval
@@ -126,6 +126,11 @@ async def ollama_embed(text: str) -> list[float]:
     return [float(x) for x in emb]
 
 
+async def embed_query(text: str) -> list[float]:
+    """Embed a retrieval query: ``ollama_embed`` with the task prefix (``EMBED_TASK_PREFIXES``)."""
+    return await ollama_embed(QUERY_PREFIX + text)
+
+
 def last_user_message(msgs: List[Msg]) -> Optional[str]:
     for m in reversed(msgs or []):
         if m.role == "user" and m.content and m.content.strip():
@@ -177,7 +182,7 @@ async def rag_context_for(msgs: List[Msg]) -> Optional[str]:
     if status["ok"] is False:  # logged by embedder_status; answering without context beats wrong context
         return None
     try:
-        q_emb = await ollama_embed(query)
+        q_emb = await embed_query(query)
     except HTTPException:
         raise
     except Exception as e:
