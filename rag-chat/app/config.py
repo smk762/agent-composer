@@ -22,7 +22,18 @@ for _quiet in ("aiosqlite", "sqlalchemy.engine", "httpcore", "httpx", "hpack"):
     logging.getLogger(_quiet).setLevel(logging.WARNING)
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
-OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "15m").strip()
+# keep_alive sent on every Ollama request. "server" (or empty/"none"/"off")
+# sends none, so the Ollama server's own keep-alive governs residency: set it
+# when argus-iris owns idle/keepalive policy, or each request resets the timer.
+_KEEP_ALIVE_RAW = os.getenv("OLLAMA_KEEP_ALIVE", "15m").strip()
+OLLAMA_KEEP_ALIVE = "" if _KEEP_ALIVE_RAW.lower() in ("", "server", "none", "off") else _KEEP_ALIVE_RAW
+
+
+def ollama_keep_alive() -> dict:
+    """``{"keep_alive": ...}`` to splat into an Ollama payload, or ``{}``."""
+    return {"keep_alive": OLLAMA_KEEP_ALIVE} if OLLAMA_KEEP_ALIVE else {}
+
+
 CHAT_MODEL = os.getenv("CHAT_MODEL", "llama3.2:3b")
 # SingGuard 4B. The 4B is the image-safety sweet spot in the model card;
 # the 8B does not beat it there. Q4_K_M is the default pull; Q8_0 and F16
@@ -100,6 +111,10 @@ PROVIDER_ENCRYPTION_KEY = os.getenv("PROVIDER_ENCRYPTION_KEY", "")
 
 MODERNBERT_URL = os.getenv("MODERNBERT_URL", "http://modernbert:7998")
 INFINITY_URL = os.getenv("INFINITY_URL", "http://infinity:7997").rstrip("/")
+# Bearer token the GPU sidecars require on /admin/* when set (argus-iris resident
+# contract); rag-chat forwards it when it proxies admin calls.
+ARGUS_ADMIN_TOKEN = os.getenv("ARGUS_ADMIN_TOKEN", "").strip()
+RESIDENT_ADMIN_TIMEOUT = float(os.getenv("RESIDENT_ADMIN_TIMEOUT", "300"))
 
 # ── Voice services ────────────────────────────────────────────────────────────
 # STT (Whisper) is a single sidecar. TTS is a *registry* of one or more engines

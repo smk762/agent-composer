@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.auth import require_user
-from app.config import CHAT_MODEL, MODERNBERT_URL, OLLAMA_KEEP_ALIVE, OLLAMA_TIMEOUT, OLLAMA_URL
+from app.config import CHAT_MODEL, MODERNBERT_URL, OLLAMA_TIMEOUT, OLLAMA_URL, ollama_keep_alive
 
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 
@@ -140,7 +140,7 @@ async def _ollama_generate(model: str, system: str, prompt: str) -> str:
         "system": system,
         "prompt": prompt,
         "stream": False,
-        "keep_alive": OLLAMA_KEEP_ALIVE,
+        **ollama_keep_alive(),
     }
     try:
         async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
@@ -159,7 +159,7 @@ async def _ollama_stream(model: str, system: str, prompt: str) -> AsyncIterator[
         "system": system,
         "prompt": prompt,
         "stream": True,
-        "keep_alive": OLLAMA_KEEP_ALIVE,
+        **ollama_keep_alive(),
     }
     try:
         async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:

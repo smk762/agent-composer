@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import (
     CHAT_HISTORY_MAX_MSGS, CHAT_MODEL, DEV_AUTH_BYPASS, EMBED_MODEL,
-    OLLAMA_KEEP_ALIVE, OLLAMA_TIMEOUT, OLLAMA_URL, QUERY_PREFIX,
+    OLLAMA_TIMEOUT, OLLAMA_URL, QUERY_PREFIX, ollama_keep_alive,
     RAG_ENABLED, RAG_MAX_CONTEXT_CHARS, RAG_TOP_K, SYSTEM_PROMPT, UTC,
 )
 from app import retrieval
@@ -121,7 +121,7 @@ async def _resolve_model(requested: str) -> str:
 
 
 async def ollama_embed(text: str) -> list[float]:
-    payload = {"model": EMBED_MODEL, "prompt": text, "keep_alive": OLLAMA_KEEP_ALIVE}
+    payload = {"model": EMBED_MODEL, "prompt": text, **ollama_keep_alive()}
     async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
         r = await client.post(f"{OLLAMA_URL}/api/embeddings", json=payload)
     if r.status_code != 200:
@@ -425,7 +425,7 @@ async def chat(
                 "model": model,
                 "messages": [_msg_to_ollama_format(m) for m in msgs],
                 "stream": True,
-                "keep_alive": OLLAMA_KEEP_ALIVE,
+                **ollama_keep_alive(),
             }
             if req.temperature is not None:
                 payload["options"] = payload.get("options", {})
@@ -523,7 +523,7 @@ async def chat(
         "model": model,
         "messages": [_msg_to_ollama_format(m) for m in msgs],
         "stream": False,
-        "keep_alive": OLLAMA_KEEP_ALIVE,
+        **ollama_keep_alive(),
     }
     if req.temperature is not None:
         payload["options"] = payload.get("options", {})

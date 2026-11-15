@@ -70,7 +70,10 @@ if os.getenv("EMBED_BACKEND", "ollama").strip().lower() not in ("", "ollama"):
         "EMBED_BACKEND=%s is ignored: text is always embedded with Ollama, the backend rag-chat "
         "queries with (code always uses Infinity)", os.getenv("EMBED_BACKEND"))
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434").rstrip("/")
-OLLAMA_KEEP_ALIVE = os.getenv("OLLAMA_KEEP_ALIVE", "15m").strip()
+# "server" (or empty/"none"/"off") sends no keep_alive, leaving residency to the
+# Ollama server (and argus-iris, when it owns the policy). Same rule as rag-chat.
+_KEEP_ALIVE_RAW = os.getenv("OLLAMA_KEEP_ALIVE", "15m").strip()
+OLLAMA_KEEP_ALIVE = "" if _KEEP_ALIVE_RAW.lower() in ("", "server", "none", "off") else _KEEP_ALIVE_RAW
 EMBED_TIMEOUT_S = _env_int("EMBED_TIMEOUT_S", 120)
 EMBED_MAX_CHARS = _env_int("EMBED_MAX_CHARS", 4000)
 EMBED_MIN_CHARS = _env_int("EMBED_MIN_CHARS", 200)
@@ -126,7 +129,9 @@ class OllamaEmbeddingClient(EmbeddingClient):
         last_r: httpx.Response | None = None
         for _ in range(tries):
             prompt = self.prefix + body
-            payload = {"model": self.model, "prompt": prompt, "keep_alive": OLLAMA_KEEP_ALIVE}
+            payload = {"model": self.model, "prompt": prompt}
+            if OLLAMA_KEEP_ALIVE:
+                payload["keep_alive"] = OLLAMA_KEEP_ALIVE
             r = await _EMBED_WORKERS.run(
                 lambda: run_with_oom_wait(
                     lambda: client.post(f"{OLLAMA_URL}/api/embeddings", json=payload),
