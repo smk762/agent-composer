@@ -219,11 +219,15 @@ async def _summary(name: str) -> Dict[str, Any]:
         status, body = await _call(name, "GET", "/health", _HEALTH_TIMEOUT)
     except HTTPException as exc:
         return {"name": name, "reachable": False, "status_code": exc.status_code, "detail": exc.detail}
+    body = body if isinstance(body, dict) else {}
     return {
         "name": name,
         "reachable": True,
         "status_code": status,
-        "gpu": body.get("gpu") if isinstance(body, dict) else None,
+        "model_state": body.get("model_state"),
+        "busy": body.get("busy"),
+        "idle_s": body.get("idle_s"),
+        "gpu": body.get("gpu"),
     }
 
 
