@@ -36,6 +36,7 @@ def whisper(monkeypatch):
     monkeypatch.delenv("ARGUS_ADMIN_TOKEN", raising=False)
     monkeypatch.setattr(ws, "_model", None)
     monkeypatch.setattr(ws, "_last_used", 0.0)
+    monkeypatch.setattr(ws, "_active", 0)
     return TestClient(ws.app)
 
 
@@ -105,3 +106,24 @@ def test_tts_admin_token(tts, monkeypatch):
     monkeypatch.setenv("ARGUS_ADMIN_TOKEN", "s3cret")
     assert client.post("/admin/unload").status_code == 401
     assert client.post("/admin/unload", headers={"Authorization": "Bearer s3cret"}).status_code == 200
+
+
+def test_whisper_refuses_unload_mid_transcription(whisper, monkeypatch):
+    model = object()
+    monkeypatch.setattr(ws, "_model", model)
+    monkeypatch.setattr(ws, "_active", 1)
+    for route in ("/admin/unload", "/admin/evict"):
+        r = whisper.post(route)
+        assert r.status_code == 409 and r.json()["status"] == "busy"
+    assert ws._model is model
+    health = whisper.get("/health").json()
+    assert health["busy"] is True and health["idle_s"] is None
+
+
+def test_top_level_state_matches_voluptas_shape(whisper, tts):
+    """voluptas's argus-http residents put model_state, busy and idle_s at the
+    top of /health; ours carry them there too, beside the lens-shaped gpu block."""
+    for client in (whisper, tts[0]):
+        body = client.get("/health").json()
+        assert {"model_state", "busy", "idle_s", "gpu"} <= set(body)
+        assert body["busy"] is False

@@ -78,6 +78,7 @@ STT_AUDIO_URL_ALLOWED_HOSTS = _parse_allowed_hosts(os.getenv("STT_AUDIO_URL_ALLO
 
 _model = None
 _last_used: float = 0.0
+_active = 0  # transcriptions in flight; admin unload/evict refuse (409) while > 0
 _lock = asyncio.Lock()
 _evict_task: Optional[asyncio.Task] = None
 
@@ -254,8 +255,10 @@ def _gpu_memory_info() -> dict | None:
 
 async def _run_transcription(tmp_path: str, language: str | None, endpoint: str) -> dict:
     """Shared transcription runner with GPU error handling."""
+    global _active, _last_used
     model = await _ensure_model()
     t0 = time.monotonic()
+    _active += 1
     try:
         result = await asyncio.to_thread(_transcribe_sync, tmp_path, language, model)
     except RuntimeError as exc:
@@ -284,6 +287,9 @@ async def _run_transcription(tmp_path: str, language: str | None, endpoint: str)
             status_code=500,
             content={"error": f"Transcription failed: {exc}"},
         )
+    finally:
+        _active -= 1
+        _last_used = time.time()  # idle time counts from the end of the work
 
     elapsed_ms = int((time.monotonic() - t0) * 1000)
     logger.info(
@@ -512,6 +518,8 @@ async def health():
         "compute_type": STT_COMPUTE_TYPE,
         "model_loaded": loaded,
         "model_state": "gpu" if loaded else "unloaded",
+        "busy": _active > 0,
+        "idle_s": _resident_gpu()["idle_s"],
         "keep_alive_gpu": STT_KEEP_ALIVE_GPU,
         "gpu": _resident_gpu(),
     }
@@ -549,31 +557,44 @@ def _resident_gpu() -> dict:
     return {
         "loaded": loaded,
         "model_state": "gpu" if loaded else "unloaded",
-        "idle_s": round(time.time() - _last_used, 1) if _last_used else None,
+        "idle_s": round(time.time() - _last_used, 1) if _last_used and not _active else None,
         "free_vram_mb": _free_vram_mb(),
     }
 
 
-async def _unload_now() -> dict:
+def _busy_response() -> JSONResponse:
+    return JSONResponse(
+        status_code=409,
+        content={"status": "busy", "active": _active, "model_state": "gpu" if _model is not None else "unloaded"},
+    )
+
+
+async def _unload_now(status: str):
+    """Unload under the lock. A request bumps ``_active`` right after
+    ``_ensure_model`` releases the lock, with no await in between, so checking
+    it here cannot miss one that already holds the model."""
     global _evict_task
     async with _lock:
+        if _active:
+            return _busy_response()
         was_loaded = _model is not None
         _unload_model()
         if _evict_task and not _evict_task.done():
             _evict_task.cancel()
-    return {"unloaded": was_loaded, "model_state": "unloaded", "gpu": _resident_gpu()}
+    return {"status": status, "unloaded": was_loaded, "model_state": "unloaded", "gpu": _resident_gpu()}
 
 
 @app.post("/admin/evict", dependencies=[Depends(_require_admin)])
 async def admin_evict():
-    """Force-unload model, freeing VRAM immediately (no CPU stage here)."""
-    return {"status": "evicted", **await _unload_now()}
+    """Force-unload model, freeing VRAM immediately (no CPU stage here).
+    409 while a transcription holds the model: its VRAM would not come back yet."""
+    return await _unload_now("evicted")
 
 
 @app.post("/admin/unload", dependencies=[Depends(_require_admin)])
 async def admin_unload():
-    """Fully unload the model; it reloads lazily on the next request."""
-    return {"status": "unloaded", **await _unload_now()}
+    """Fully unload the model; it reloads lazily on the next request. 409 while busy."""
+    return await _unload_now("unloaded")
 
 
 @app.post("/admin/wake", dependencies=[Depends(_require_admin)])

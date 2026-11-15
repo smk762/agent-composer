@@ -90,12 +90,16 @@ class ResidentGatewayTest(unittest.TestCase):
         self.assertEqual(_Upstream.calls[-1][2], {})
 
     def test_list_marks_unreachable(self) -> None:
-        _Upstream.answers["http://mb:7998/health"] = (200, {"gpu": {"loaded": True, "model_state": "gpu"}})
+        _Upstream.answers["http://mb:7998/health"] = (
+            200,
+            {"model_state": "gpu", "busy": True, "idle_s": None, "gpu": {"loaded": True, "model_state": "gpu"}},
+        )
         body = self.client.get("/api/runtime/residents").json()["residents"]
         by_name = {r["name"]: r for r in body}
         self.assertEqual(set(by_name), {"modernbert", "whisper", "infinity", "xtts"})
         self.assertTrue(by_name["modernbert"]["reachable"])
         self.assertEqual(by_name["modernbert"]["gpu"]["model_state"], "gpu")
+        self.assertIs(by_name["modernbert"]["busy"], True)
         self.assertFalse(by_name["whisper"]["reachable"])
         self.assertEqual(by_name["whisper"]["status_code"], 503)
 
