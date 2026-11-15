@@ -24,7 +24,7 @@ from app.config import (
     GUARD_MODEL,
     GUARD_THINKING,
     GUARD_WORKER_CONCURRENCY,
-    OLLAMA_KEEP_ALIVE,
+    ollama_keep_alive,
     OLLAMA_TIMEOUT,
     OLLAMA_URL,
     log,
@@ -178,7 +178,7 @@ def _ollama_request(
             "model": model,
             "messages": messages,
             "stream": False,
-            "keep_alive": OLLAMA_KEEP_ALIVE,
+            **ollama_keep_alive(),
             "options": _ollama_options(thinking),
         }
         return f"{OLLAMA_URL}/api/chat", payload
@@ -189,7 +189,7 @@ def _ollama_request(
         "prompt": prompt,
         "raw": True,
         "stream": False,
-        "keep_alive": OLLAMA_KEEP_ALIVE,
+        **ollama_keep_alive(),
         "options": {**_ollama_options(thinking), "stop": ["<|im_end|>"]},
     }
     return f"{OLLAMA_URL}/api/generate", payload

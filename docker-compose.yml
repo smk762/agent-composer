@@ -74,6 +74,8 @@ services:
     restart: unless-stopped
     gpus: all
     environment:
+      # argus-iris resident contract: Bearer token for /admin/* (open when empty).
+      - ARGUS_ADMIN_TOKEN=${ARGUS_ADMIN_TOKEN:-}
       - HF_HOME=/data/hf
       # Comma-separated. To serve the reranker too: ${EMBED_MODEL_CODE},BAAI/bge-reranker-v2-m3
       - INFINITY_MODEL_IDS=${INFINITY_MODEL_IDS:-${EMBED_MODEL_CODE:-nomic-ai/CodeRankEmbed}}
@@ -172,6 +174,8 @@ services:
       - rag_chat_data:/data
       - rag_chat_media:/data/media
     environment:
+      # Forwarded to the GPU sidecars' /admin/* by /api/runtime/residents (argus-iris).
+      - ARGUS_ADMIN_TOKEN=${ARGUS_ADMIN_TOKEN:-}
       - OLLAMA_URL=http://ollama:11434
       - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-15m}
       - MODERNBERT_URL=${MODERNBERT_URL:-http://modernbert:7998}
@@ -278,6 +282,8 @@ services:
     restart: unless-stopped
     gpus: all
     environment:
+      # argus-iris resident contract: Bearer token for /admin/* (open when empty).
+      - ARGUS_ADMIN_TOKEN=${ARGUS_ADMIN_TOKEN:-}
       - MODERNBERT_MODEL=${MODERNBERT_MODEL:-answerdotai/ModernBERT-base}
       - MODERNBERT_TASK=${MODERNBERT_TASK:-zero_shot}
       - MODERNBERT_DEVICE=${MODERNBERT_DEVICE:-auto}
@@ -319,6 +325,8 @@ services:
     container_name: whisper
     restart: unless-stopped
     environment:
+      # argus-iris resident contract: Bearer token for /admin/* (open when empty).
+      - ARGUS_ADMIN_TOKEN=${ARGUS_ADMIN_TOKEN:-}
       - STT_MODEL=${STT_MODEL:-large-v3-turbo}
       - STT_DEVICE=${STT_DEVICE:-cuda}
       - STT_COMPUTE_TYPE=${STT_COMPUTE_TYPE:-float16}
@@ -367,6 +375,8 @@ services:
     container_name: tts
     restart: unless-stopped
     environment:
+      # argus-iris resident contract: Bearer token for /admin/* (open when empty).
+      - ARGUS_ADMIN_TOKEN=${ARGUS_ADMIN_TOKEN:-}
       - TTS_MODEL_SIZE=${TTS_MODEL_SIZE:-0.6b}
       - TTS_DEVICE=${TTS_DEVICE:-cuda:0}
       - TTS_LOAD_MODELS=${TTS_LOAD_MODELS:-both}
@@ -420,6 +430,8 @@ services:
     container_name: xtts
     restart: unless-stopped
     environment:
+      # argus-iris resident contract: Bearer token for /admin/* (open when empty).
+      - ARGUS_ADMIN_TOKEN=${ARGUS_ADMIN_TOKEN:-}
       - XTTS_MODEL=${XTTS_MODEL:-tts_models/multilingual/multi-dataset/xtts_v2}
       - XTTS_DEVICE=${XTTS_DEVICE:-cuda:0}
       - XTTS_PRELOAD=${XTTS_PRELOAD:-0}

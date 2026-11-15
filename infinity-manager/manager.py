@@ -7,6 +7,7 @@ memory. Exposes /health plus /admin/status, /admin/wake and /admin/evict.
 """
 
 import asyncio
+import hmac
 import os
 import signal
 import time
@@ -14,7 +15,8 @@ from typing import Dict, List, Optional
 
 import aiohttp
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 
 
 LISTEN_HOST = os.getenv("INFINITY_MANAGER_HOST", "0.0.0.0")
@@ -159,21 +161,45 @@ async def shutdown() -> None:
         await _stop_locked()
 
 
+def _require_admin(authorization: Optional[str] = Header(default=None)) -> None:
+    """``Authorization: Bearer <ARGUS_ADMIN_TOKEN>`` on admin POSTs when the env var is set."""
+    token = os.environ.get("ARGUS_ADMIN_TOKEN", "")
+    if token and not hmac.compare_digest((authorization or "").encode(), f"Bearer {token}".encode()):
+        raise HTTPException(401, detail="admin token required")
+
+
+def _running() -> bool:
+    return bool(_process and _process.returncode is None)
+
+
+def _resident_gpu() -> Dict[str, object]:
+    """``gpu`` block of the argus-iris resident contract. The manager holds no
+    CUDA context, so free VRAM is left to iris's node agent."""
+    running = _running()
+    return {
+        "loaded": running,
+        "model_state": ("gpu" if DEVICE.startswith("cuda") else "cpu") if running else "unloaded",
+        "idle_s": round(time.time() - _last_used, 1) if _last_used else None,
+        "active": _active_requests,
+        "free_vram_mb": None,
+    }
+
+
 @app.get("/health")
-async def health() -> Dict[str, float | str | bool | None]:
-    running = bool(_process and _process.returncode is None)
+async def health() -> Dict[str, object]:
     return {
         "status": "ok",
-        "state": "running" if running else "evicted",
+        "state": "running" if _running() else "evicted",
         "managed": True,
         "idle_timeout": IDLE_TIMEOUT_S,
         "last_used": _last_used or None,
+        "gpu": _resident_gpu(),
     }
 
 
 @app.get("/admin/status")
 async def admin_status() -> Dict[str, object]:
-    running = bool(_process and _process.returncode is None)
+    running = _running()
     return {
         "state": "running" if running else "evicted",
         "managed": True,
@@ -182,22 +208,41 @@ async def admin_status() -> Dict[str, object]:
         "idle_timeout": IDLE_TIMEOUT_S,
         "last_used": _last_used or None,
         "upstream": UPSTREAM,
+        "gpu": _resident_gpu(),
     }
 
 
-@app.post("/admin/wake")
+@app.post("/admin/wake", dependencies=[Depends(_require_admin)])
 async def admin_wake() -> Dict[str, object]:
     await _ensure_started()
     return await admin_status()
 
 
-@app.post("/admin/evict")
-async def admin_evict() -> Dict[str, object]:
+async def _stop_if_idle() -> Response | Dict[str, object]:
     async with _lock:
+        if _active_requests:
+            # Killing the child would fail the requests it is serving.
+            return JSONResponse(
+                status_code=409,
+                content={"status": "busy", "active": _active_requests, "state": "running"},
+            )
         stopped = await _stop_locked()
     status = await admin_status()
     status["evicted"] = stopped
+    status["unloaded"] = stopped
     return status
+
+
+@app.post("/admin/evict", dependencies=[Depends(_require_admin)])
+async def admin_evict():
+    """Stop the Infinity child (no CPU stage); 409 while requests are in flight."""
+    return await _stop_if_idle()
+
+
+@app.post("/admin/unload", dependencies=[Depends(_require_admin)])
+async def admin_unload():
+    """Alias of /admin/evict under the resident-contract name."""
+    return await _stop_if_idle()
 
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])

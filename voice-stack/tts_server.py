@@ -37,9 +37,11 @@ Env vars:
 
 import asyncio
 import gc
+import hmac
 import io
 import os
 import re
+import sys
 import tempfile
 import threading
 import time
@@ -51,7 +53,7 @@ from enum import Enum
 from typing import AsyncIterator, Optional
 
 import structlog
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
@@ -841,7 +843,7 @@ async def list_speakers():
 async def health():
     if _mgr.state == TTSState.LOADING:
         return JSONResponse(status_code=503, content={"status": "loading"})
-    gpu_info = _gpu_memory_info()
+    gpu_info = _resident_gpu()
     return {
         "status": "ok",
         "engine": "qwen-tts",
@@ -857,22 +859,65 @@ async def health():
     }
 
 
-@app.post("/admin/evict")
+# ── Resident contract (argus-iris argus-http adapter) ─────────────────────────
+# /health carries a ``gpu`` block (loaded, model_state, idle_s, free_vram_mb),
+# POST /admin/evict demotes to CPU, /admin/unload frees the model, /admin/wake
+# preloads it. Set ARGUS_ADMIN_TOKEN to require ``Authorization: Bearer <token>``
+# on the admin routes (open when unset).
+
+
+def _require_admin(authorization: Optional[str] = Header(default=None)) -> None:
+    token = os.environ.get("ARGUS_ADMIN_TOKEN", "")
+    if token and not hmac.compare_digest((authorization or "").encode(), f"Bearer {token}".encode()):
+        raise HTTPException(401, detail="admin token required")
+
+
+def _free_vram_mb() -> Optional[int]:
+    """Device-wide free VRAM, only when this process already holds a CUDA
+    context: creating one just to answer /health would cost VRAM itself."""
+    torch = sys.modules.get("torch")
+    try:
+        if torch is not None and torch.cuda.is_initialized():
+            return int(torch.cuda.mem_get_info()[0] / 1024**2)
+    except Exception:
+        pass
+    return None
+
+
+def _resident_gpu() -> dict:
+    """``gpu`` block for /health and the admin responses."""
+    torch = sys.modules.get("torch")
+    try:
+        mem = _gpu_memory_info() if torch is not None and torch.cuda.is_initialized() else None
+    except Exception:
+        mem = None
+    last_used = _mgr._last_used
+    return {
+        **(mem or {}),
+        "loaded": _mgr.state in (TTSState.CPU, TTSState.GPU),
+        "model_state": _mgr.state.value,
+        "idle_s": round(time.time() - last_used, 1) if last_used else None,
+        "free_vram_mb": _free_vram_mb(),
+    }
+
+
+@app.post("/admin/evict", dependencies=[Depends(_require_admin)])
 async def admin_evict():
     """Force-demote models from GPU to CPU, freeing VRAM immediately."""
     await _mgr.demote_to_cpu()
-    return {"status": "evicted", "model_state": _mgr.state.value}
+    return {"status": "evicted", "model_state": _mgr.state.value, "gpu": _resident_gpu()}
 
 
-@app.post("/admin/unload")
+@app.post("/admin/unload", dependencies=[Depends(_require_admin)])
 async def admin_unload():
     """Fully unload models from memory (GPU + CPU)."""
+    was_loaded = _mgr.state in (TTSState.CPU, TTSState.GPU)
     await _mgr.unload()
-    return {"status": "unloaded", "model_state": _mgr.state.value}
+    return {"status": "unloaded", "unloaded": was_loaded, "model_state": _mgr.state.value, "gpu": _resident_gpu()}
 
 
-@app.post("/admin/wake")
+@app.post("/admin/wake", dependencies=[Depends(_require_admin)])
 async def admin_wake():
     """Load models and promote to GPU."""
     await _mgr.ensure_gpu()
-    return {"status": "ready", "model_state": _mgr.state.value}
+    return {"status": "ready", "model_state": _mgr.state.value, "gpu": _resident_gpu()}

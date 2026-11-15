@@ -2,15 +2,19 @@
 label CRUD, /classify and /embed endpoints backed by the lazily loaded ModelManager.
 """
 
+import hmac
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
+from typing import Optional
 
+import torch
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 
 from .classifier import Classifier
-from .model import ModelManager
+from .model import ModelManager, ModelState
 from .schemas import (ClassifyRequest, ClassifyResponse, EmbedRequest,
                       EmbedResponse, LabelUpdate, ModelStatus)
 
@@ -37,10 +41,36 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="ModernBERT Classifier", lifespan=lifespan)
 
 
+def _require_admin(authorization: Optional[str] = Header(default=None)) -> None:
+    """``Authorization: Bearer <ARGUS_ADMIN_TOKEN>`` on /admin/* when the env var is set."""
+    token = os.environ.get("ARGUS_ADMIN_TOKEN", "")
+    if token and not hmac.compare_digest((authorization or "").encode(), f"Bearer {token}".encode()):
+        raise HTTPException(status_code=401, detail="admin token required")
+
+
+def _resident_gpu() -> dict:
+    """``gpu`` block of the argus-iris resident contract (lens-shaped)."""
+    free = None
+    try:
+        # Only with a context already open: creating one would cost VRAM itself.
+        if torch.cuda.is_initialized():
+            free = int(torch.cuda.mem_get_info()[0] / 1024**2)
+    except Exception:
+        pass
+    last_used = manager._last_used
+    return {
+        "loaded": manager.state in (ModelState.CPU, ModelState.GPU),
+        "model_state": manager.state,
+        "device": manager.current_device(),
+        "idle_s": round(time.time() - last_used, 1) if last_used else None,
+        "free_vram_mb": free,
+    }
+
+
 @app.get("/health")
 async def health():
     # Always 200; callers inspect model_state to know if inference is ready.
-    return {"status": "ok", "model_state": manager.state, "error": manager.error}
+    return {"status": "ok", "model_state": manager.state, "error": manager.error, "gpu": _resident_gpu()}
 
 
 @app.get("/model/status", response_model=ModelStatus)
@@ -78,6 +108,31 @@ async def unload_model():
     """Full unload — frees VRAM and RAM."""
     await manager.unload()
     return {"state": manager.state}
+
+
+# argus-iris resident contract: the same lifecycle under the /admin/* names the
+# other sidecars use, gated by ARGUS_ADMIN_TOKEN. /model/* stays as rag-chat's
+# internal path.
+
+@app.post("/admin/wake", dependencies=[Depends(_require_admin)])
+async def admin_wake():
+    await manager.ensure_ready()
+    return {"status": "ready", "model_state": manager.state, "gpu": _resident_gpu()}
+
+
+@app.post("/admin/evict", dependencies=[Depends(_require_admin)])
+async def admin_evict():
+    """GPU → CPU (waits for in-flight inference)."""
+    await manager.evict()
+    return {"status": "evicted", "model_state": manager.state, "gpu": _resident_gpu()}
+
+
+@app.post("/admin/unload", dependencies=[Depends(_require_admin)])
+async def admin_unload():
+    """Full unload (waits for in-flight inference); reloads on the next request."""
+    was_loaded = manager.state in (ModelState.CPU, ModelState.GPU)
+    await manager.unload()
+    return {"status": "unloaded", "unloaded": was_loaded, "model_state": manager.state, "gpu": _resident_gpu()}
 
 
 @app.get("/labels")

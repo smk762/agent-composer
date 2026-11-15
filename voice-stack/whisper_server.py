@@ -41,10 +41,12 @@ audio_url SSRF policy (/transcriptions):
 import asyncio
 import base64
 import gc
+import hmac
 import ipaddress
 import os
 import socket
 import subprocess
+import sys
 import tempfile
 import time
 from typing import Optional
@@ -53,7 +55,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 import numpy as np
 import structlog
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Depends, FastAPI, File, Header, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -239,7 +241,7 @@ def _gpu_memory_info() -> dict | None:
         if torch.cuda.is_available():
             allocated = torch.cuda.memory_allocated() / 1024**2
             reserved = torch.cuda.memory_reserved() / 1024**2
-            total = torch.cuda.get_device_properties(0).total_mem / 1024**2
+            total = torch.cuda.get_device_properties(0).total_memory / 1024**2
             return {
                 "allocated_mb": round(allocated, 1),
                 "reserved_mb": round(reserved, 1),
@@ -511,22 +513,71 @@ async def health():
         "model_loaded": loaded,
         "model_state": "gpu" if loaded else "unloaded",
         "keep_alive_gpu": STT_KEEP_ALIVE_GPU,
+        "gpu": _resident_gpu(),
     }
     if not decoder["ok"]:
         return JSONResponse(status_code=503, content=body)
     return body
 
 
-@app.post("/admin/evict")
-async def admin_evict():
-    """Force-unload model, freeing VRAM immediately."""
+# ── Resident contract (argus-iris argus-http adapter) ─────────────────────────
+# /health carries a ``gpu`` block, POST /admin/unload frees the model, and
+# /admin/wake preloads it. Set ARGUS_ADMIN_TOKEN to require
+# ``Authorization: Bearer <token>`` on the admin routes (open when unset).
+
+
+def _require_admin(authorization: Optional[str] = Header(default=None)) -> None:
+    token = os.environ.get("ARGUS_ADMIN_TOKEN", "")
+    if token and not hmac.compare_digest((authorization or "").encode(), f"Bearer {token}".encode()):
+        raise HTTPException(401, detail="admin token required")
+
+
+def _free_vram_mb() -> Optional[int]:
+    """Device-wide free VRAM, only when this process already holds a CUDA
+    context: creating one just to answer /health would cost VRAM itself."""
+    torch = sys.modules.get("torch")
+    try:
+        if torch is not None and torch.cuda.is_initialized():
+            return int(torch.cuda.mem_get_info()[0] / 1024**2)
+    except Exception:
+        pass
+    return None
+
+
+def _resident_gpu() -> dict:
+    loaded = _model is not None
+    return {
+        "loaded": loaded,
+        "model_state": "gpu" if loaded else "unloaded",
+        "idle_s": round(time.time() - _last_used, 1) if _last_used else None,
+        "free_vram_mb": _free_vram_mb(),
+    }
+
+
+async def _unload_now() -> dict:
+    global _evict_task
     async with _lock:
+        was_loaded = _model is not None
         _unload_model()
-    return {"status": "evicted", "model_state": "unloaded"}
+        if _evict_task and not _evict_task.done():
+            _evict_task.cancel()
+    return {"unloaded": was_loaded, "model_state": "unloaded", "gpu": _resident_gpu()}
 
 
-@app.post("/admin/wake")
+@app.post("/admin/evict", dependencies=[Depends(_require_admin)])
+async def admin_evict():
+    """Force-unload model, freeing VRAM immediately (no CPU stage here)."""
+    return {"status": "evicted", **await _unload_now()}
+
+
+@app.post("/admin/unload", dependencies=[Depends(_require_admin)])
+async def admin_unload():
+    """Fully unload the model; it reloads lazily on the next request."""
+    return {"status": "unloaded", **await _unload_now()}
+
+
+@app.post("/admin/wake", dependencies=[Depends(_require_admin)])
 async def admin_wake():
     """Pre-load model onto GPU."""
     await _ensure_model()
-    return {"status": "ready", "model_state": "gpu"}
+    return {"status": "ready", "model_state": "gpu", "gpu": _resident_gpu()}
