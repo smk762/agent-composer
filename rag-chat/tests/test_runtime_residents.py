@@ -1,4 +1,4 @@
-"""GPU-resident gateway (/api/runtime/residents) and the OLLAMA_KEEP_ALIVE=server switch."""
+"""GPU-resident gateway (/api/runtime/residents) and the OLLAMA_REQUEST_KEEP_ALIVE=server switch."""
 
 import importlib
 import os
@@ -108,13 +108,17 @@ class ResidentGatewayTest(unittest.TestCase):
 
 
 class KeepAliveSwitchTest(unittest.TestCase):
-    def _config(self, value):
+    def _config(self, value, request=None):
         from app import config
 
         env = {"OLLAMA_KEEP_ALIVE": value} if value is not None else {}
+        if request is not None:
+            env["OLLAMA_REQUEST_KEEP_ALIVE"] = request
         with patch.dict(os.environ, env, clear=False):
             if value is None:
                 os.environ.pop("OLLAMA_KEEP_ALIVE", None)
+            if request is None:
+                os.environ.pop("OLLAMA_REQUEST_KEEP_ALIVE", None)
             return importlib.reload(config)
 
     def tearDown(self) -> None:
@@ -134,6 +138,16 @@ class KeepAliveSwitchTest(unittest.TestCase):
 
     def test_explicit_value_passes_through(self) -> None:
         self.assertEqual(self._config("-1").ollama_keep_alive(), {"keep_alive": "-1"})
+
+    def test_request_variable_wins_over_the_daemon_default(self) -> None:
+        """OLLAMA_KEEP_ALIVE stays the daemon's duration; the clients send none (#53)."""
+        self.assertEqual(self._config("15m", request="server").ollama_keep_alive(), {})
+        self.assertEqual(self._config("15m", request="30m").ollama_keep_alive(), {"keep_alive": "30m"})
+        self.assertEqual(self._config(None, request="-1").ollama_keep_alive(), {"keep_alive": "-1"})
+
+    def test_empty_request_variable_falls_back(self) -> None:
+        # As compose's ${OLLAMA_REQUEST_KEEP_ALIVE:-...} does.
+        self.assertEqual(self._config("20m", request=" ").ollama_keep_alive(), {"keep_alive": "20m"})
 
 
 if __name__ == "__main__":

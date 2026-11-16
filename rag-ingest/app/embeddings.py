@@ -73,9 +73,11 @@ if os.getenv("EMBED_BACKEND", "ollama").strip().lower() not in ("", "ollama"):
         "EMBED_BACKEND=%s is ignored: text is always embedded with Ollama, the backend rag-chat "
         "queries with (code always uses Infinity)", os.getenv("EMBED_BACKEND"))
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434").rstrip("/")
-# "server" (or empty/"none"/"off") sends no keep_alive, leaving residency to the
-# Ollama server (and argus-iris, when it owns the policy). Same rule as rag-chat.
-_KEEP_ALIVE_RAW = os.getenv("OLLAMA_KEEP_ALIVE", "15m").strip()
+# OLLAMA_REQUEST_KEEP_ALIVE, else OLLAMA_KEEP_ALIVE (also the Ollama daemon's default
+# in compose, #53). "server" (or "none"/"off") sends no keep_alive, leaving residency
+# to the Ollama server (and argus-iris, when it owns the policy). Same rule as rag-chat.
+_KEEP_ALIVE_RAW = (os.getenv("OLLAMA_REQUEST_KEEP_ALIVE", "").strip()
+                   or os.getenv("OLLAMA_KEEP_ALIVE", "15m").strip())
 OLLAMA_KEEP_ALIVE = "" if _KEEP_ALIVE_RAW.lower() in ("", "server", "none", "off") else _KEEP_ALIVE_RAW
 EMBED_TIMEOUT_S = _env_int("EMBED_TIMEOUT_S", 120)
 EMBED_MAX_CHARS = _env_int("EMBED_MAX_CHARS", 4000)
