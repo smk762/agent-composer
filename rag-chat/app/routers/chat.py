@@ -23,6 +23,7 @@ from app.config import (
     RAG_ENABLED, RAG_MAX_CONTEXT_CHARS, RAG_TOP_K, SYSTEM_PROMPT, UTC,
 )
 from app import retrieval
+from app.gpu_lease import OllamaLeaseUnavailable, ollama_lease
 from app.db import get_db
 from app.auth import require_user
 from app.models.orm import Conversation, Message
@@ -122,8 +123,9 @@ async def _resolve_model(requested: str) -> str:
 
 async def ollama_embed(text: str) -> list[float]:
     payload = {"model": EMBED_MODEL, "prompt": text, **ollama_keep_alive()}
-    async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
-        r = await client.post(f"{OLLAMA_URL}/api/embeddings", json=payload)
+    async with ollama_lease(EMBED_MODEL, kind="embed-query", priority="interactive") as base_url:
+        async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
+            r = await client.post(f"{base_url}/api/embeddings", json=payload)
     if r.status_code != 200:
         raise HTTPException(r.status_code, r.text)
     data = r.json()
@@ -442,19 +444,24 @@ async def chat(
             acc_tools: list = []
             chunk_count = 0
             try:
-                async for chunk in stream_ollama_chat(OLLAMA_URL, payload, model, conv.id):
-                    yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
-                    chunk_count += 1
-                    if chunk.choices:
-                        delta = chunk.choices[0].delta
-                        if delta.content:
-                            acc_content += delta.content
-                        if delta.tool_calls:
-                            acc_tools.extend(delta.tool_calls)
+                async with ollama_lease(model, kind="chat", priority="interactive", caller=f"chat:{auth.user_id}") as base_url:
+                    async for chunk in stream_ollama_chat(base_url, payload, model, conv.id):
+                        yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+                        chunk_count += 1
+                        if chunk.choices:
+                            delta = chunk.choices[0].delta
+                            if delta.content:
+                                acc_content += delta.content
+                            if delta.tool_calls:
+                                acc_tools.extend(delta.tool_calls)
             except StreamError as e:
                 log.error("chat: stream error after %.1fs (%d chunks): %s",
                           time.monotonic() - t0, chunk_count, e)
                 yield f'data: {json.dumps({"error": str(e)})}\n\n'
+            except OllamaLeaseUnavailable as e:
+                # The response has started, so this is an SSE error, not a 503.
+                log.warning("chat: %s", e.detail)
+                yield f'data: {json.dumps({"error": e.detail, "retry_after": e.retry_after})}\n\n'
 
             stream_elapsed = time.monotonic() - t0
             log.info("chat: stream complete in %.1fs, %d chunks, %d chars, tool_calls=%s",
@@ -535,12 +542,13 @@ async def chat(
         payload["tools"] = [_tool_to_ollama_format(t) for t in req.tools]
 
     async def _ollama_chat(model_name: str) -> httpx.Response:
-        try:
-            async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
-                return await client.post(f"{OLLAMA_URL}/api/chat", json={**payload, "model": model_name})
-        except Exception as e:
-            log.error("chat: ollama unreachable for model %r: %s", model_name, e)
-            raise HTTPException(502, f"Ollama unreachable: {e}")
+        async with ollama_lease(model_name, kind="chat", priority="interactive", caller=f"chat:{auth.user_id}") as base_url:
+            try:
+                async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
+                    return await client.post(f"{base_url}/api/chat", json={**payload, "model": model_name})
+            except Exception as e:
+                log.error("chat: ollama unreachable for model %r: %s", model_name, e)
+                raise HTTPException(502, f"Ollama unreachable: {e}")
 
     log.info("chat: resolved model=%r, calling ollama (non-stream)", model)
     t0 = time.monotonic()

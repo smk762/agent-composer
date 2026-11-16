@@ -12,6 +12,7 @@ from typing import AsyncIterator, Optional
 import httpx
 
 from app.config import CHAT_MODEL, OLLAMA_TIMEOUT, OLLAMA_URL, ollama_keep_alive
+from app.gpu_lease import OllamaLeaseUnavailable, ollama_lease
 from app.repair.context_builder import build_repair_context
 from app.repair.models import RepairIteration, RepairRequest
 from app.repair.patch_applier import extract_patch
@@ -112,10 +113,14 @@ async def _generate(prompt: str, model: str, system: str) -> str:
         **ollama_keep_alive(),
     }
     try:
-        async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
-            r = await client.post(f"{OLLAMA_URL}/api/generate", json=payload)
+        async with ollama_lease(payload["model"], kind="repair", priority="batch") as base_url:
+            async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
+                r = await client.post(f"{base_url}/api/generate", json=payload)
         r.raise_for_status()
         return r.json().get("response", "")
+    except OllamaLeaseUnavailable as exc:
+        log.warning("repair: %s", exc.detail)
+        return ""
     except httpx.ConnectError:
         log.warning("Ollama unreachable at %s", OLLAMA_URL)
         return ""

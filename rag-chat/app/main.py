@@ -4,11 +4,13 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 
 from app.db import Base, engine  # noqa: F401 – ensure Base is loaded
 import app.models.orm  # noqa: F401 – register all ORM models with Base.metadata
 import app.providers  # noqa: F401 – auto-register all provider adapters
+from app.gpu_lease import OllamaLeaseUnavailable, PriorityMiddleware
 from app.metrics import MetricsMiddleware, metrics_router
 
 @asynccontextmanager
@@ -28,6 +30,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="RAG Chat API", lifespan=lifespan)
 app.add_middleware(MetricsMiddleware)
+app.add_middleware(PriorityMiddleware)
+
+
+@app.exception_handler(OllamaLeaseUnavailable)
+async def _no_gpu_lease(_: Request, exc: OllamaLeaseUnavailable) -> JSONResponse:
+    """The GPU broker refused or queued past the timeout: busy, not broken (and not an OOM)."""
+    headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+    return JSONResponse(status_code=503, content={"detail": exc.detail}, headers=headers)
 
 from app.routers import chat, api_keys, ui, generation, media, providers as providers_router, pipeline, repair, runtime, guard, voice, search  # noqa: E402
 

@@ -15,13 +15,16 @@ Picking the model:
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
 import os
 from dataclasses import dataclass
-from typing import List, Sequence
+from typing import AsyncIterator, List, Optional, Sequence
 
 import httpx
 
+from app.gpu_lease import ollama_lease
 from app.inference_retry import InferenceWorkers, run_with_oom_wait
 from app.metrics import observe_gpu_oom
 
@@ -102,6 +105,30 @@ def _is_context_len_error(status: int, body_text: str) -> bool:
     )
 
 
+# The Ollama URL of the lease the current task holds, if any (text_embed_lease).
+_lease_url: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("text_embed_lease_url", default=None)
+
+
+@contextlib.asynccontextmanager
+async def text_embed_lease(model: str = EMBED_MODEL) -> AsyncIterator[None]:
+    """Hold one ``ollama:<model>`` lease (argus-iris) for a run of text embeddings.
+
+    Ingest wraps each document's chunk loop in this, so a document costs one lease, not
+    two broker round trips per chunk. ``OllamaEmbeddingClient.embed`` takes its own lease
+    only when none is held. A refused lease raises ``OllamaLeaseUnavailable`` here, before
+    any ``run_with_oom_wait``, so it is never retried as an OOM.
+    """
+    if _lease_url.get():
+        yield
+        return
+    async with ollama_lease(model, kind="embed-ingest", priority="batch", caller="rag-ingest") as url:
+        token = _lease_url.set(url)
+        try:
+            yield
+        finally:
+            _lease_url.reset(token)
+
+
 class EmbeddingClient:
     async def embed(self, texts: Sequence[str], *, profile: str = "text") -> EmbedResult:
         raise NotImplementedError
@@ -134,7 +161,7 @@ class OllamaEmbeddingClient(EmbeddingClient):
                 payload["keep_alive"] = OLLAMA_KEEP_ALIVE
             r = await _EMBED_WORKERS.run(
                 lambda: run_with_oom_wait(
-                    lambda: client.post(f"{OLLAMA_URL}/api/embeddings", json=payload),
+                    lambda: client.post(f"{_lease_url.get() or OLLAMA_URL}/api/embeddings", json=payload),
                     max_wait_s=OOM_WAIT_MAX_SECONDS,
                     interval_s=OOM_WAIT_INTERVAL_SECONDS,
                     on_oom=lambda: observe_gpu_oom(operation="ingest_embed"),
@@ -164,7 +191,7 @@ class OllamaEmbeddingClient(EmbeddingClient):
         # The Ollama backend only serves the prose model (profile is informational).
         vectors: List[List[float]] = []
         truncated: List[bool] = []
-        async with httpx.AsyncClient(timeout=EMBED_TIMEOUT_S) as client:
+        async with text_embed_lease(self.model), httpx.AsyncClient(timeout=EMBED_TIMEOUT_S) as client:
             for t in texts:
                 vec, was_trunc = await self._embed_one(client, t)
                 vectors.append(vec)

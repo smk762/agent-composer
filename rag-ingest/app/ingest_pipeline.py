@@ -41,6 +41,7 @@ from app.embeddings import (
     TEXT_EMBEDDER,
     InfinityEmbeddingClient,
     OllamaEmbeddingClient,
+    text_embed_lease,
 )
 
 
@@ -488,42 +489,44 @@ async def _ingest_text_doc(
     if not chunks:
         return
 
-    # Embed one-by-one so per-chunk shrink-on-overflow still works.
-    for idx, chunk in enumerate(chunks):
-        try:
-            res = await _text_client.embed([chunk], profile="text")
-        except Exception as e:
-            msg = str(e).lower()
-            if "context length" in msg and "exceed" in msg:
-                state["skipped_chunks"] += 1
-                _mark_incomplete(state, doc)
-                continue
-            raise
+    # Embed one-by-one so per-chunk shrink-on-overflow still works, under one GPU lease
+    # for the document (text_embed_lease; nothing when no broker is configured).
+    async with text_embed_lease():
+        for idx, chunk in enumerate(chunks):
+            try:
+                res = await _text_client.embed([chunk], profile="text")
+            except Exception as e:
+                msg = str(e).lower()
+                if "context length" in msg and "exceed" in msg:
+                    state["skipped_chunks"] += 1
+                    _mark_incomplete(state, doc)
+                    continue
+                raise
 
-        emb = res.vectors[0]
-        was_truncated = bool(res.truncated and res.truncated[0])
-        if was_truncated:
-            state["truncated_chunks"] += 1
+            emb = res.vectors[0]
+            was_truncated = bool(res.truncated and res.truncated[0])
+            if was_truncated:
+                state["truncated_chunks"] += 1
 
-        coll = state["text_collection"]
-        if not state["created_collections"].get(coll):
-            await ensure_legacy_collection(q, vector_size=len(emb), name=coll)
-            state["created_collections"][coll] = True
+            coll = state["text_collection"]
+            if not state["created_collections"].get(coll):
+                await ensure_legacy_collection(q, vector_size=len(emb), name=coll)
+                state["created_collections"][coll] = True
 
-        pid = _point_id(source, doc_id, idx, chunk)
-        payload = {
-            "text": chunk,
-            "source": source,
-            "tags": tags,
-            "doc_id": doc_id or None,
-            "chunk_index": idx,
-            "meta": meta,
-            "truncated_for_embedding": was_truncated,
-            "ingested_at": state["ingested_at"],
-            "ingest_seq": state["ingest_seq"],
-            "embedder": TEXT_EMBEDDER,
-        }
-        _stage(state, coll, identity, qm.PointStruct(id=pid, vector=emb, payload=payload))
+            pid = _point_id(source, doc_id, idx, chunk)
+            payload = {
+                "text": chunk,
+                "source": source,
+                "tags": tags,
+                "doc_id": doc_id or None,
+                "chunk_index": idx,
+                "meta": meta,
+                "truncated_for_embedding": was_truncated,
+                "ingested_at": state["ingested_at"],
+                "ingest_seq": state["ingest_seq"],
+                "embedder": TEXT_EMBEDDER,
+            }
+            _stage(state, coll, identity, qm.PointStruct(id=pid, vector=emb, payload=payload))
 
 
 async def _ingest_code_doc(

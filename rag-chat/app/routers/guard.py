@@ -26,9 +26,9 @@ from app.config import (
     GUARD_WORKER_CONCURRENCY,
     ollama_keep_alive,
     OLLAMA_TIMEOUT,
-    OLLAMA_URL,
     log,
 )
+from app.gpu_lease import ollama_lease
 from app.guard_image import image_b64
 from app.inference_retry import InferenceWorkers
 from app.guard_policy import (
@@ -181,7 +181,7 @@ def _ollama_request(
             **ollama_keep_alive(),
             "options": _ollama_options(thinking),
         }
-        return f"{OLLAMA_URL}/api/chat", payload
+        return "/api/chat", payload
     prompt = build_singguard_prompt(turns, policy=policy, thinking=thinking)
     # raw=true keeps Ollama from wrapping this in a second chat template.
     payload = {
@@ -192,7 +192,7 @@ def _ollama_request(
         **ollama_keep_alive(),
         "options": {**_ollama_options(thinking), "stop": ["<|im_end|>"]},
     }
-    return f"{OLLAMA_URL}/api/generate", payload
+    return "/api/generate", payload
 
 
 def _raw_from_body(body: dict) -> str:
@@ -202,20 +202,21 @@ def _raw_from_body(body: dict) -> str:
 async def _generate(
     client: httpx.AsyncClient,
     *,
+    base_url: str,
     model: str,
     turns: list[tuple[str, str]],
     policy: str,
     thinking: str,
     image: str,
 ) -> str:
-    endpoint, payload = _ollama_request(
+    path, payload = _ollama_request(
         model=model,
         turns=turns,
         policy=policy,
         thinking=thinking,
         image=image,
     )
-    response = await client.post(endpoint, json=payload)
+    response = await client.post(f"{base_url}{path}", json=payload)
     response.raise_for_status()
     return _raw_from_body(response.json())
 
@@ -235,10 +236,17 @@ async def guard_check(req: GuardCheckRequest):
         async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
             # One Ollama guard at a time by default: cull scans and darkroom
             # pre-flights share the model, and a pile-up is a timeout, not speed.
+            # The lease is taken inside the worker slot, so queued checks hold none,
+            # and it covers both passes of a cascade.
             async def _run() -> tuple[str, GuardVerdict]:
+                async with ollama_lease(model, kind="guard", priority="interactive") as base_url:
+                    return await _passes(base_url)
+
+            async def _passes(base_url: str) -> tuple[str, GuardVerdict]:
                 if requested != THINKING_CASCADE:
                     raw = await _generate(
                         client,
+                        base_url=base_url,
                         model=model,
                         turns=turns,
                         policy=req.policy,
@@ -248,6 +256,7 @@ async def guard_check(req: GuardCheckRequest):
                     return requested, parse_singguard_output(raw, req.policy)
                 raw_fast = await _generate(
                     client,
+                    base_url=base_url,
                     model=model,
                     turns=turns,
                     policy=req.policy,
@@ -259,6 +268,7 @@ async def guard_check(req: GuardCheckRequest):
                     return THINKING_FAST, fast
                 raw_slow = await _generate(
                     client,
+                    base_url=base_url,
                     model=model,
                     turns=turns,
                     policy=req.policy,
