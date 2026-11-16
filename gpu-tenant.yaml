@@ -4,9 +4,11 @@
 # rag-chat/tests/test_gpu_tenant.py checks it matches rag-chat's resident gateway.
 # See argus-iris DESIGN.md, "Tenant manifests".
 #
-# agent-composer takes no leases yet (rollout step 3 adds ollama:<model> leases for
-# rag-chat and rag-ingest), so it is an observed tenant: kinds is empty, and iris reads
-# and evicts the models it keeps resident on dragon.
+# kinds: with ARGUS_GPU_COORDINATOR=broker, rag-chat and rag-ingest take an
+# ollama:<model> lease around each Ollama call (app/gpu_lease.py, #48) and register this
+# manifest on their first lease. Each kind's target names its default model; a lease
+# names the model actually called. A request's X-Argus-Priority header overrides the
+# priority. residents: the models agent-composer keeps loaded, which iris reads and evicts.
 #
 # The sidecars listen on loopback, so iris reaches every argus-http resident through
 # rag-chat's gateway, <rag-chat>/api/runtime/residents/<name>. The gateway needs a
@@ -25,7 +27,48 @@ tenant: agent-composer
 description: RAG chat and ingest, SingGuard content checks, and the voice stack (STT, TTS, classifier, code embedder).
 repo: smk762/agent-composer
 node: dragon
-kinds: []
+kinds:
+  # rag-chat /chat (stream and not), qwen3:8b (CHAT_MODEL) on dragon.
+  - kind: chat
+    description: A chat completion someone is waiting on.
+    target: "ollama:qwen3:8b"
+    vram_mb: 6000                 # 5.2 GB weights plus KV cache
+    priority: interactive
+  # rag-chat /api/guard/check: one lease covers both passes of a cascade. SingGuard is
+  # only on dragon.
+  - kind: guard
+    description: A SingGuard content check (cull scans, darkroom pre-flights, the guard tester).
+    target: "ollama:hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M"
+    vram_mb: 6000
+    priority: interactive
+    constraints: {node: dragon}
+  # rag-chat's RAG query embedding. Pinned to dragon: queries must use the embedder that
+  # wrote the collection.
+  - kind: embed-query
+    description: Embedding a chat or /search query.
+    target: "ollama:nomic-embed-text"
+    vram_mb: 600
+    priority: interactive
+    constraints: {node: dragon}
+  # rag-ingest's text path: one lease per document's chunks.
+  - kind: embed-ingest
+    description: Embedding a document's chunks for the text collection.
+    target: "ollama:nomic-embed-text"
+    vram_mb: 600
+    priority: batch
+    constraints: {node: dragon}
+  # rag-chat /api/pipeline/{overlay,brain,prose}.
+  - kind: pipeline
+    description: Character pipeline stages (voice directive, plan, streamed prose).
+    target: "ollama:qwen3:8b"
+    vram_mb: 6000
+    priority: interactive
+  # rag-chat /api/repair/run: fixer, critic and adversary calls.
+  - kind: repair
+    description: One model call in the multi-model repair loop.
+    target: "ollama:qwen3:8b"
+    vram_mb: 6000
+    priority: batch
 residents:
   # Ollama on dragon. iris's ollama adapter uses /api/ps and keep_alive on :11434 directly
   # (rag-chat does not proxy it). Set OLLAMA_KEEP_ALIVE=server once iris owns Ollama

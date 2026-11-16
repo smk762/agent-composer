@@ -40,6 +40,23 @@ Some rag-chat APIs are unauthenticated: guard, `/metrics`, and the read-only and
 | `OOM_WAIT_MAX_SECONDS` / `OOM_WAIT_INTERVAL_SECONDS` | `180` / `5` | Retry window when the GPU reports out-of-memory |
 | `LOG_LEVEL` | `INFO` | |
 
+## rag-chat and rag-ingest: argus-iris GPU leases
+
+With `ARGUS_GPU_COORDINATOR=broker`, every Ollama call holds an `ollama:<model>` lease from the argus-iris broker (`app/gpu_lease.py`, the same file in both services). The lease kinds are declared in `gpu-tenant.yaml`, and the manifest is registered with the broker on the first lease. If the grant is on the home node, the call goes to `OLLAMA_URL`; if it's on another node, it goes to that node's Ollama. A refused or timed-out lease is a **503** with `Retry-After`, and `run_with_oom_wait` never retries it as an OOM. A streamed chat or pipeline reports it in the stream instead. If the broker is unreachable, or answers with a 4xx (a bad token, say), the call goes to local Ollama unleased. Metadata calls (`/api/tags`, `/api/show`, `/api/ps`) and `/api/runtime/ollama/*` aren't leased.
+
+| Variable | Default | Notes |
+|---|---|---|
+| `ARGUS_GPU_COORDINATOR` | `none` | `broker` turns leases on |
+| `ARGUS_GPU_BROKER_URL` / `ARGUS_GPU_BROKER_TOKEN` | (empty) | The broker and the suite's caller token |
+| `ARGUS_GPU_BROKER_FALLBACK` | `none` | When the broker is unreachable. `lease` (a host flock) would serialise every Ollama call |
+| `ARGUS_GPU_HOME_NODE` | `dragon` (compose) | This stack's node: a grant here uses `OLLAMA_URL`, and pinned models stay here |
+| `OLLAMA_LEASE_PINNED_MODELS` | `GUARD_MODEL`,`EMBED_MODEL` | Comma list; `none` pins nothing |
+| `RAG_CHAT_GPU_LEASE_TIMEOUT_S` / `RAG_INGEST_GPU_LEASE_TIMEOUT_S` | `60` / `300` | Wait for a grant before the 503 (compose maps each to the service's `ARGUS_GPU_LEASE_TIMEOUT_S`) |
+| `OLLAMA_LEASE_VRAM_MB` | SingGuard `6000`, nomic-embed-text `600` | `model=MiB,…`; anything unlisted is `OLLAMA_LEASE_DEFAULT_VRAM_MB` (`6000`) |
+| `OLLAMA_NODE_URLS` | (empty) | `node=url,…` when the broker's `base_url` for a node doesn't resolve in the containers |
+
+Priority comes from the call site (`chat`, `guard`, `embed-query` and `pipeline` are `interactive`; `repair` and `embed-ingest` are `batch`). A request's `X-Argus-Priority` header (`realtime`, `interactive`, `batch`, `background`) overrides it.
+
 ## rag-chat: media generation
 
 | Variable | Default | Notes |

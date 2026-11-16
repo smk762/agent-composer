@@ -4,6 +4,7 @@ argus-cortex validates the schema in CI (the gpu-tenant job); this checks what t
 can't: each argus-http resident is one the gateway serves, at the gateway's paths.
 """
 
+import re
 import typing
 import unittest
 from pathlib import Path
@@ -47,6 +48,15 @@ class GpuTenantManifestTest(unittest.TestCase):
                     if r.get(field):
                         self.assertIn(r[field].removeprefix("/admin/"), actions, field)
                 self.assertEqual(r["unload_path"], "/admin/unload")
+
+    def test_lease_kinds_match_the_code(self) -> None:
+        """Every kind= an ollama_lease call (rag-chat and rag-ingest) passes is declared, and vice versa."""
+        used = set()
+        for app_dir in (MANIFEST.parent / "rag-chat" / "app", MANIFEST.parent / "rag-ingest" / "app"):
+            for src in app_dir.rglob("*.py"):
+                used |= set(re.findall(r'ollama_lease\([^)]*?kind="([a-z0-9-]+)"', src.read_text(encoding="utf-8"), re.S))
+        declared = {k["kind"] for k in self.manifest["kinds"]}
+        self.assertEqual(used, declared)
 
     def test_singguard_is_pinned(self) -> None:
         guard = next(r for r in self.manifest["residents"] if r["name"] == "singguard")

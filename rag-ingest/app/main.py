@@ -22,6 +22,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
+from app.gpu_lease import OllamaLeaseUnavailable, PriorityMiddleware
 from app.inference_retry import RetryableOomError
 from app.ingest_pipeline import (
     QDRANT_COLLECTION, QDRANT_COLLECTION_CODE, EmbedderMismatchError, IngestRequestError, allowed_collections, delete_docs,
@@ -52,6 +53,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="RAG Ingestion API", lifespan=lifespan)
 app.add_middleware(MetricsMiddleware)
+app.add_middleware(PriorityMiddleware)
 app.include_router(metrics_router)
 
 SHARED_SECRET = os.environ.get("INGEST_SHARED_SECRET", "")
@@ -548,6 +550,9 @@ async def ingest(
         raise HTTPException(409, str(e))
     except RetryableOomError as e:
         raise HTTPException(503, str(e))
+    except OllamaLeaseUnavailable as e:  # the GPU broker said no or not yet: busy, not an OOM
+        headers = {"Retry-After": str(e.retry_after)} if e.retry_after else None
+        raise HTTPException(503, e.detail, headers=headers)
     except HTTPException:
         raise
     except Exception as e:

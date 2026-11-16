@@ -9,7 +9,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from app.auth import require_user
-from app.config import CHAT_MODEL, MODERNBERT_URL, OLLAMA_TIMEOUT, OLLAMA_URL, ollama_keep_alive
+from app.gpu_lease import OllamaLeaseUnavailable, ollama_lease
+from app.config import CHAT_MODEL, MODERNBERT_URL, OLLAMA_TIMEOUT, ollama_keep_alive
 
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
 
@@ -145,10 +146,11 @@ async def _ollama_generate(model: str, system: str, prompt: str) -> str:
         **ollama_keep_alive(),
     }
     try:
-        async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
-            r = await client.post(f"{OLLAMA_URL}/api/generate", json=payload)
-            r.raise_for_status()
-            return r.json().get("response", "")
+        async with ollama_lease(model, kind="pipeline", priority="interactive") as base_url:
+            async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
+                r = await client.post(f"{base_url}/api/generate", json=payload)
+                r.raise_for_status()
+                return r.json().get("response", "")
     except httpx.ConnectError:
         raise HTTPException(503, detail="Ollama unreachable")
     except httpx.HTTPStatusError as exc:
@@ -164,23 +166,26 @@ async def _ollama_stream(model: str, system: str, prompt: str) -> AsyncIterator[
         **ollama_keep_alive(),
     }
     try:
-        async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
-            async with client.stream("POST", f"{OLLAMA_URL}/api/generate", json=payload) as r:
-                r.raise_for_status()
-                async for line in r.aiter_lines():
-                    if not line.strip():
-                        continue
-                    try:
-                        chunk = json.loads(line)
-                        token = chunk.get("response", "")
-                        if token:
-                            yield token
-                        if chunk.get("done"):
-                            break
-                    except json.JSONDecodeError:
-                        continue
+        async with ollama_lease(model, kind="pipeline", priority="interactive") as base_url:
+            async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
+                async with client.stream("POST", f"{base_url}/api/generate", json=payload) as r:
+                    r.raise_for_status()
+                    async for line in r.aiter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            chunk = json.loads(line)
+                            token = chunk.get("response", "")
+                            if token:
+                                yield token
+                            if chunk.get("done"):
+                                break
+                        except json.JSONDecodeError:
+                            continue
     except httpx.ConnectError:
         yield "\n[Ollama unreachable]"
+    except OllamaLeaseUnavailable as exc:  # mid-stream: report it in the text, as for an unreachable Ollama
+        yield f"\n[{exc.detail}]"
 
 
 # ------------------------------------------------------------------ Stage 2: overlay

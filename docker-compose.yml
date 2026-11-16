@@ -114,6 +114,7 @@ services:
     restart: unless-stopped
     volumes:
       - rag_ingest_data:/data
+      - ./gpu-tenant.yaml:/app/gpu-tenant.yaml:ro
     environment:
       - INGEST_SHARED_SECRET=${INGEST_SHARED_SECRET}
       - INGEST_REQUIRE_ENCRYPTION=${INGEST_REQUIRE_ENCRYPTION:-0}
@@ -125,6 +126,20 @@ services:
       - QDRANT_URL=${QDRANT_URL:?set QDRANT_URL in .env (see .env.example)}
       - OLLAMA_URL=http://ollama:11434
       - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-15m}
+      # argus-iris GPU leases around Ollama calls (#48): off unless ARGUS_GPU_COORDINATOR=broker.
+      # A grant on ARGUS_GPU_HOME_NODE keeps OLLAMA_URL; one on another node (jarrah) uses
+      # that node's Ollama. Pinned models (default: GUARD_MODEL, EMBED_MODEL) stay home.
+      - ARGUS_GPU_COORDINATOR=${ARGUS_GPU_COORDINATOR:-none}
+      - ARGUS_GPU_BROKER_URL=${ARGUS_GPU_BROKER_URL:-}
+      - ARGUS_GPU_BROKER_TOKEN=${ARGUS_GPU_BROKER_TOKEN:-}
+      - ARGUS_GPU_BROKER_FALLBACK=${ARGUS_GPU_BROKER_FALLBACK:-none}
+      - ARGUS_GPU_TENANT=agent-composer
+      - ARGUS_GPU_TENANT_MANIFEST=/app/gpu-tenant.yaml
+      - ARGUS_GPU_HOME_NODE=${ARGUS_GPU_HOME_NODE:-dragon}
+      - ARGUS_GPU_LEASE_TIMEOUT_S=${RAG_INGEST_GPU_LEASE_TIMEOUT_S:-300}
+      - OLLAMA_LEASE_PINNED_MODELS=${OLLAMA_LEASE_PINNED_MODELS:-}
+      - OLLAMA_LEASE_VRAM_MB=${OLLAMA_LEASE_VRAM_MB:-}
+      - OLLAMA_NODE_URLS=${OLLAMA_NODE_URLS:-}
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-audit_docs}
       # Extra text collections a signed request may target with `collection` (comma list; e.g. audit_docs)
       - INGEST_ALLOWED_COLLECTIONS=${INGEST_ALLOWED_COLLECTIONS:-}
@@ -173,11 +188,26 @@ services:
     volumes:
       - rag_chat_data:/data
       - rag_chat_media:/data/media
+      - ./gpu-tenant.yaml:/app/gpu-tenant.yaml:ro
     environment:
       # Forwarded to the GPU sidecars' /admin/* by /api/runtime/residents (argus-iris).
       - ARGUS_ADMIN_TOKEN=${ARGUS_ADMIN_TOKEN:-}
       - OLLAMA_URL=http://ollama:11434
       - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-15m}
+      # argus-iris GPU leases around Ollama calls (#48): off unless ARGUS_GPU_COORDINATOR=broker.
+      # A grant on ARGUS_GPU_HOME_NODE keeps OLLAMA_URL; one on another node (jarrah) uses
+      # that node's Ollama. Pinned models (default: GUARD_MODEL, EMBED_MODEL) stay home.
+      - ARGUS_GPU_COORDINATOR=${ARGUS_GPU_COORDINATOR:-none}
+      - ARGUS_GPU_BROKER_URL=${ARGUS_GPU_BROKER_URL:-}
+      - ARGUS_GPU_BROKER_TOKEN=${ARGUS_GPU_BROKER_TOKEN:-}
+      - ARGUS_GPU_BROKER_FALLBACK=${ARGUS_GPU_BROKER_FALLBACK:-none}
+      - ARGUS_GPU_TENANT=agent-composer
+      - ARGUS_GPU_TENANT_MANIFEST=/app/gpu-tenant.yaml
+      - ARGUS_GPU_HOME_NODE=${ARGUS_GPU_HOME_NODE:-dragon}
+      - ARGUS_GPU_LEASE_TIMEOUT_S=${RAG_CHAT_GPU_LEASE_TIMEOUT_S:-60}
+      - OLLAMA_LEASE_PINNED_MODELS=${OLLAMA_LEASE_PINNED_MODELS:-}
+      - OLLAMA_LEASE_VRAM_MB=${OLLAMA_LEASE_VRAM_MB:-}
+      - OLLAMA_NODE_URLS=${OLLAMA_NODE_URLS:-}
       - MODERNBERT_URL=${MODERNBERT_URL:-http://modernbert:7998}
       - INFINITY_URL=${INFINITY_URL:-http://infinity:7997}
       # Repair related-code search: same code collection and embedder as rag-ingest's code path (#35).

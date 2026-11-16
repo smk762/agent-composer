@@ -14,3 +14,6 @@ tree-sitter>=0.25.2,<0.26
 tree-sitter-language-pack==0.13.0
 # BM25 sparse vectors for hybrid retrieval (HYBRID_SPARSE=1).
 fastembed==0.4.2
+# argus-iris GPU leases around Ollama calls (app/gpu_lease.py): the broker client
+# (argus_cortex.gpu_broker, httpx) and gpu-tenant.yaml loading (PyYAML).
+argus-cortex[remote,yaml]==0.6.0
