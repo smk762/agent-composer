@@ -119,6 +119,48 @@ class KeepAliveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mgr.state, TTSState.UNLOADED)
 
 
+@mock.patch.object(tts_server, "DEVICE", "cuda:0")
+class EvictCpuStageTests(unittest.IsolatedAsyncioTestCase):
+    """#52: /admin/evict starts the CPU stage, even with the GPU keep-alive pinned."""
+
+    async def test_evict_with_gpu_pinned_unloads_after_cpu_keep_alive(self):
+        mgr = _manager(gpu=-1, cpu=0.05)
+        await mgr.demote_to_cpu()
+        self.assertEqual(mgr.state, TTSState.CPU)
+        await _spin(0.02)
+        self.assertEqual(mgr.state, TTSState.CPU)
+        await _spin(0.08)
+        self.assertEqual(mgr.state, TTSState.UNLOADED)
+
+    async def test_evict_with_zero_cpu_keep_alive_unloads_at_once(self):
+        mgr = _manager(gpu=120, cpu=0)
+        await mgr.demote_to_cpu()
+        await _spin(0.02)
+        self.assertEqual(mgr.state, TTSState.UNLOADED)
+
+    async def test_evict_with_negative_cpu_keep_alive_stays_on_cpu(self):
+        mgr = _manager(gpu=-1, cpu=-1)
+        await mgr.demote_to_cpu()
+        await _spin()
+        self.assertEqual(mgr.state, TTSState.CPU)
+        self.assertIsNotNone(mgr.base_model)
+
+    async def test_use_during_the_cpu_stage_cancels_the_unload(self):
+        mgr = _manager(gpu=-1, cpu=0.05)
+        await mgr.demote_to_cpu()
+        async with mgr.use():
+            await _spin(0.08)
+            self.assertEqual(mgr.state, TTSState.GPU)
+        await _spin(0.08)
+        self.assertEqual(mgr.state, TTSState.GPU)
+
+    async def test_evict_when_not_on_gpu_arms_nothing(self):
+        mgr = _manager(gpu=-1, cpu=0)
+        mgr._state = TTSState.UNLOADED
+        await mgr.demote_to_cpu()
+        self.assertIsNone(mgr._evict_task)
+
+
 class CloneVoiceTests(unittest.TestCase):
     def setUp(self):
         from fastapi.testclient import TestClient

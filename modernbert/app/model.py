@@ -32,6 +32,9 @@ class ModelManager:
     keep_alive_gpu  seconds on GPU after last use before demoting to CPU  (-1 = forever, 0 = immediate)
     keep_alive_cpu  seconds on CPU after GPU eviction before full unload  (-1 = forever, 0 = immediate)
 
+    The CPU stage follows any demotion, idle or ``evict()``: a keep_alive_gpu of -1 only
+    stops the idle demotion, it doesn't keep an evicted model in RAM.
+
     Inference must hold a lease (``async with manager.use(): ...``) for as long as it touches
     ``model``/``tokenizer``. Demotion and unload wait until no lease is held, and the idle timer
     only starts when the last lease is released.
@@ -185,11 +188,17 @@ class ModelManager:
                 self._arm_evict()
 
     async def evict(self) -> None:
-        """Move GPU → CPU without full unload (waits for in-flight inference)."""
+        """Move GPU → CPU without full unload (waits for in-flight inference).
+
+        Starts the CPU-stage timer, so ``keep_alive_cpu`` still decides when the model
+        leaves RAM (0: at once, -1: never), whatever ``keep_alive_gpu`` is (#52).
+        """
         async with self._lock:
             await self._idle.wait()
             if self._state == ModelState.GPU:
                 await self._demote()
+                if self._state == ModelState.CPU:
+                    self._arm_evict()
 
     def _unload_locked(self) -> None:
         if self._model is not None:
@@ -221,12 +230,14 @@ class ModelManager:
         # any new lease cancels it. A stage that finds a lease held just stops: its release re-arms.
         try:
             # --- GPU keep-alive ---
-            if self.keep_alive_gpu < 0:
-                return  # stay resident forever
             # On a CPU-only device the model lives in CPU state, which is its resident
             # state: it gets the same keep-alive before the CPU stage below.
             resident_cpu = self._state == ModelState.CPU and self.effective_device() == "cpu"
             if self._state == ModelState.GPU or resident_cpu:
+                # A negative GPU keep-alive pins the resident model. It skips only this
+                # step: a model evicted to the CPU still gets the CPU stage (#52).
+                if self.keep_alive_gpu < 0:
+                    return
                 if self.keep_alive_gpu > 0:
                     await asyncio.sleep(self.keep_alive_gpu)
                 async with self._lock:
@@ -239,7 +250,7 @@ class ModelManager:
             elif self._state != ModelState.CPU:
                 return  # unloaded / error: nothing to evict
 
-            # --- CPU keep-alive --- (after a GPU→CPU demotion, or CPU-resident to begin with)
+            # --- CPU keep-alive --- (after a GPU→CPU demotion or an evict, or CPU-resident to begin with)
             if self.keep_alive_cpu < 0:
                 return  # stay on CPU forever
             if self.keep_alive_cpu > 0:
