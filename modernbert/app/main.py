@@ -57,20 +57,34 @@ def _resident_gpu() -> dict:
             free = int(torch.cuda.mem_get_info()[0] / 1024**2)
     except Exception:
         pass
-    last_used = manager._last_used
     return {
         "loaded": manager.state in (ModelState.CPU, ModelState.GPU),
         "model_state": manager.state,
         "device": manager.current_device(),
-        "idle_s": round(time.time() - last_used, 1) if last_used else None,
+        "idle_s": _idle_s(),
         "free_vram_mb": free,
     }
+
+
+def _idle_s() -> Optional[float]:
+    """Seconds since inference last finished; None while busy or never used."""
+    last_used = manager._last_used
+    if not last_used or manager._in_use:
+        return None
+    return round(time.time() - last_used, 1)
 
 
 @app.get("/health")
 async def health():
     # Always 200; callers inspect model_state to know if inference is ready.
-    return {"status": "ok", "model_state": manager.state, "error": manager.error, "gpu": _resident_gpu()}
+    return {
+        "status": "ok",
+        "model_state": manager.state,
+        "busy": manager._in_use > 0,
+        "idle_s": _idle_s(),
+        "error": manager.error,
+        "gpu": _resident_gpu(),
+    }
 
 
 @app.get("/model/status", response_model=ModelStatus)

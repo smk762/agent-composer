@@ -172,14 +172,25 @@ def _running() -> bool:
     return bool(_process and _process.returncode is None)
 
 
+def _model_state() -> str:
+    return ("gpu" if DEVICE.startswith("cuda") else "cpu") if _running() else "unloaded"
+
+
+def _idle_s() -> Optional[float]:
+    """Seconds since the last request finished; None while busy or never used."""
+    if not _last_used or _active_requests:
+        return None
+    return round(time.time() - _last_used, 1)
+
+
 def _resident_gpu() -> Dict[str, object]:
     """``gpu`` block of the argus-iris resident contract. The manager holds no
     CUDA context, so free VRAM is left to iris's node agent."""
     running = _running()
     return {
         "loaded": running,
-        "model_state": ("gpu" if DEVICE.startswith("cuda") else "cpu") if running else "unloaded",
-        "idle_s": round(time.time() - _last_used, 1) if _last_used else None,
+        "model_state": _model_state(),
+        "idle_s": _idle_s(),
         "active": _active_requests,
         "free_vram_mb": None,
     }
@@ -190,6 +201,9 @@ async def health() -> Dict[str, object]:
     return {
         "status": "ok",
         "state": "running" if _running() else "evicted",
+        "model_state": _model_state(),
+        "busy": _active_requests > 0,
+        "idle_s": _idle_s(),
         "managed": True,
         "idle_timeout": IDLE_TIMEOUT_S,
         "last_used": _last_used or None,

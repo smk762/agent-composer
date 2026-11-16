@@ -116,6 +116,28 @@ INFINITY_URL = os.getenv("INFINITY_URL", "http://infinity:7997").rstrip("/")
 ARGUS_ADMIN_TOKEN = os.getenv("ARGUS_ADMIN_TOKEN", "").strip()
 RESIDENT_ADMIN_TIMEOUT = float(os.getenv("RESIDENT_ADMIN_TIMEOUT", "300"))
 
+
+def _parse_residents(raw: str) -> dict[str, str]:
+    """``name=url,name=url`` → {name: url}; blank or malformed entries are skipped (logged)."""
+    out: dict[str, str] = {}
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        name, sep, url = item.partition("=")
+        name, url = name.strip().lower(), url.strip()
+        if not sep or not name or not url.startswith(("http://", "https://")):
+            logging.getLogger("rag-chat").warning("RUNTIME_EXTRA_RESIDENTS: ignoring %r (want name=http(s)://...)", item)
+            continue
+        out[name] = url
+    return out
+
+
+# GPU sidecars the /api/runtime/residents gateway serves that aren't rag-chat's own
+# backends, e.g. the Qwen tts sidecar argus-mask calls directly. Gateway only: they
+# don't become TTS engines. A name rag-chat already uses (an engine) wins.
+RUNTIME_EXTRA_RESIDENTS = _parse_residents(os.getenv("RUNTIME_EXTRA_RESIDENTS", ""))
+
 # ── Voice services ────────────────────────────────────────────────────────────
 # STT (Whisper) is a single sidecar. TTS is a *registry* of one or more engines
 # that all speak the XTTS sidecar HTTP contract (/synthesise, /synthesise/stream,

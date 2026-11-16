@@ -20,6 +20,7 @@ from app.config import (
     OLLAMA_TIMEOUT,
     OLLAMA_URL,
     RESIDENT_ADMIN_TIMEOUT,
+    RUNTIME_EXTRA_RESIDENTS,
     TTS_ENGINES,
     WHISPER_URL,
     ollama_keep_alive,
@@ -176,6 +177,7 @@ _HEALTH_TIMEOUT = 10.0
 
 def _residents() -> Dict[str, str]:
     found = {
+        **RUNTIME_EXTRA_RESIDENTS,  # e.g. tts (Qwen, used by argus-mask); never TTS engines
         "modernbert": MODERNBERT_URL,
         "whisper": WHISPER_URL,
         "infinity": INFINITY_URL,
@@ -219,11 +221,15 @@ async def _summary(name: str) -> Dict[str, Any]:
         status, body = await _call(name, "GET", "/health", _HEALTH_TIMEOUT)
     except HTTPException as exc:
         return {"name": name, "reachable": False, "status_code": exc.status_code, "detail": exc.detail}
+    body = body if isinstance(body, dict) else {}
     return {
         "name": name,
         "reachable": True,
         "status_code": status,
-        "gpu": body.get("gpu") if isinstance(body, dict) else None,
+        "model_state": body.get("model_state"),
+        "busy": body.get("busy"),
+        "idle_s": body.get("idle_s"),
+        "gpu": body.get("gpu"),
     }
 
 

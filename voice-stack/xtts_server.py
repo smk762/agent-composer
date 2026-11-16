@@ -1550,6 +1550,8 @@ async def health():
         "model": XTTS_MODEL,
         "device": DEVICE,
         "model_state": _mgr.state.value,
+        "busy": _mgr.active > 0,
+        "idle_s": _idle_s(),
         "keep_alive_gpu": KEEP_ALIVE_GPU,
         "keep_alive_cpu": KEEP_ALIVE_CPU,
         "gpu": _resident_gpu(),
@@ -1588,14 +1590,21 @@ def _resident_gpu() -> dict:
         mem = _gpu_memory_info() if torch is not None and torch.cuda.is_initialized() else None
     except Exception:
         mem = None
-    last_used = _mgr._last_used
     return {
         **(mem or {}),
         "loaded": _mgr.state in (TTSState.CPU, TTSState.GPU),
         "model_state": _mgr.state.value,
-        "idle_s": round(time.time() - last_used, 1) if last_used else None,
+        "idle_s": _idle_s(),
         "free_vram_mb": _free_vram_mb(),
     }
+
+
+def _idle_s() -> Optional[float]:
+    """Seconds since work last finished; None while busy or never used."""
+    last_used = _mgr._last_used
+    if not last_used or _mgr.active:
+        return None
+    return round(time.time() - last_used, 1)
 
 
 @app.post("/admin/evict", dependencies=[Depends(_require_admin)])

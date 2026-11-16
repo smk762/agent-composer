@@ -2241,6 +2241,12 @@ def pipeline_ui():
         updateMbState("loading");
         try {{
           const r = await fetch(path, {{method:"POST", headers:apiHeaders()}});
+          if (!r.ok) {{
+            updateMbState("error");
+            if (r.status === 401) alert("Loading or evicting the model needs an API key: save one on the API Keys page.");
+            setTimeout(loadStatus, 800);
+            return;
+          }}
           const d = await r.json();
           updateMbState(d.state, d.device);
         }} catch(e) {{ updateMbState("error"); }}

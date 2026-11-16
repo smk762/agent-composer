@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import UTC
 from app.db import get_db
-from app.auth import require_user, _hash_key, _generate_secret
+from app.auth import issue_api_key, require_user
 from app.models.orm import ApiKey
 from app.models.schemas import ApiKeyCreate, ApiKeyOut, ApiKeySecret, AuthContext
 
@@ -38,12 +38,7 @@ async def create_api_key(
     auth: AuthContext = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
-    prefix, secret = _generate_secret()
-    hashed = _hash_key(secret)
-    rec = ApiKey(user_id=auth.user_id, name=body.name, prefix=prefix, hashed_key=hashed)
-    db.add(rec)
-    await db.commit()
-    await db.refresh(rec)
+    rec, secret = await issue_api_key(db, auth.user_id, body.name)
     out = _as_out(rec)
     return ApiKeySecret(**out.model_dump(), secret=secret)
 

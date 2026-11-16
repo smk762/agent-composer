@@ -122,6 +122,14 @@ curl -s http://127.0.0.1:9150/search -H "Authorization: Bearer ${CHAT_API_KEY}" 
 
 You need some credential to create the first key: Cloudflare Access in front of `/ui/api-keys`, or `DEV_AUTH_BYPASS=1` on a trusted host.
 
+For a service account (argus-iris, say), issue a key from inside the container, which needs no existing credential:
+
+```bash
+docker exec rag-chat python -m app.issue_api_key --user argus-iris --name "iris broker"
+```
+
+It prints the secret once (only the hash is stored). The key acts as `--user`.
+
 ### Media generation (`routers/generation.py`, `routers/media.py`, `routers/providers.py`)
 
 Image and video generation go through pluggable providers (`app/providers/`: `openai`, `stability`, `replicate`, `together`, `comfyui`). Each user configures their own provider API keys. Keys are encrypted at rest only when `PROVIDER_ENCRYPTION_KEY` is set (see [configuration.md](configuration.md#security-relevant)).
@@ -179,7 +187,7 @@ Reverse proxy to the ModernBERT sidecar, plus LLM helpers for character-dialogue
 | Method | Path | Auth | Notes |
 |---|---|---|---|
 | GET | `/api/pipeline/status` | open | Sidecar `model_state` |
-| POST | `/api/pipeline/load` \| `/evict` \| `/unload` | open | Move the model between `gpu`, `cpu` and `unloaded` |
+| POST | `/api/pipeline/load` \| `/evict` \| `/unload` | auth | Move the model between `gpu`, `cpu` and `unloaded` (it shares the GPU, so a user is needed) |
 | GET | `/api/pipeline/labels` | open | Current zero-shot label set |
 | PUT | `/api/pipeline/labels` | auth | Replace the label set: `{labels: [...]}` |
 | POST | `/api/pipeline/classify` | open | `{text, context?, top_k?, threshold?}` |
@@ -214,6 +222,11 @@ All routes require **auth**.
 | POST | `/api/runtime/ollama/wake` \| `/api/runtime/ollama/evict` |
 | GET | `/api/runtime/infinity/status` |
 | POST | `/api/runtime/infinity/wake` \| `/api/runtime/infinity/evict` |
+| GET | `/api/runtime/residents` |
+| GET | `/api/runtime/residents/{name}/health` |
+| POST | `/api/runtime/residents/{name}/admin/{unload\|evict\|wake}` |
+
+`residents` is the argus-iris gateway to the GPU sidecars (`modernbert`, `whisper`, `infinity`, each TTS engine, and the `RUNTIME_EXTRA_RESIDENTS` entries, by default the Qwen `tts` sidecar argus-mask uses), whose own ports are loopback-only. Status codes are relayed. The caller sends only a rag-chat API key; rag-chat adds its own `ARGUS_ADMIN_TOKEN` as the Bearer when it calls a sidecar's `/admin/*`, so set the same value on rag-chat and the sidecars. `gpu-tenant.yaml` at the repo root lists these residents for iris.
 
 ### Metrics
 
