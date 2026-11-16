@@ -178,5 +178,50 @@ class KeepAliveTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mgr.state, ModelState.UNLOADED)
 
 
+class EvictCpuStageTests(unittest.IsolatedAsyncioTestCase):
+    """#52: evict() (/admin/evict, /model/evict) starts the CPU stage, even with the GPU keep-alive pinned."""
+
+    async def test_evict_with_gpu_pinned_unloads_after_cpu_keep_alive(self):
+        mgr = _manager(gpu=-1, cpu=0.05)
+        await mgr.evict()
+        self.assertEqual(mgr.state, ModelState.CPU)
+        await _spin(0.02)
+        self.assertEqual(mgr.state, ModelState.CPU)
+        await _spin(0.08)
+        self.assertEqual(mgr.state, ModelState.UNLOADED)
+
+    async def test_evict_with_default_cpu_keep_alive_unloads_at_once(self):
+        # MODERNBERT_KEEP_ALIVE_CPU=0, the default: seen on dragon staying `cpu` for minutes.
+        mgr = _manager(gpu=300, cpu=0)
+        await mgr.evict()
+        await _spin(0.02)
+        self.assertEqual(mgr.state, ModelState.UNLOADED)
+        self.assertIsNone(mgr.model)
+
+    async def test_evict_with_negative_cpu_keep_alive_stays_on_cpu(self):
+        mgr = _manager(gpu=-1, cpu=-1)
+        await mgr.evict()
+        await _spin()
+        self.assertEqual(mgr.state, ModelState.CPU)
+        self.assertIsNotNone(mgr.model)
+
+    async def test_use_during_the_cpu_stage_cancels_the_unload(self):
+        mgr = _manager(gpu=-1, cpu=0.05)
+        await mgr.evict()
+        async with mgr.use():
+            await _spin(0.08)
+            self.assertEqual(mgr.state, ModelState.GPU)
+        await _spin(0.08)
+        self.assertEqual(mgr.state, ModelState.GPU)
+
+    async def test_cpu_resident_with_gpu_pinned_stays(self):
+        mgr = _manager(gpu=-1, cpu=0, state=ModelState.CPU)
+        mgr._target_device = "cpu"
+        async with mgr.use():
+            pass
+        await _spin()
+        self.assertEqual(mgr.state, ModelState.CPU)
+
+
 if __name__ == "__main__":
     unittest.main()

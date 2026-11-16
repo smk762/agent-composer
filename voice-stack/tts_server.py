@@ -150,7 +150,8 @@ class TTSModelManager:
     with device_map="cpu" and then .to("cuda") — Accelerate hooks survive
     that move and generation becomes ~50× real time.
     After keep_alive_gpu seconds of idle the models demote to CPU.
-    After keep_alive_cpu seconds on CPU the models fully unload.
+    After keep_alive_cpu seconds on CPU the models fully unload. That CPU stage follows
+    any demotion, idle or /admin/evict: keep_alive_gpu=-1 only stops the idle demotion.
 
     Generation must hold a lease (``async with _mgr.use(): ...``) for as long as
     it touches the models. Demotion and unload wait until no lease is held, and
@@ -313,10 +314,16 @@ class TTSModelManager:
         logger.info("tts_on_cpu")
 
     async def demote_to_cpu(self) -> None:
-        """Move GPU → CPU (waits for in-flight generations)."""
+        """Move GPU → CPU (waits for in-flight generations), then start the CPU-stage
+        timer: ``keep_alive_cpu`` decides when the models leave RAM, whatever
+        ``keep_alive_gpu`` is (#52)."""
         async with self._lock:
             await self._idle.wait()
+            if self._state != TTSState.GPU:
+                return
             await self._demote_locked()
+            if self._state == TTSState.CPU:
+                self._arm_evict()
 
     def _unload_locked(self) -> None:
         for attr in ("_base_model", "_custom_model"):
@@ -349,10 +356,11 @@ class TTSModelManager:
         # Armed when the models go idle; any new lease cancels it. A stage that
         # finds a lease held just stops: the lease's release re-arms the timer.
         try:
-            # GPU keep-alive
-            if self.keep_alive_gpu < 0:
-                return  # stay on GPU forever
+            # GPU keep-alive. Negative pins the models on GPU; it skips only this
+            # step, so models evicted to the CPU still get the CPU stage (#52).
             if self._state == TTSState.GPU:
+                if self.keep_alive_gpu < 0:
+                    return
                 if self.keep_alive_gpu > 0:
                     await asyncio.sleep(self.keep_alive_gpu)
                 async with self._lock:

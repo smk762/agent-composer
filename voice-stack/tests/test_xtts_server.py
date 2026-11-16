@@ -168,6 +168,81 @@ def test_negative_gpu_keep_alive_never_unloads(mgr):
     asyncio.run(run())
 
 
+def test_evict_arms_the_cpu_stage_with_gpu_pinned(mgr):
+    """#52: keep_alive_gpu=-1 (iris owns GPU residency) must not keep an evicted model in RAM."""
+    async def run():
+        mgr.keep_alive_gpu, mgr.keep_alive_cpu = -1, 0.05
+        await mgr.ensure_gpu()
+        assert await mgr.evict() is True
+        assert mgr.state == xs.TTSState.CPU
+        await asyncio.sleep(0.02)
+        assert mgr.state == xs.TTSState.CPU
+        await asyncio.sleep(0.08)
+        assert mgr.state == xs.TTSState.UNLOADED
+
+    asyncio.run(run())
+
+
+def test_evict_with_zero_cpu_keep_alive_unloads_at_once(mgr):
+    async def run():
+        mgr.keep_alive_gpu, mgr.keep_alive_cpu = 120, 0
+        await mgr.ensure_gpu()
+        assert await mgr.evict() is True
+        await asyncio.sleep(0.02)
+        assert mgr.state == xs.TTSState.UNLOADED
+
+    asyncio.run(run())
+
+
+def test_evict_with_negative_cpu_keep_alive_stays_on_cpu(mgr):
+    async def run():
+        mgr.keep_alive_gpu, mgr.keep_alive_cpu = -1, -1
+        await mgr.ensure_gpu()
+        assert await mgr.evict() is True
+        await asyncio.sleep(0.05)
+        assert mgr.state == xs.TTSState.CPU
+
+    asyncio.run(run())
+
+
+def test_cpu_stage_after_evict_is_timed_from_the_evict(mgr):
+    # The old check (idle < gpu + cpu) kept a model evicted early in its GPU
+    # keep-alive in RAM after the CPU keep-alive ran out.
+    async def run():
+        mgr.keep_alive_gpu, mgr.keep_alive_cpu = 0.3, 0.05
+        await mgr.ensure_gpu()
+        assert await mgr.evict() is True
+        await asyncio.sleep(0.1)
+        assert mgr.state == xs.TTSState.UNLOADED
+
+    asyncio.run(run())
+
+
+def test_use_during_the_cpu_stage_cancels_the_unload(mgr):
+    async def run():
+        mgr.keep_alive_gpu, mgr.keep_alive_cpu = -1, 0.05
+        await mgr.ensure_gpu()
+        await mgr.evict()
+        async with mgr.lease():
+            await asyncio.sleep(0.08)
+            assert mgr.state == xs.TTSState.GPU
+        await asyncio.sleep(0.08)
+        assert mgr.state == xs.TTSState.GPU  # pinned again once back on GPU
+
+    asyncio.run(run())
+
+
+def test_evict_while_leased_is_refused_and_arms_nothing(mgr):
+    async def run():
+        mgr.keep_alive_gpu, mgr.keep_alive_cpu = -1, 0
+        async with mgr.lease():
+            assert await mgr.evict() is False
+            await asyncio.sleep(0.02)
+            assert mgr.state == xs.TTSState.GPU
+
+    asyncio.run(run())
+
+
 def test_force_unload_ignores_leases(mgr):
     async def run():
         await mgr.acquire()

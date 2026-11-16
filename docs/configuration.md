@@ -134,7 +134,7 @@ The sidecar-side settings (`XTTS_PREPROCESS*`, `XTTS_GPT_COND_LEN`, `MISO_KEEP_A
 | `MODERNBERT_MODEL` | `answerdotai/ModernBERT-base` | |
 | `MODERNBERT_TASK` | `zero_shot` | Or a fine-tuned classification head |
 | `MODERNBERT_DEVICE` | `auto` | |
-| `MODERNBERT_KEEP_ALIVE_GPU` / `MODERNBERT_KEEP_ALIVE_CPU` | `300` / `0` | Idle seconds before moving down a stage (`gpu → cpu → unloaded`) |
+| `MODERNBERT_KEEP_ALIVE_GPU` / `MODERNBERT_KEEP_ALIVE_CPU` | `300` / `0` | Idle seconds before moving down a stage (`gpu → cpu → unloaded`). `-1` stays in that stage. The CPU stage follows any demotion, an `/admin/evict` included, so `_GPU=-1` (residency handed to argus-iris) still frees RAM after `_CPU`. The same holds for `XTTS_` and `TTS_KEEP_ALIVE_*` |
 | `MODERNBERT_PRELOAD` | `0` | Load the model at startup |
 | `MODERNBERT_MAX_LENGTH`, `MODERNBERT_TOP_K`, `MODERNBERT_THRESHOLD` | `512`, `10`, `0.05` | Classifier defaults |
 

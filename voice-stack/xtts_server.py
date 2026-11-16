@@ -299,6 +299,16 @@ class XTTSModelManager:
             logger.info("xtts_on_cpu")
             return True
 
+    async def evict(self) -> bool:
+        """``/admin/evict``: demote to CPU, then start the CPU-stage timer, so
+        ``keep_alive_cpu`` decides when the model leaves RAM whatever
+        ``keep_alive_gpu`` is (#52). False when nothing was demoted."""
+        if not await self.demote_to_cpu():
+            return False
+        if self._active == 0:
+            self._arm_evict()
+        return True
+
     async def unload(self, force: bool = False) -> bool:
         """Drop the model entirely. Skipped (False) while a lease is held,
         unless ``force`` (app shutdown)."""
@@ -330,27 +340,32 @@ class XTTSModelManager:
 
     async def _eviction_loop(self) -> None:
         try:
-            # A negative keep-alive pins the model on GPU: never fall through
-            # to the CPU/unload stage.
-            if self.keep_alive_gpu < 0:
+            # On a CPU-only device "GPU" is the resident state: it gets this
+            # keep-alive, then unloads from it.
+            if self._state == TTSState.GPU:
+                # A negative keep-alive pins the resident model. It skips only
+                # this step: a model evicted to the CPU still gets the CPU stage (#52).
+                if self.keep_alive_gpu < 0:
+                    return
+                if self.keep_alive_gpu > 0:
+                    await asyncio.sleep(self.keep_alive_gpu)
+                    if time.time() - self._last_used < self.keep_alive_gpu:
+                        return
+                if self._state == TTSState.GPU and DEVICE != "cpu":
+                    # A held lease defers this; release() re-arms the timer.
+                    if not await self.demote_to_cpu():
+                        return
+            elif self._state != TTSState.CPU:
                 return
-            if self.keep_alive_gpu > 0:
-                await asyncio.sleep(self.keep_alive_gpu)
-                if time.time() - self._last_used < self.keep_alive_gpu:
-                    return
-            if self._state == TTSState.GPU and DEVICE != "cpu":
-                # A held lease defers this; release() re-arms the timer.
-                if not await self.demote_to_cpu():
-                    return
-            # On a CPU-only device "GPU" is the resident state: unload from it.
             if self._active > 0 or self._state not in (TTSState.CPU, TTSState.GPU):
                 return
 
             if self.keep_alive_cpu < 0:
                 return
             if self.keep_alive_cpu > 0:
+                cpu_since = time.time()
                 await asyncio.sleep(self.keep_alive_cpu)
-                if time.time() - self._last_used < self.keep_alive_gpu + self.keep_alive_cpu:
+                if self._last_used > cpu_since:  # used during the CPU stage
                     return
             await self.unload()
         except asyncio.CancelledError:
@@ -1609,8 +1624,9 @@ def _idle_s() -> Optional[float]:
 
 @app.post("/admin/evict", dependencies=[Depends(_require_admin)])
 async def admin_evict():
-    """Force-demote the model from GPU to CPU, freeing VRAM immediately."""
-    if not await _mgr.demote_to_cpu() and _mgr.active:
+    """Force-demote the model from GPU to CPU, freeing VRAM immediately. The
+    CPU-stage timer (XTTS_KEEP_ALIVE_CPU) then decides when it leaves RAM."""
+    if not await _mgr.evict() and _mgr.active:
         # In-flight work holds the model; its release re-arms idle eviction.
         return JSONResponse(
             status_code=409,
