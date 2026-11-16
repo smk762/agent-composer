@@ -38,6 +38,16 @@ def _generate_secret() -> tuple[str, str]:
     return prefix, secret
 
 
+async def issue_api_key(db: AsyncSession, user_id: str, name: Optional[str] = None) -> tuple[ApiKey, str]:
+    """Store a new key for ``user_id``; returns the row and the secret, which is not stored."""
+    prefix, secret = _generate_secret()
+    rec = ApiKey(user_id=user_id, name=name, prefix=prefix, hashed_key=_hash_key(secret))
+    db.add(rec)
+    await db.commit()
+    await db.refresh(rec)
+    return rec, secret
+
+
 async def _api_key_from_token(db: AsyncSession, token: str) -> Optional[ApiKey]:
     if not token:
         return None

@@ -69,23 +69,25 @@ async def _post(path: str, json=None, timeout: float = _TIMEOUT_FAST):
 
 
 # ------------------------------------------------------------------ model ops
+# Status stays open (the Pipeline Lab polls it); load/evict/unload move VRAM on a shared
+# GPU, so they need a user, like /api/runtime's admin routes.
 
 @router.get("/status")
 async def status():
     return await _get("/model/status")
 
 
-@router.post("/load")
+@router.post("/load", dependencies=[Depends(require_user)])
 async def load():
     return await _post("/model/load", timeout=_TIMEOUT_INFER)
 
 
-@router.post("/evict")
+@router.post("/evict", dependencies=[Depends(require_user)])
 async def evict():
     return await _post("/model/evict")
 
 
-@router.post("/unload")
+@router.post("/unload", dependencies=[Depends(require_user)])
 async def unload():
     return await _post("/model/unload")
 

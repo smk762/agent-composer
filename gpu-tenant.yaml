@@ -1,0 +1,103 @@
+# argus-iris GPU tenant manifest for agent-composer (#45). Validated by argus-cortex's
+# TenantManifest (argus_cortex.gpu_wire, schema gpu-tenant-schema.json); unknown fields
+# are refused. CI checks it validates (the gpu-tenant job), and
+# rag-chat/tests/test_gpu_tenant.py checks it matches rag-chat's resident gateway.
+# See argus-iris DESIGN.md, "Tenant manifests".
+#
+# agent-composer takes no leases yet (rollout step 3 adds ollama:<model> leases for
+# rag-chat and rag-ingest), so it is an observed tenant: kinds is empty, and iris reads
+# and evicts the models it keeps resident on dragon.
+#
+# The sidecars listen on loopback, so iris reaches every argus-http resident through
+# rag-chat's gateway, <rag-chat>/api/runtime/residents/<name>. The gateway needs a
+# rag-chat API key as Bearer even for reads (RAG_CHAT_API_KEY on the broker; issue one
+# with `docker exec rag-chat python -m app.issue_api_key --user argus-iris`; iris's
+# config sends it with token_env: RAG_CHAT_API_KEY). rag-chat adds ARGUS_ADMIN_TOKEN
+# itself when it calls a sidecar's /admin/*, so these residents have admin_auth false:
+# true would make iris send the admin token as the Bearer, which rag-chat refuses as an
+# unknown API key. Tokens live in each host's .env, never here.
+#
+# VRAM figures are MiB and are left out where nobody has measured them; iris's
+# observe-only rollout learns them. Miso is not listed: it runs on morpheus and is a
+# voluptas resident (voluptas/gpu-tenant.yaml).
+tenant_version: "1.0"
+tenant: agent-composer
+description: RAG chat and ingest, SingGuard content checks, and the voice stack (STT, TTS, classifier, code embedder).
+repo: smk762/agent-composer
+node: dragon
+kinds: []
+residents:
+  # Ollama on dragon. iris's ollama adapter uses /api/ps and keep_alive on :11434 directly
+  # (rag-chat does not proxy it). Set OLLAMA_KEEP_ALIVE=server once iris owns Ollama
+  # residency, or every rag-chat/rag-ingest call resets the keep-alive iris sets.
+  - name: singguard
+    adapter: ollama
+    target: "ollama:hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M"   # GUARD_MODEL
+    container: ollama
+    base_url: http://dragon:11434
+    vram_mb: 5940                 # about 5.8 GiB (Q4_K_M)
+    pinned: true                  # content checks for cull scans and darkroom pre-flights
+
+  # The text embedder for ingest and chat queries (EMBED_MODEL).
+  - name: nomic-embed-text
+    adapter: ollama
+    target: "ollama:nomic-embed-text"
+    container: ollama
+    base_url: http://dragon:11434
+
+  # ModernBERT classifier: unloaded -> cpu -> gpu, so evict parks it on CPU.
+  - name: modernbert
+    adapter: argus-http
+    container: modernbert
+    base_url: http://dragon:9150/api/runtime/residents/modernbert
+    health_path: /health
+    unload_path: /admin/unload
+    evict_path: /admin/evict
+    warm_path: /admin/wake
+    admin_auth: false             # rag-chat adds ARGUS_ADMIN_TOKEN
+
+  # faster-whisper STT. No CPU stage (its /admin/evict is the same as unload), so no
+  # evict_path. Answers 409 busy while a transcription is running.
+  - name: whisper
+    adapter: argus-http
+    container: whisper
+    base_url: http://dragon:9150/api/runtime/residents/whisper
+    health_path: /health
+    unload_path: /admin/unload
+    warm_path: /admin/wake
+    admin_auth: false             # rag-chat adds ARGUS_ADMIN_TOKEN
+
+  # XTTS-v2, the default TTS engine. Answers 409 busy while synthesising.
+  - name: xtts
+    adapter: argus-http
+    container: xtts
+    base_url: http://dragon:9150/api/runtime/residents/xtts
+    health_path: /health
+    unload_path: /admin/unload
+    evict_path: /admin/evict
+    warm_path: /admin/wake
+    vram_mb: 2000                 # about 2 GB loaded
+    admin_auth: false             # rag-chat adds ARGUS_ADMIN_TOKEN
+
+  # Qwen3-TTS, the legacy/rollback engine.
+  - name: tts
+    adapter: argus-http
+    container: tts
+    base_url: http://dragon:9150/api/runtime/residents/tts
+    health_path: /health
+    unload_path: /admin/unload
+    evict_path: /admin/evict
+    warm_path: /admin/wake
+    admin_auth: false             # rag-chat adds ARGUS_ADMIN_TOKEN
+
+  # Infinity (CodeRankEmbed) behind its idle manager (INFINITY_IDLE_TIMEOUT stays on).
+  # Evict is the same as unload, so no evict_path. Answers 409 busy with requests in flight.
+  - name: infinity
+    adapter: argus-http
+    container: infinity
+    base_url: http://dragon:9150/api/runtime/residents/infinity
+    health_path: /health
+    unload_path: /admin/unload
+    warm_path: /admin/wake
+    vram_mb: 1300                 # 0.8 GiB loaded, 1.3 GiB peak at batch 8
+    admin_auth: false             # rag-chat adds ARGUS_ADMIN_TOKEN

@@ -44,3 +44,16 @@ jobs:
       - run: python -m pip install --upgrade pip && pip install -r requirements.txt
       - name: unittest
         run: python -m unittest discover -s tests -v
+
+  gpu-tenant:
+    # gpu-tenant.yaml must validate as argus-cortex's TenantManifest (argus-iris refuses
+    # unknown fields). Pinned to a cortex commit; bump it when the schema changes.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip "argus-cortex[yaml] @ git+https://github.com/smk762/argus-cortex@65d5b5c938c87bab0d420edfe4a6563ed496db1c"
+      - name: validate gpu-tenant.yaml
+        run: python -c "from argus_cortex.gpu_wire import load_tenant_manifest as load; m = load('gpu-tenant.yaml'); print(m.tenant, [r.name for r in m.residents])"

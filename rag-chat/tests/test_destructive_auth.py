@@ -32,6 +32,29 @@ class DestructiveRoutesNeedAuthTest(unittest.TestCase):
         r = self.client.put("/api/pipeline/labels", json={"labels": ["a"]})
         self.assertEqual(r.status_code, 401)
 
+    def test_model_ops_require_auth(self) -> None:
+        for op in ("load", "evict", "unload"):
+            with self.subTest(op=op), patch.object(pipeline, "_post") as sidecar:
+                self.assertEqual(self.client.post(f"/api/pipeline/{op}").status_code, 401)
+                sidecar.assert_not_called()
+
+    def test_model_ops_pass_with_a_user(self) -> None:
+        async def fake_post(path, json=None, timeout=None):
+            return {"state": "gpu", "path": path}
+
+        with patch.object(pipeline, "_post", fake_post), patch.object(auth, "DEV_AUTH_BYPASS", True):
+            for op in ("load", "evict", "unload"):
+                r = self.client.post(f"/api/pipeline/{op}")
+                self.assertEqual(r.status_code, 200, r.text)
+                self.assertEqual(r.json()["path"], f"/model/{op}")
+
+    def test_model_status_stays_open(self) -> None:
+        async def fake_get(path, timeout=None):
+            return {"state": "unloaded"}
+
+        with patch.object(pipeline, "_get", fake_get):
+            self.assertEqual(self.client.get("/api/pipeline/status").status_code, 200)
+
     def test_clone_replace_requires_auth(self) -> None:
         files = {"audio": ("a.wav", b"RIFF0000", "audio/wav")}
         r = self.client.post("/api/voice/clone", files=files, data={"voice_name": "Alice", "replace": "true"})
