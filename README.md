@@ -111,7 +111,7 @@ Optional:
 - `DEV_AUTH_BYPASS`: **`1` disables rag-chat authentication** (requests run as `X-Dev-User` or `DEV_DEFAULT_USER`). Local development only. Never enable it on an exposed instance.
 - `PROVIDER_ENCRYPTION_KEY`: passphrase that encrypts stored image/video provider API keys. **If unset, provider keys are stored as plain base64.**
 - `RETRIEVAL_PROFILE`: `text` (default) or `code`, the default ingest path (see above).
-- `OLLAMA_KEEP_ALIVE`: Ollama keep-alive setting (example: `15m`)
+- `OLLAMA_KEEP_ALIVE`: the Ollama daemon's default keep-alive (example: `15m`), and what rag-chat/rag-ingest send per request unless `OLLAMA_REQUEST_KEEP_ALIVE` is set (`server` sends none)
 - `INFINITY_IDLE_TIMEOUT`: seconds before the managed Infinity child is evicted after idle; next inference request starts it again
 - `CHAT_DB_URL` / `DATABASE_URL`: chat database DSN. `postgresql://...` is accepted and automatically normalized to async SQLAlchemy driver usage.
   - On startup, `rag-chat` auto-creates the Postgres database if it does not exist, then runs Alembic migrations.

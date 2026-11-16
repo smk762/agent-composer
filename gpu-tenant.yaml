@@ -81,8 +81,8 @@ kinds:
     priority: batch
 residents:
   # Ollama on dragon. iris's ollama adapter uses /api/ps and keep_alive on :11434 directly
-  # (rag-chat does not proxy it). Set OLLAMA_KEEP_ALIVE=server once iris owns Ollama
-  # residency, or every rag-chat/rag-ingest call resets the keep-alive iris sets.
+  # (rag-chat does not proxy it). Set OLLAMA_REQUEST_KEEP_ALIVE=server once iris owns
+  # Ollama residency, or every rag-chat/rag-ingest call resets the keep-alive iris sets.
   - name: singguard
     adapter: ollama
     target: "ollama:hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M"   # GUARD_MODEL

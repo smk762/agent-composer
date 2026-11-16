@@ -22,10 +22,13 @@ for _quiet in ("aiosqlite", "sqlalchemy.engine", "httpcore", "httpx", "hpack"):
     logging.getLogger(_quiet).setLevel(logging.WARNING)
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
-# keep_alive sent on every Ollama request. "server" (or empty/"none"/"off")
-# sends none, so the Ollama server's own keep-alive governs residency: set it
-# when argus-iris owns idle/keepalive policy, or each request resets the timer.
-_KEEP_ALIVE_RAW = os.getenv("OLLAMA_KEEP_ALIVE", "15m").strip()
+# keep_alive sent on every Ollama request: OLLAMA_REQUEST_KEEP_ALIVE, else
+# OLLAMA_KEEP_ALIVE (which compose also hands the Ollama daemon as its default, #53).
+# "server" (or "none"/"off", or an empty OLLAMA_KEEP_ALIVE) sends none, so the Ollama
+# server's own keep-alive governs residency: set OLLAMA_REQUEST_KEEP_ALIVE=server when
+# argus-iris owns idle/keepalive policy, or each request resets the timer.
+_KEEP_ALIVE_RAW = (os.getenv("OLLAMA_REQUEST_KEEP_ALIVE", "").strip()
+                   or os.getenv("OLLAMA_KEEP_ALIVE", "15m").strip())
 OLLAMA_KEEP_ALIVE = "" if _KEEP_ALIVE_RAW.lower() in ("", "server", "none", "off") else _KEEP_ALIVE_RAW
 
 

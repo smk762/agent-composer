@@ -25,7 +25,8 @@ Some rag-chat APIs are unauthenticated: guard, `/metrics`, and the read-only and
 |---|---|---|
 | `OLLAMA_URL` | `http://ollama:11434` | |
 | `OLLAMA_TIMEOUT` | `300` | Seconds per Ollama chat call |
-| `OLLAMA_KEEP_ALIVE` | `15m` | Passed to Ollama on each request |
+| `OLLAMA_KEEP_ALIVE` | `15m` | The `ollama` service's default keep-alive (a duration, seconds, or `-1`; Ollama reads anything else as `5m`). Also the per-request value when `OLLAMA_REQUEST_KEEP_ALIVE` is unset |
+| `OLLAMA_REQUEST_KEEP_ALIVE` | `OLLAMA_KEEP_ALIVE` | `keep_alive` rag-chat and rag-ingest send on each Ollama request. `server` (or `none`/`off`) sends none, leaving residency to the daemon. For argus-iris: `OLLAMA_REQUEST_KEEP_ALIVE=server` with `OLLAMA_KEEP_ALIVE` left a duration; iris extends `keep_alive` per its policy and holds pinned models (SingGuard) at `-1` |
 | `CHAT_MODEL` | `llama3.2:3b` | Default model for `/chat`, pipeline helpers and the repair fixer |
 | `CHAT_SYSTEM_PROMPT` | `You are a helpful assistant.` | Prepended when the request has no system message |
 | `RAG_ENABLED` | `1` | `0` turns off retrieval; `/chat` then only proxies to Ollama |

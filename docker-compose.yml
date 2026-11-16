@@ -125,7 +125,8 @@ services:
       - INGEST_MAX_SKEW_S=${INGEST_MAX_SKEW_S:-300}
       - QDRANT_URL=${QDRANT_URL:?set QDRANT_URL in .env (see .env.example)}
       - OLLAMA_URL=http://ollama:11434
-      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-15m}
+      # Per-request keep_alive (#53); OLLAMA_KEEP_ALIVE stays the ollama daemon's default.
+      - OLLAMA_REQUEST_KEEP_ALIVE=${OLLAMA_REQUEST_KEEP_ALIVE:-${OLLAMA_KEEP_ALIVE:-15m}}
       # argus-iris GPU leases around Ollama calls (#48): off unless ARGUS_GPU_COORDINATOR=broker.
       # A grant on ARGUS_GPU_HOME_NODE keeps OLLAMA_URL; one on another node (jarrah) uses
       # that node's Ollama. Pinned models (default: GUARD_MODEL, EMBED_MODEL) stay home.
@@ -194,7 +195,8 @@ services:
       # Forwarded to the GPU sidecars' /admin/* by /api/runtime/residents (argus-iris).
       - ARGUS_ADMIN_TOKEN=${ARGUS_ADMIN_TOKEN:-}
       - OLLAMA_URL=http://ollama:11434
-      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE:-15m}
+      # Per-request keep_alive (#53); OLLAMA_KEEP_ALIVE stays the ollama daemon's default.
+      - OLLAMA_REQUEST_KEEP_ALIVE=${OLLAMA_REQUEST_KEEP_ALIVE:-${OLLAMA_KEEP_ALIVE:-15m}}
       # argus-iris GPU leases around Ollama calls (#48): off unless ARGUS_GPU_COORDINATOR=broker.
       # A grant on ARGUS_GPU_HOME_NODE keeps OLLAMA_URL; one on another node (jarrah) uses
       # that node's Ollama. Pinned models (default: GUARD_MODEL, EMBED_MODEL) stay home.
