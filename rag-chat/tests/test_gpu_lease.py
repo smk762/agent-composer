@@ -78,6 +78,10 @@ class OllamaLeaseTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((req["target"], req["kind"], req["priority"]), ("ollama:qwen3:8b", "chat", "interactive"))
         self.assertIsNone(req["constraints"])
         self.assertFalse(req["preemptible"])
+        # Whole footprint plus its weights, so iris reuses a loaded model (#50).
+        self.assertEqual((req["min_vram_mb"], req["model_mb"]),
+                         (gpu_lease.vram_mb("qwen3:8b"), gpu_lease.model_mb("qwen3:8b")))
+        self.assertIsNotNone(req["model_mb"])
         self.assertEqual(coord.exits, [None])
 
     async def test_spill_uses_the_granted_node(self) -> None:
@@ -170,6 +174,8 @@ class OllamaLeaseTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((method, path), ("POST", "/leases"))
         self.assertEqual((req["target"], req["kind"], req["priority"], req["tenant"]),
                          ("ollama:qwen3:8b", "repair", "batch", "agent-composer"))
+        self.assertEqual((req["vram_mb"], req["model_mb"]),
+                         (gpu_lease.vram_mb("qwen3:8b"), gpu_lease.model_mb("qwen3:8b")))
         self.assertEqual(seen[-1][1], "/leases/abc/release")
         self.assertEqual(seen[-1][2]["outcome"], "ok")
 
@@ -182,6 +188,27 @@ class VramAndPinsTest(unittest.TestCase):
             self.assertEqual(gpu_lease.vram_mb("qwen3:4b"), 5200)
             self.assertEqual(gpu_lease.vram_mb("nomic-embed-text"), 600)
             self.assertEqual(gpu_lease.vram_mb("llama3.2:3b"), 4000)
+
+    def test_model_lookup(self) -> None:
+        with patch.object(gpu_lease, "VRAM_MB", {"sg": 6000, "small": 300}), \
+                patch.object(gpu_lease, "MODEL_MB", {"sg": 3900, "qwen3:8b": 5300, "small": 500}), \
+                patch.object(gpu_lease, "DEFAULT_VRAM_MB", 6000):
+            self.assertEqual(gpu_lease.model_mb("sg:q4"), 3900)
+            self.assertEqual(gpu_lease.model_mb("qwen3:8b"), 5300)
+            self.assertIsNone(gpu_lease.model_mb("qwen3:4b"))
+            self.assertEqual(gpu_lease.model_mb("small"), 300)  # never more than the footprint
+
+    def test_defaults_declare_weights_for_the_known_models(self) -> None:
+        for model, weights in {"hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M": 3900,
+                               "nomic-embed-text": 320, "qwen3:8b": 5300}.items():
+            self.assertEqual(gpu_lease._lookup(gpu_lease._DEFAULT_MODEL_MB, model), weights)
+
+    def test_env_overrides_the_tables(self) -> None:
+        with patch.dict("os.environ", {"OLLAMA_LEASE_MODEL_MB": "qwen3:8b=5000,bad=x"}):
+            table = gpu_lease._mb_table("OLLAMA_LEASE_MODEL_MB", gpu_lease._DEFAULT_MODEL_MB)
+        self.assertEqual(table["qwen3:8b"], 5000)
+        self.assertEqual(table["nomic-embed-text"], 320)
+        self.assertNotIn("bad", table)
 
     def test_pinned_defaults_follow_guard_and_embed_models(self) -> None:
         env = {"GUARD_MODEL": "sg:q8", "EMBED_MODEL": "emb"}

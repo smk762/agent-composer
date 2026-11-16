@@ -53,6 +53,7 @@ With `ARGUS_GPU_COORDINATOR=broker`, every Ollama call holds an `ollama:<model>`
 | `OLLAMA_LEASE_PINNED_MODELS` | `GUARD_MODEL`,`EMBED_MODEL` | Comma list; `none` pins nothing |
 | `RAG_CHAT_GPU_LEASE_TIMEOUT_S` / `RAG_INGEST_GPU_LEASE_TIMEOUT_S` | `60` / `300` | Wait for a grant before the 503 (compose maps each to the service's `ARGUS_GPU_LEASE_TIMEOUT_S`) |
 | `OLLAMA_LEASE_VRAM_MB` | SingGuard `6000`, nomic-embed-text `600` | `model=MiB,…`; anything unlisted is `OLLAMA_LEASE_DEFAULT_VRAM_MB` (`6000`) |
+| `OLLAMA_LEASE_MODEL_MB` | SingGuard `3900`, qwen3:8b `5300`, nomic-embed-text `320` | `model=MiB,…`: the weights part of the footprint (Ollama `/api/ps` `size_vram`), sent as the lease's `model_mb` so iris doesn't ask for room again while the model is loaded. The rest is the working set; a larger `num_ctx` grows that, so raise `OLLAMA_LEASE_VRAM_MB`. Unlisted models send none (all working set). Keep `gpu-tenant.yaml`'s kinds in step |
 | `OLLAMA_NODE_URLS` | (empty) | `node=url,…` when the broker's `base_url` for a node doesn't resolve in the containers |
 
 Priority comes from the call site (`chat`, `guard`, `embed-query` and `pipeline` are `interactive`; `repair` and `embed-ingest` are `batch`). A request's `X-Argus-Priority` header (`realtime`, `interactive`, `batch`, `background`) overrides it.

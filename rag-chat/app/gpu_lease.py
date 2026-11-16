@@ -20,6 +20,9 @@ to ``none``, not cortex's ``lease``: a host flock would serialise every Ollama c
 * **Pinned models** (``OLLAMA_LEASE_PINNED_MODELS``) carry a node constraint
   (``ARGUS_GPU_HOME_NODE``): SingGuard exists only on dragon, and the text embedder must
   match the vectors ingest wrote.
+* **Footprint**: ``min_vram_mb`` is the whole footprint (``OLLAMA_LEASE_VRAM_MB``) and
+  ``model_mb`` its weights (``OLLAMA_LEASE_MODEL_MB``), so iris asks only for the working
+  set when the model is already loaded. ``gpu-tenant.yaml``'s kinds carry the same figures.
 * **Priority**: each call site passes its class; a request's ``X-Argus-Priority`` header
   overrides it (:class:`PriorityMiddleware`).
 
@@ -54,20 +57,32 @@ def _pairs(raw: str) -> dict[str, str]:
     return out
 
 
-def _vram_table() -> dict[str, int]:
-    table = {"nomic-embed-text": 600, "hf.co/inclusionAI/SingGuard-4b-GGUF": 6000}
-    for model, mb in _pairs(os.getenv("OLLAMA_LEASE_VRAM_MB", "")).items():
+def _mb_table(env: str, defaults: dict[str, int]) -> dict[str, int]:
+    """*defaults* overridden by ``model=MiB,…`` pairs from *env*."""
+    table = dict(defaults)
+    for model, mb in _pairs(os.getenv(env, "")).items():
         try:
             table[model] = max(0, int(mb))
         except ValueError:
-            log.warning("OLLAMA_LEASE_VRAM_MB: ignoring %s=%r", model, mb)
+            log.warning("%s: ignoring %s=%r", env, model, mb)
     return table
+
+
+# Whole footprint per model: weights plus working set (KV cache, activations).
+_DEFAULT_VRAM_MB = {"nomic-embed-text": 600, "hf.co/inclusionAI/SingGuard-4b-GGUF": 6000}
+# The part of it that is weights and stays loaded after the call (#50): Ollama /api/ps
+# size_vram at the default context, measured 2026-11-16. iris counts a lease as
+# working + model and skips the model part when the model is already resident, so a
+# check against a loaded SingGuard asks only for its working set. A larger num_ctx grows
+# the KV cache, which is working set: raise OLLAMA_LEASE_VRAM_MB, not this.
+_DEFAULT_MODEL_MB = {"nomic-embed-text": 320, "hf.co/inclusionAI/SingGuard-4b-GGUF": 3900, "qwen3:8b": 5300}
 
 
 # "jarrah=http://192.168.1.109:11434": the URL to call on a node, when the broker's
 # base_url for it doesn't resolve from inside the container.
 NODE_URLS = {node: url.rstrip("/") for node, url in _pairs(os.getenv("OLLAMA_NODE_URLS", "")).items()}
-VRAM_MB = _vram_table()
+VRAM_MB = _mb_table("OLLAMA_LEASE_VRAM_MB", _DEFAULT_VRAM_MB)
+MODEL_MB = _mb_table("OLLAMA_LEASE_MODEL_MB", _DEFAULT_MODEL_MB)
 try:
     DEFAULT_VRAM_MB = max(0, int(os.getenv("OLLAMA_LEASE_DEFAULT_VRAM_MB", str(DEFAULT_VRAM_MB))))
 except ValueError:
@@ -150,11 +165,24 @@ def coordinator():
     return _coordinator
 
 
+def _lookup(table: dict[str, int], model: str) -> int | None:
+    """Exact model name, then the name without its tag."""
+    if model in table:
+        return table[model]
+    return table.get(model.rsplit(":", 1)[0])
+
+
 def vram_mb(model: str) -> int:
     """Declared footprint: exact model name, then the name without its tag, then the default."""
-    if model in VRAM_MB:
-        return VRAM_MB[model]
-    return VRAM_MB.get(model.rsplit(":", 1)[0], DEFAULT_VRAM_MB)
+    mb = _lookup(VRAM_MB, model)
+    return DEFAULT_VRAM_MB if mb is None else mb
+
+
+def model_mb(model: str) -> int | None:
+    """The weights part of :func:`vram_mb` (never more than it); ``None`` when unknown,
+    which the broker reads as "all of it is working set"."""
+    mb = _lookup(MODEL_MB, model)
+    return None if mb is None else min(mb, vram_mb(model))
 
 
 def url_for(handle) -> str:
@@ -185,6 +213,7 @@ async def ollama_lease(model: str, *, kind: str, priority: str, caller: str = ""
     cm = coord.alease(
         caller=caller or kind,
         min_vram_mb=vram_mb(model),
+        model_mb=model_mb(model),
         priority=_priority.get() or priority,
         target=f"ollama:{model}",
         kind=kind,

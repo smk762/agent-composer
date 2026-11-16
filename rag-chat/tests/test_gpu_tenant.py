@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import yaml
 
+from app import gpu_lease
 from app.routers import runtime
 
 MANIFEST = Path(__file__).resolve().parents[2] / "gpu-tenant.yaml"
@@ -57,6 +58,15 @@ class GpuTenantManifestTest(unittest.TestCase):
                 used |= set(re.findall(r'ollama_lease\([^)]*?kind="([a-z0-9-]+)"', src.read_text(encoding="utf-8"), re.S))
         declared = {k["kind"] for k in self.manifest["kinds"]}
         self.assertEqual(used, declared)
+
+    def test_kind_footprints_match_the_lease_tables(self) -> None:
+        """A kind's vram_mb/model_mb are what ollama_lease sends for its target model (#50)."""
+        for k in self.manifest["kinds"]:
+            model = k["target"].removeprefix("ollama:")
+            with self.subTest(kind=k["kind"]):
+                self.assertEqual(k["vram_mb"], gpu_lease.vram_mb(model))
+                self.assertEqual(k.get("model_mb"), gpu_lease.model_mb(model))
+                self.assertIsNotNone(k.get("model_mb"), "declare the weights so iris can reuse a loaded model")
 
     def test_singguard_is_pinned(self) -> None:
         guard = next(r for r in self.manifest["residents"] if r["name"] == "singguard")
