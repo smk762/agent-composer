@@ -79,7 +79,9 @@ residents:
     vram_mb: 2000                 # about 2 GB loaded
     admin_auth: false             # rag-chat adds ARGUS_ADMIN_TOKEN
 
-  # Qwen3-TTS, the legacy/rollback engine.
+  # Qwen3-TTS. argus-mask calls it directly on :8031; it isn't one of rag-chat's TTS
+  # engines, so the gateway serves it through RUNTIME_EXTRA_RESIDENTS (compose default
+  # tts=http://tts:8031).
   - name: tts
     adapter: argus-http
     container: tts

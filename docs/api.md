@@ -226,7 +226,7 @@ All routes require **auth**.
 | GET | `/api/runtime/residents/{name}/health` |
 | POST | `/api/runtime/residents/{name}/admin/{unload\|evict\|wake}` |
 
-`residents` is the argus-iris gateway to the GPU sidecars (`modernbert`, `whisper`, `infinity`, and each TTS engine), whose own ports are loopback-only. Status codes are relayed. The caller sends only a rag-chat API key; rag-chat adds its own `ARGUS_ADMIN_TOKEN` as the Bearer when it calls a sidecar's `/admin/*`, so set the same value on rag-chat and the sidecars. `gpu-tenant.yaml` at the repo root lists these residents for iris.
+`residents` is the argus-iris gateway to the GPU sidecars (`modernbert`, `whisper`, `infinity`, each TTS engine, and the `RUNTIME_EXTRA_RESIDENTS` entries, by default the Qwen `tts` sidecar argus-mask uses), whose own ports are loopback-only. Status codes are relayed. The caller sends only a rag-chat API key; rag-chat adds its own `ARGUS_ADMIN_TOKEN` as the Bearer when it calls a sidecar's `/admin/*`, so set the same value on rag-chat and the sidecars. `gpu-tenant.yaml` at the repo root lists these residents for iris.
 
 ### Metrics
 

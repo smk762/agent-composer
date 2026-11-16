@@ -20,6 +20,7 @@ from app.config import (
     OLLAMA_TIMEOUT,
     OLLAMA_URL,
     RESIDENT_ADMIN_TIMEOUT,
+    RUNTIME_EXTRA_RESIDENTS,
     TTS_ENGINES,
     WHISPER_URL,
     ollama_keep_alive,
@@ -176,6 +177,7 @@ _HEALTH_TIMEOUT = 10.0
 
 def _residents() -> Dict[str, str]:
     found = {
+        **RUNTIME_EXTRA_RESIDENTS,  # e.g. tts (Qwen, used by argus-mask); never TTS engines
         "modernbert": MODERNBERT_URL,
         "whisper": WHISPER_URL,
         "infinity": INFINITY_URL,

@@ -138,3 +138,35 @@ class KeepAliveSwitchTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExtraResidentsTest(unittest.TestCase):
+    """RUNTIME_EXTRA_RESIDENTS adds gateway-only residents (the Qwen tts sidecar), not TTS engines."""
+
+    def test_parse(self) -> None:
+        from app.config import _parse_residents
+
+        self.assertEqual(
+            _parse_residents(" tts=http://tts:8031 , ,bad, x=ftp://y, Foo=https://foo:1 "),
+            {"tts": "http://tts:8031", "foo": "https://foo:1"},
+        )
+        self.assertEqual(_parse_residents(""), {})
+
+    def test_extras_join_the_gateway_and_engines_win_on_a_clash(self) -> None:
+        extras = {"tts": "http://tts:8031/", "xtts": "http://elsewhere:1"}
+        with patch.object(runtime, "RUNTIME_EXTRA_RESIDENTS", extras), \
+                patch.object(runtime, "TTS_ENGINES", {"xtts": "http://xtts:8031"}):
+            found = runtime._residents()
+        self.assertEqual(found["tts"], "http://tts:8031")
+        self.assertEqual(found["xtts"], "http://xtts:8031")
+
+    def test_env_reaches_the_gateway_but_not_the_engines(self) -> None:
+        from app import config
+
+        env = {"RUNTIME_EXTRA_RESIDENTS": "tts=http://tts:8031", "TTS_URL": "http://xtts:8031",
+               "XTTS_TTS_URL": "http://xtts:8031"}
+        self.addCleanup(importlib.reload, config)
+        with patch.dict(os.environ, env):
+            reloaded = importlib.reload(config)
+        self.assertEqual(reloaded.RUNTIME_EXTRA_RESIDENTS, {"tts": "http://tts:8031"})
+        self.assertNotIn("tts", reloaded.TTS_ENGINES)

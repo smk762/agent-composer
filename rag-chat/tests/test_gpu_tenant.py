@@ -27,9 +27,11 @@ class GpuTenantManifestTest(unittest.TestCase):
         cls.http = {r["name"]: r for r in cls.manifest["residents"] if r["adapter"] == "argus-http"}
 
     def test_every_local_sidecar_is_listed(self) -> None:
-        # Every engine configured, as on dragon (the legacy tts engine needs TTS_URL).
-        engines = {"xtts": "http://xtts:8031", "tts": "http://tts:8031", "miso": "http://morpheus:8034"}
-        with patch.object(runtime, "TTS_ENGINES", engines):
+        # As compose configures dragon: xtts and miso engines, and the Qwen tts sidecar
+        # as a gateway-only resident (RUNTIME_EXTRA_RESIDENTS).
+        engines = {"xtts": "http://xtts:8031", "miso": "http://morpheus:8034"}
+        with patch.object(runtime, "TTS_ENGINES", engines), \
+                patch.object(runtime, "RUNTIME_EXTRA_RESIDENTS", {"tts": "http://tts:8031"}):
             local = set(runtime._residents()) - REMOTE
         self.assertEqual(set(self.http), local)
 

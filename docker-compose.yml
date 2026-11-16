@@ -245,6 +245,10 @@ services:
       # unreachable. Empty auto-selects xtts when the default is something else.
       - TTS_FALLBACK_ENGINE=${TTS_FALLBACK_ENGINE:-}
       - TTS_URL=${TTS_URL:-http://xtts:8031}
+      # Extra GPU sidecars for the argus-iris gateway (/api/runtime/residents), as
+      # name=url pairs. They are not TTS engines: the Qwen tts sidecar serves
+      # argus-mask directly, and iris unloads it through rag-chat. Empty disables.
+      - RUNTIME_EXTRA_RESIDENTS=${RUNTIME_EXTRA_RESIDENTS-tts=http://tts:8031}
       - VOICE_TIMEOUT=${VOICE_TIMEOUT:-180}
       # Shared "voice" MinIO bucket — lets the proxy re-host rendered audio from
       # remote engines (e.g. Miso on another subnet) so browsers always fetch it
