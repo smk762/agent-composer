@@ -174,7 +174,7 @@ Proxies to the Whisper STT sidecar and a registry of TTS engines (`xtts`, `miso`
 | POST | `/api/voice/synthesise/pcm` | open | Raw 24 kHz float32 PCM stream (XTTS only) |
 | GET | `/api/voice/speakers` | open | Built-in speakers |
 | POST | `/api/voice/analyze` | open | multipart `audio` (one or more clips) → per-clip scores and a recommended subset |
-| POST | `/api/voice/clone` | open | multipart `audio` (one or more), `voice_name`, `companion_id?`, `reference_text?` |
+| POST | `/api/voice/clone` | open | multipart `audio` (one or more), `voice_name`, `companion_id?`, `reference_text?`, `replace?`. An id the engine already lists is a 409 unless `replace=true`, which needs auth (as does any clone while the engine's list can't be read). `companion_id` is `[A-Za-z0-9_-]{1,64}`, else 400 (also on download/delete). At most `VOICE_MAX_CLIPS` clips of `VOICE_CLIP_MAX_BYTES` each (413) |
 | GET | `/api/voice/clones` | open | Stored clones |
 | POST | `/api/voice/clones/import` | open | multipart `archive`, `voice_name?`, `companion_id?` |
 | GET | `/api/voice/clones/{companion_id}/download` | open | Clone archive |

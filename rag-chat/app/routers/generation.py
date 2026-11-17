@@ -28,6 +28,7 @@ from app.models.schemas import (
 from app.providers.base import Capability
 from app.providers.registry import ProviderRegistry
 from app.storage import media_store
+from app.uploads import read_upload
 
 log = logging.getLogger("rag-chat.generation")
 
@@ -47,16 +48,7 @@ def _asset_out(a: MediaAsset) -> MediaAssetOut:
 
 async def _read_upload(upload: UploadFile, field: str, max_bytes: Optional[int] = None) -> bytes:
     """The upload's bytes, read in chunks: past ``max_bytes`` it is a 413 without reading the rest."""
-    limit = GENERATION_UPLOAD_MAX_BYTES if max_bytes is None else max_bytes
-    if upload.size is not None and upload.size > limit:
-        raise HTTPException(413, f"{field} is larger than {limit} bytes")
-    chunks, total = [], 0
-    while chunk := await upload.read(1024 * 1024):
-        total += len(chunk)
-        if total > limit:
-            raise HTTPException(413, f"{field} is larger than {limit} bytes")
-        chunks.append(chunk)
-    return b"".join(chunks)
+    return await read_upload(upload, field, GENERATION_UPLOAD_MAX_BYTES if max_bytes is None else max_bytes)
 
 
 async def _store_results(db: AsyncSession, gen: Generation, result, *, user_id: str, media_type: str,

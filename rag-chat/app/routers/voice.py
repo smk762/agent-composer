@@ -30,6 +30,7 @@ import time
 import uuid
 import wave
 from typing import Optional
+from urllib.parse import quote
 
 import httpx
 from botocore.exceptions import BotoCoreError, ClientError
@@ -39,6 +40,7 @@ from pydantic import BaseModel, Field
 
 from app.auth import require_user
 from app.db import get_db
+from app.uploads import read_upload
 from app.config import (
     MAX_SENTENCE_PAUSE_MS,
     TTS_DEFAULT_ENGINE,
@@ -50,6 +52,8 @@ from app.config import (
     VOICE_S3_ENDPOINT_URL,
     VOICE_S3_PUBLIC_URL,
     VOICE_S3_REHOST,
+    VOICE_CLIP_MAX_BYTES,
+    VOICE_MAX_CLIPS,
     VOICE_S3_SECRET_ACCESS_KEY,
     VOICE_TIMEOUT,
     WHISPER_URL,
@@ -564,6 +568,47 @@ async def speakers(engine: Optional[str] = Query(default=None)):
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 
+_COMPANION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _companion_segment(companion_id: str) -> str:
+    """``companion_id`` as one URL path segment for the sidecar, or a 400.
+
+    Starlette has already percent-decoded it, so ``..``, ``?`` or ``#`` here would rewrite the upstream
+    path or query. Sidecars only accept ``[A-Za-z0-9_-]{1,64}``; quoting is belt and braces.
+    """
+    if not isinstance(companion_id, str) or not _COMPANION_ID_RE.match(companion_id):
+        raise HTTPException(400, detail="companion_id must be 1-64 characters of A-Z, a-z, 0-9, _ or -")
+    return quote(companion_id, safe="")
+
+
+async def _read_clips(audio: list[UploadFile]) -> list:
+    """Multipart ``audio`` entries for the sidecar; too many clips, or one too large, is a 413."""
+    if len(audio) > VOICE_MAX_CLIPS:
+        raise HTTPException(413, detail=f"At most {VOICE_MAX_CLIPS} clips per request")
+    files = []
+    for i, clip in enumerate(audio):
+        data = await read_upload(clip, f"clip {i + 1}", VOICE_CLIP_MAX_BYTES)
+        files.append(
+            ("audio", (clip.filename or f"clip-{i}.wav", data, clip.content_type or "audio/wav"))
+        )
+    return files
+
+
+async def _clone_exists(base: str, companion_id: str) -> Optional[bool]:
+    """Whether the engine already lists ``companion_id``; None if its clone list can't be read."""
+    try:
+        async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
+            r = await client.get(f"{base}/clones")
+            r.raise_for_status()
+            listed = r.json().get("clones")
+    except (httpx.HTTPError, ValueError, AttributeError):
+        return None
+    if not isinstance(listed, list):
+        return None
+    return any(isinstance(c, dict) and c.get("companion_id") == companion_id for c in listed)
+
+
 def _slugify(name: str) -> str:
     # TTS sidecars accept companion ids of at most 64 chars ([A-Za-z0-9_-]).
     slug = _SLUG_RE.sub("-", (name or "").strip().lower()).strip("-")[:64].strip("-")
@@ -586,9 +631,13 @@ async def clone_voice(
     Forwards every uploaded clip to the engine's `/clone-voice`. XTTS averages
     the speaker embedding across clips for a more robust clone than a single
     short take; Miso is one-shot (best single clip). `companion_id` defaults to
-    a slug of `voice_name`. An engine that guards existing clones (`tts`)
-    answers 409 unless `replace` is true; overwriting is destructive, so
-    `replace=true` requires an authenticated caller (like clone delete).
+    a slug of `voice_name`.
+
+    Overwriting is destructive, so the guard lives here rather than in the
+    engine (not every engine has one): an id the engine already lists answers
+    409 unless `replace` is true, and `replace=true` requires an authenticated
+    caller (like clone delete). If the engine's clone list can't be read, the
+    id may exist, so the caller must be authenticated.
     """
     if replace:
         await require_user(request, db)
@@ -599,13 +648,16 @@ async def clone_voice(
         raise HTTPException(422, detail="At least one reference clip is required")
 
     cid = (companion_id or "").strip() or _slugify(voice_name)
+    _companion_segment(cid)
 
-    files = []
-    for i, clip in enumerate(audio):
-        data = await clip.read()
-        files.append(
-            ("audio", (clip.filename or f"clip-{i}.wav", data, clip.content_type or "audio/wav"))
-        )
+    if not replace:
+        exists = await _clone_exists(base, cid)
+        if exists:
+            raise HTTPException(409, detail=f"Voice clone '{cid}' already exists; send replace=true to overwrite it")
+        if exists is None:
+            await require_user(request, db)
+
+    files = await _read_clips(audio)
     form = {
         "companion_id": cid,
         "voice_name": voice_name,
@@ -648,12 +700,7 @@ async def analyze_clips(
     if not audio:
         raise HTTPException(422, detail="No clips provided")
 
-    files = []
-    for i, clip in enumerate(audio):
-        data = await clip.read()
-        files.append(
-            ("audio", (clip.filename or f"clip-{i}.wav", data, clip.content_type or "audio/wav"))
-        )
+    files = await _read_clips(audio)
 
     t0 = time.monotonic()
     try:
@@ -717,12 +764,13 @@ async def import_clone(
 @router.get("/clones/{companion_id}/download")
 async def download_clone(companion_id: str, engine: Optional[str] = Query(default=None)):
     """Download a clone's latents + metadata sidecar as a zip."""
+    segment = _companion_segment(companion_id)
     _require_tts()
     base = _tts_base(engine)
 
     try:
         async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
-            r = await client.get(f"{base}/clones/{companion_id}/download")
+            r = await client.get(f"{base}/clones/{segment}/download")
             r.raise_for_status()
     except httpx.ConnectError:
         raise HTTPException(503, detail="TTS server unreachable")
@@ -744,12 +792,13 @@ async def delete_clone(companion_id: str, engine: Optional[str] = Query(default=
     named engine, never the fallback chain. An engine whose sidecar has no
     delete route surfaces its upstream 404/405 to the caller.
     """
+    segment = _companion_segment(companion_id)
     _require_tts()
     base = _tts_base(engine)
 
     try:
         async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
-            r = await client.delete(f"{base}/clones/{companion_id}")
+            r = await client.delete(f"{base}/clones/{segment}")
             r.raise_for_status()
     except httpx.ConnectError:
         raise HTTPException(503, detail="TTS server unreachable")

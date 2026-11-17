@@ -155,6 +155,10 @@ RUNTIME_EXTRA_RESIDENTS = _parse_residents(os.getenv("RUNTIME_EXTRA_RESIDENTS", 
 # the API, or the Wyoming/Home Assistant bridges.
 WHISPER_URL = os.getenv("WHISPER_URL", "http://whisper:8030").rstrip("/")
 VOICE_TIMEOUT = _env_int("VOICE_TIMEOUT", 30)
+# Reference clips /api/voice/clone and /api/voice/analyze accept per request, and the size of each
+# (bytes): they are buffered in memory before forwarding, so more is a 413.
+VOICE_MAX_CLIPS = _env_int("VOICE_MAX_CLIPS", 16)
+VOICE_CLIP_MAX_BYTES = _env_int("VOICE_CLIP_MAX_BYTES", 16 * 1024 * 1024)
 
 
 def _clean_url(value: str) -> str:

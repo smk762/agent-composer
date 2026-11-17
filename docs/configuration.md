@@ -89,6 +89,7 @@ Priority comes from the call site (`chat`, `guard`, `embed-query` and `pipeline`
 | `TTS_DEFAULT_ENGINE` | auto: `miso` if set, else `xtts` | |
 | `TTS_FALLBACK_ENGINE` | auto: `xtts` when the default is something else | Used only for requests that don't name an engine |
 | `VOICE_TIMEOUT` | `30` | Proxy timeout (seconds) |
+| `VOICE_MAX_CLIPS` / `VOICE_CLIP_MAX_BYTES` | `16` / `16777216` | Clips per `/api/voice/clone` or `/api/voice/analyze` request, and bytes per clip; more is a 413 |
 | `MISO_SENTENCE_PAUSE_MS` / `MAX_SENTENCE_PAUSE_MS` | `300` / `2000` | Silence inserted between Miso sentences |
 | `S3_ENDPOINT_URL`, `S3_PUBLIC_URL`, `S3_BUCKET_NAME`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | | Shared "voice" MinIO bucket for clones and re-hosted audio |
 
