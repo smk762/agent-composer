@@ -11,6 +11,9 @@ from typing import Awaitable, Callable, TypeVar
 T = TypeVar("T")
 
 _OOM_MESSAGE = "CUDA out of memory after waiting for capacity"
+# Floor on the wait between OOM retries: an interval of 0 (or less) would retry back to
+# back against an exhausted GPU and, if fn() fails before suspending, starve the event loop.
+_MIN_RETRY_INTERVAL_S = 0.5
 
 try:
     import torch
@@ -89,6 +92,5 @@ async def run_with_oom_wait(
             if monotonic() >= deadline:
                 raise RetryableOomError(_OOM_MESSAGE) from exc
 
-            wait_s = min(max(0, interval_s), max(0.0, deadline - monotonic()))
-            if wait_s > 0:
-                await sleep(wait_s)
+            wait_s = min(max(_MIN_RETRY_INTERVAL_S, interval_s), max(0.0, deadline - monotonic()))
+            await sleep(wait_s)  # always yields to the loop, even when the deadline is due

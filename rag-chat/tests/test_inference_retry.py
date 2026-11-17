@@ -97,6 +97,43 @@ class OomRetryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cleanup_calls, 4)
         self.assertEqual(sleeps, [4, 4, 2.0])
 
+    async def test_zero_interval_still_backs_off(self) -> None:
+        attempts = 0
+        sleeps: list[float] = []
+        now = 0.0
+
+        async def operation() -> str:
+            nonlocal attempts
+            attempts += 1
+            raise RuntimeError("CUDA out of memory")
+
+        def monotonic() -> float:
+            nonlocal now
+            now += 0.001  # time passes a little even without a sleep
+            return now
+
+        async def sleep(seconds: float) -> None:
+            nonlocal now
+            sleeps.append(seconds)
+            now += seconds
+
+        for interval in (0, -3):
+            attempts, sleeps, now = 0, [], 0.0
+            with self.subTest(interval=interval), self.assertRaises(RetryableOomError):
+                await run_with_oom_wait(
+                    operation,
+                    on_oom=lambda: None,
+                    interval_s=interval,
+                    max_wait_s=2,
+                    sleep=sleep,
+                    monotonic=monotonic,
+                    clear_memory=lambda: None,
+                )
+            # Every failed attempt but the last waits, and never a hot loop.
+            self.assertEqual(len(sleeps), attempts - 1)
+            self.assertLessEqual(attempts, 6)
+            self.assertTrue(all(s >= 0.4 for s in sleeps[:-1]), sleeps)
+
     async def test_worker_pool_serializes_tasks(self) -> None:
         workers = InferenceWorkers(1)
         order: list[str] = []
