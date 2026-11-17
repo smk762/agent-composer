@@ -176,11 +176,9 @@ def allowed_collections() -> set[str]:
 
 
 async def _collection_exists(client: AsyncQdrantClient, name: str) -> bool:
-    try:
-        await client.get_collection(name)
-        return True
-    except Exception:
-        return False
+    """Whether ``name`` exists. Any error (Qdrant down, auth, 5xx) raises: it must never
+    pass for "missing" and drive a create, or skip the embedder guard or the prune."""
+    return await client.collection_exists(name)
 
 
 async def _create_collection_if_missing(client: AsyncQdrantClient, name: str, **config: Any) -> None:
@@ -318,17 +316,20 @@ def _describe(identity: Identity) -> str:
 
 def identity_filter(source: Optional[str], field: str, value: str, repo: Optional[str] = None,
                     by_repo: bool = False) -> qm.Filter:
-    """Points of one doc identity. ``source=None`` matches points stored without a source."""
+    """Points of one doc identity. ``source=None`` matches points stored without a source.
+
+    "Without" means a null *or absent* key: IsNullCondition matches only an explicit null,
+    IsEmptyCondition matches both (and ``[]``, which these string fields never hold)."""
     must: List[Any] = [qm.FieldCondition(key=field, match=qm.MatchValue(value=value))]
     if source is None:
-        must.append(qm.IsNullCondition(is_null=qm.PayloadField(key="source")))
+        must.append(qm.IsEmptyCondition(is_empty=qm.PayloadField(key="source")))
     else:
         must.append(qm.FieldCondition(key="source", match=qm.MatchValue(value=source)))
     if by_repo:
         if repo:
             must.append(qm.FieldCondition(key="repo", match=qm.MatchValue(value=repo)))
         else:
-            must.append(qm.IsNullCondition(is_null=qm.PayloadField(key="repo")))
+            must.append(qm.IsEmptyCondition(is_empty=qm.PayloadField(key="repo")))
     return qm.Filter(must=must)
 
 
