@@ -6,6 +6,7 @@ one that installs a fake model, so these run without a GPU or Coqui weights.
 
 import asyncio
 import io
+import itertools
 import json
 import os
 
@@ -591,7 +592,7 @@ def test_padded_spans_merge_overlaps():
     ts = [{"start": 1.0, "end": 2.0}, {"start": 2.05, "end": 2.1}, {"start": 2.1, "end": 3.0}]
     spans = xs._padded_spans(ts, 0.1, 100, 1000)
     assert all(b > a for a, b in spans)
-    assert all(prev[1] <= nxt[0] for prev, nxt in zip(spans, spans[1:]))  # no sample twice
+    assert all(prev[1] <= nxt[0] for prev, nxt in itertools.pairwise(spans))  # no sample twice
     assert spans[0][0] == 90 and spans[-1][1] == 310
     assert sum(b - a for a, b in spans) == 220
 

@@ -5,9 +5,8 @@ S3 is a fake; the model manager is replaced by one that fails if touched.
 """
 
 import pytest
-from fastapi.testclient import TestClient
-
 import xtts_server as xs
+from fastapi.testclient import TestClient
 
 
 class _Untouchable:

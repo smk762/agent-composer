@@ -6,9 +6,8 @@ import pytest
 
 pytest.importorskip("wyoming")
 
-from wyoming.audio import AudioChunk, AudioStart, AudioStop  # noqa: E402
-
-from wyoming_bridge import whisper_stt as stt  # noqa: E402
+from wyoming.audio import AudioChunk, AudioStart, AudioStop
+from wyoming_bridge import whisper_stt as stt
 
 
 class _Writer:
