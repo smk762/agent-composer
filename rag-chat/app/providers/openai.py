@@ -93,8 +93,7 @@ class OpenAIProvider(ImageProvider, VideoProvider):
         data = r.json()
         media = []
         for i, item in enumerate(data.get("data", [])):
-            b64 = item.get("b64_json", "")
-            img_bytes = base64.b64decode(b64)
+            img_bytes = _b64_image(item)
             media.append(GeneratedMedia(
                 data=img_bytes,
                 mime_type="image/png",
@@ -116,8 +115,7 @@ class OpenAIProvider(ImageProvider, VideoProvider):
         data = r.json()
         media = []
         for i, item in enumerate(data.get("data", [])):
-            b64 = item.get("b64_json", "")
-            img_bytes = base64.b64decode(b64)
+            img_bytes = _b64_image(item)
             media.append(GeneratedMedia(
                 data=img_bytes,
                 mime_type="image/png",
@@ -149,6 +147,9 @@ class OpenAIProvider(ImageProvider, VideoProvider):
             files["mask"] = ("mask.png", mask, "image/png")
         if size:
             files["size"] = (None, size)
+        if not model.startswith("gpt-image"):
+            # DALL-E answers with URLs unless asked for base64; gpt-image-1 always sends base64.
+            files["response_format"] = (None, "b64_json")
 
         async with httpx.AsyncClient(timeout=120) as c:
             r = await c.post(
@@ -160,8 +161,7 @@ class OpenAIProvider(ImageProvider, VideoProvider):
         data = r.json()
         media = []
         for i, item in enumerate(data.get("data", [])):
-            b64 = item.get("b64_json", "")
-            img_bytes = base64.b64decode(b64)
+            img_bytes = _b64_image(item)
             media.append(GeneratedMedia(
                 data=img_bytes,
                 mime_type="image/png",
@@ -182,6 +182,9 @@ class OpenAIProvider(ImageProvider, VideoProvider):
         duration: Optional[float] = None,
         aspect_ratio: Optional[str] = None,
     ) -> GenerationResult:
+        if image is not None:
+            # This call sends no reference image; refuse rather than bill a text-only video.
+            raise LookupError("OpenAI video generation here does not take an input image; send the prompt alone")
         model = model or "sora"
         body: dict = {
             "model": model,
@@ -215,6 +218,15 @@ class OpenAIProvider(ImageProvider, VideoProvider):
                     duration_seconds=duration,
                 ))
         return GenerationResult(media=media, model=model, provider=self.name)
+
+
+def _b64_image(item: dict) -> bytes:
+    """An image item's bytes; an item without ``b64_json`` (e.g. a ``url`` item) is an error,
+    never an empty "PNG" that looks like a success."""
+    b64 = item.get("b64_json")
+    if not b64:
+        raise RuntimeError("OpenAI returned an image without b64_json data")
+    return base64.b64decode(b64)
 
 
 def _parse_dim(size: str, idx: int) -> Optional[int]:

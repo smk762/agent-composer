@@ -1,6 +1,7 @@
 """Stability AI provider — SDXL / SD3 image generation and editing."""
 
 import logging
+import math
 from typing import List, Optional
 from uuid import uuid4
 
@@ -172,17 +173,20 @@ class StabilityAIProvider(ImageProvider):
         )
 
 
+# The v2beta stable-image ``aspect_ratio`` enum. 4:3 and 3:4 are not in it (a 400).
+STABILITY_ASPECTS = ("21:9", "16:9", "3:2", "5:4", "1:1", "4:5", "2:3", "9:16", "9:21")
+
+
 def _closest_aspect(w: int, h: int) -> str:
-    """Map WxH to one of Stability's supported aspect ratios."""
-    ratio = w / h if h else 1.0
-    aspects = [
-        (1.0, "1:1"), (16 / 9, "16:9"), (9 / 16, "9:16"),
-        (21 / 9, "21:9"), (9 / 21, "9:21"),
-        (4 / 3, "4:3"), (3 / 4, "3:4"),
-        (3 / 2, "3:2"), (2 / 3, "2:3"),
-        (5 / 4, "5:4"), (4 / 5, "4:5"),
-    ]
-    return min(aspects, key=lambda x: abs(x[0] - ratio))[1]
+    """Map WxH to the nearest of Stability's supported aspect ratios, compared in log
+    space so a landscape size and its portrait twin land on mirrored ratios."""
+    ratio = w / h if w > 0 and h > 0 else 1.0
+
+    def distance(aspect: str) -> float:
+        a, b = (int(x) for x in aspect.split(":"))
+        return abs(math.log(ratio) - math.log(a / b))
+
+    return min(STABILITY_ASPECTS, key=distance)
 
 
 register_provider("stability", StabilityAIProvider)
