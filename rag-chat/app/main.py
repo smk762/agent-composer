@@ -16,7 +16,9 @@ from app.metrics import MetricsMiddleware, metrics_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Check the RAG collection's embedder in the background: never block startup on Qdrant.
-    from app import retrieval
+    from app import auth, retrieval
+
+    auth.warn_if_dev_bypass()
 
     async def check():
         status = await retrieval.embedder_status(force=True)

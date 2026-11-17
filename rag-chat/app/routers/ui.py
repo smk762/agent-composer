@@ -353,7 +353,7 @@ def api_keys_ui():
         function setBanner() {{
           if (DEV_BYPASS) {{
             bannerEl.style.display = "block";
-            bannerEl.textContent = "DEV_AUTH_BYPASS is ON. Requests use X-Dev-User / DEV_DEFAULT_USER when no API key is provided.";
+            bannerEl.textContent = "DEV_AUTH_BYPASS is ON. Requests without an API key run as DEV_DEFAULT_USER (or an X-Dev-User listed in DEV_AUTH_USERS).";
           }}
         }}
 
@@ -504,7 +504,7 @@ def history_ui():
         function setBanner() {{
           if (DEV_BYPASS) {{
             bannerEl.style.display = "block";
-            bannerEl.textContent = "DEV_AUTH_BYPASS is ON. Requests use X-Dev-User / DEV_DEFAULT_USER when no API key is provided.";
+            bannerEl.textContent = "DEV_AUTH_BYPASS is ON. Requests without an API key run as DEV_DEFAULT_USER (or an X-Dev-User listed in DEV_AUTH_USERS).";
           }}
         }}
 

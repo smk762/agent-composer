@@ -88,6 +88,9 @@ RAG_TOP_K = int(os.getenv("RAG_TOP_K", "5"))
 RAG_MAX_CONTEXT_CHARS = int(os.getenv("RAG_MAX_CONTEXT_CHARS", "4000"))
 DEV_AUTH_BYPASS = os.getenv("DEV_AUTH_BYPASS", "0") == "1"
 DEV_DEFAULT_USER = os.getenv("DEV_DEFAULT_USER", "dev@example.com")
+# Other users the dev bypass may act as via X-Dev-User (comma-separated). Empty: only DEV_DEFAULT_USER,
+# so a caller can't name an arbitrary (real) user just by sending the header.
+DEV_AUTH_USERS = frozenset(u.strip() for u in os.getenv("DEV_AUTH_USERS", "").split(",") if u.strip())
 # Cloudflare Access: identity comes only from a verified Cf-Access-Jwt-Assertion
 # (or CF_Authorization cookie). Both must be set or Access identity is refused.
 CF_ACCESS_TEAM_DOMAIN = os.getenv("CF_ACCESS_TEAM_DOMAIN", "").strip().removeprefix("https://").rstrip("/")

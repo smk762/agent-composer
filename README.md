@@ -108,7 +108,7 @@ Optional:
 - `INGEST_ALLOWED_COLLECTIONS`: comma-separated extra text collections a signed `/ingest` request may target with its optional `collection` field `QDRANT_COLLECTION` is always allowed; any other collection is refused with 400, never redirected. `rag-chat` retrieves only from `QDRANT_COLLECTION`.
 - `RAG_ENABLED`: `1` (default) injects Qdrant context into `/chat`; `0` turns retrieval off. Tune with `RAG_TOP_K` and `RAG_MAX_CONTEXT_CHARS`.
 - `CHAT_HISTORY_MAX_MSGS`: messages kept per conversation (default `100`; older ones are pruned; `0` keeps everything).
-- `DEV_AUTH_BYPASS`: **`1` disables rag-chat authentication** (requests run as `X-Dev-User` or `DEV_DEFAULT_USER`). Local development only. Never enable it on an exposed instance.
+- `DEV_AUTH_BYPASS`: **`1` disables rag-chat authentication** (requests run as `DEV_DEFAULT_USER`, or an `X-Dev-User` listed in `DEV_AUTH_USERS`). Local development only. Never enable it on an exposed instance.
 - `PROVIDER_ENCRYPTION_KEY`: passphrase that encrypts stored image/video provider API keys. **If unset, provider keys are stored as plain base64.**
 - `RETRIEVAL_PROFILE`: `text` (default) or `code`, the default ingest path (see above).
 - `OLLAMA_KEEP_ALIVE`: the Ollama daemon's default keep-alive (example: `15m`), and what rag-chat/rag-ingest send per request unless `OLLAMA_REQUEST_KEEP_ALIVE` is set (`server` sends none)

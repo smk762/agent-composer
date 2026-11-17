@@ -9,10 +9,11 @@ Every service reads its settings from environment variables, which compose passe
 | `INGEST_SHARED_SECRET` | rag-ingest | (empty) | **Required.** HMAC signing key, and the source of the Fernet envelope key. |
 | `INGEST_REQUIRE_ENCRYPTION` | rag-ingest | `0` | `1` requires a Fernet envelope `{"token": …}` on `/ingest` |
 | `INGEST_MAX_SKEW_S` | rag-ingest | `300` | Accepted clock skew for `X-Timestamp` |
-| `DEV_AUTH_BYPASS` | rag-chat | `0` | **`1` disables authentication.** Every request is accepted as `X-Dev-User` or `DEV_DEFAULT_USER`. Local development only. |
+| `DEV_AUTH_BYPASS` | rag-chat | `0` | **`1` disables authentication.** Every request is accepted as `DEV_DEFAULT_USER`, or as an `X-Dev-User` listed in `DEV_AUTH_USERS` (any other `X-Dev-User` is a 403). Local development only; rag-chat logs a warning at startup when it is on. |
 | `CF_ACCESS_TEAM_DOMAIN` | rag-chat | (empty) | Cloudflare Access team domain (e.g. `myteam.cloudflareaccess.com`). With `CF_ACCESS_AUD`, enables Access identity: the Access JWT is verified against this team's certs. Empty = Access tokens refused. |
 | `CF_ACCESS_AUD` | rag-chat | (empty) | Application Audience (AUD) tag of the Access app; the JWT's `aud` must contain it. |
 | `DEV_DEFAULT_USER` | rag-chat | `dev@example.com` | User id when bypassing auth without `X-Dev-User` |
+| `DEV_AUTH_USERS` | rag-chat | (empty) | Comma-separated extra users the dev bypass may act as via `X-Dev-User`. Empty: only `DEV_DEFAULT_USER` |
 | `PROVIDER_ENCRYPTION_KEY` | rag-chat | (empty) | Passphrase (PBKDF2 → Fernet) that encrypts stored image/video provider API keys. **If unset, provider keys are stored as plain base64**, and only a startup warning is logged. Set it before configuring any provider. Changing it later makes existing stored keys unreadable. |
 | `CF_TUNNEL_TOKEN` | cloudflared | (empty) | Only needed with `--profile cloud` |
 | `BIND_ADDR`, `*_BIND_IP` | compose | `127.0.0.1` | Host interface for published ports (`RAG_CHAT_BIND_IP`, `RAG_INGEST_BIND_IP`, `OLLAMA_BIND_IP`, `WYOMING_{TTS,MISO,STT}_BIND_IP`, …) |
