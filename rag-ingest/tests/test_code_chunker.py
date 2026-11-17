@@ -8,11 +8,23 @@ exercised).
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
+from app import code_chunker
 from app.code_chunker import (
+    _fallback_window,
     chunk_code,
     language_for_path,
 )
+
+
+def _covered(text: str, chunks) -> str:
+    """Every non-blank line of ``text`` that no chunk's line range includes."""
+    lines = text.splitlines()
+    seen = set()
+    for c in chunks:
+        seen.update(range(c.start_line, c.end_line + 1))
+    return "\n".join(line for n, line in enumerate(lines, 1) if line.strip() and n not in seen)
 
 
 def _have_treesitter() -> bool:
@@ -46,6 +58,24 @@ class FallbackWindowTests(unittest.TestCase):
 
     def test_empty_text(self) -> None:
         self.assertEqual(chunk_code("", "python"), [])
+
+    def test_short_final_window_is_not_dropped(self) -> None:
+        # MAX=2000 -> overlap 200; a 400-char tail is shorter than MIN=500 and
+        # the previous window reaches only 200 chars into it.
+        text = "".join(f"{i:04d}\n" for i in range(440))  # 2200 chars
+        with mock.patch.object(code_chunker, "CODE_CHUNK_MAX_CHARS", 2000), \
+                mock.patch.object(code_chunker, "CODE_CHUNK_MIN_CHARS", 500):
+            chunks = _fallback_window(text, "text")
+        self.assertTrue(chunks[-1].text.endswith("0439\n"))
+        self.assertEqual(chunks[-1].end_line, text.count("\n") + 1)
+        self.assertEqual(_covered(text, chunks), "")
+
+    def test_fully_covered_tail_is_not_repeated(self) -> None:
+        text = "x" * 2000
+        with mock.patch.object(code_chunker, "CODE_CHUNK_MAX_CHARS", 2000), \
+                mock.patch.object(code_chunker, "CODE_CHUNK_MIN_CHARS", 100):
+            chunks = _fallback_window(text, "text")
+        self.assertEqual(len(chunks), 1)
 
 
 @unittest.skipUnless(_have_treesitter(), "tree-sitter-language-pack not importable")
@@ -95,6 +125,47 @@ class Greeter:
             self.assertLessEqual(c.end_line, len(lines))
             joined = "\n".join(lines[c.start_line - 1 : c.end_line])
             self.assertIn(c.text.splitlines()[0].strip(), joined)
+
+
+    def test_module_level_code_is_indexed_alongside_functions(self) -> None:
+        source = (
+            "import os\n\nSETTINGS = {'retries': 3, 'backoff': 'exponential'}\n\n\n"
+            "def add(a, b):\n    return a + b\n\n\n"
+            "if __name__ == '__main__':\n    print(add(1, 2))\n"
+        )
+        chunks = chunk_code(source, "python")
+        self.assertIn("add", {c.symbol for c in chunks})
+        self.assertEqual(_covered(source, chunks), "")
+        joined = "".join(c.text for c in chunks)
+        self.assertIn("SETTINGS", joined)
+        self.assertIn("print(add(1, 2))", joined)
+        module = [c for c in chunks if c.node_type == "module"]
+        self.assertTrue(module and all(c.symbol is None for c in module))
+
+    def test_oversized_function_without_nested_splits_is_windowed(self) -> None:
+        body = "".join(f"    total += {i}  # step {i}\n" for i in range(60))
+        source = "def small():\n    return 1\n\n\ndef big():\n    total = 0\n" + body + "    return total\n"
+        with mock.patch.object(code_chunker, "CODE_CHUNK_MAX_CHARS", 600), \
+                mock.patch.object(code_chunker, "CODE_CHUNK_MIN_CHARS", 50):
+            chunks = chunk_code(source, "python")
+        big = [c for c in chunks if c.symbol == "big"]
+        self.assertGreater(len(big), 1)
+        self.assertTrue(all(c.node_type == "function_definition" for c in big))
+        self.assertTrue(all(len(c.text) <= 600 for c in chunks))
+        self.assertIn("return total", big[-1].text)
+        self.assertEqual(_covered(source, chunks), "")
+
+    def test_oversized_class_keeps_fields_between_methods(self) -> None:
+        methods = "".join(
+            f"    def m{i}(self):\n        return {i}  # padding padding padding padding\n\n" for i in range(12)
+        )
+        source = "class Big:\n    LIMIT = 10\n    name: str = 'big'\n\n" + methods
+        with mock.patch.object(code_chunker, "CODE_CHUNK_MAX_CHARS", 400), \
+                mock.patch.object(code_chunker, "CODE_CHUNK_MIN_CHARS", 50):
+            chunks = chunk_code(source, "python")
+        self.assertIn("m0", {c.symbol for c in chunks})
+        self.assertTrue(any("LIMIT = 10" in c.text for c in chunks))
+        self.assertEqual(_covered(source, chunks), "")
 
 
 if __name__ == "__main__":

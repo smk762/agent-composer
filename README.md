@@ -116,7 +116,7 @@ Optional:
 - `CHAT_DB_URL` / `DATABASE_URL`: chat database DSN. `postgresql://...` is accepted and automatically normalized to async SQLAlchemy driver usage.
   - On startup, `rag-chat` auto-creates the Postgres database if it does not exist, then runs Alembic migrations.
 - `INGEST_NONCE_STORE`: `sqlite` (default) or `redis` for replay-protection nonce claims.
-- `INGEST_REDIS_URL`: Redis URL used when `INGEST_NONCE_STORE=redis`.
+- `INGEST_REDIS_URL`: Redis URL used when `INGEST_NONCE_STORE=redis`. If Redis is unreachable, signed ingest requests and `/health` answer 503 until it is back; `INGEST_NONCE_ALLOW_SQLITE_FALLBACK=1` opts into the old node-local SQLite fallback instead.
 - `MEDIA_BACKEND`: `local` (default) or `minio` for generated media storage.
 - `MEDIA_S3_*`: MinIO/S3 settings used when `MEDIA_BACKEND=minio`.
 - Sidecar URLs: `MODERNBERT_URL`, `INFINITY_URL`, `WHISPER_URL`, `XTTS_TTS_URL` / `MISO_TTS_URL` / `TTS_URL`.

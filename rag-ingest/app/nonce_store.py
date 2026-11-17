@@ -1,5 +1,6 @@
 """Replay-protection nonce stores for signed ingest requests: SQLite (atomic INSERT claim) and Redis (SET NX EX) backends with TTL expiry."""
 
+import logging
 import os
 import random
 import sqlite3
@@ -8,11 +9,15 @@ from dataclasses import dataclass
 
 import redis
 
+log = logging.getLogger("rag-ingest.nonce")
+
 
 @dataclass(frozen=True)
 class NonceStoreConfig:
     db_path: str
-    # How long to keep nonces around (seconds). Must be >= max timestamp skew window.
+    # How long to keep nonces around (seconds), counted from the later of the signed ``ts``
+    # and the first sighting. Must be >= the max timestamp skew window: a request stays
+    # acceptable until ``ts + skew``, so its nonce must outlive that.
     nonce_ttl_s: int
     # Randomly perform cleanup ~1/cleanup_chance_denom requests.
     cleanup_chance_denom: int = 50
@@ -70,15 +75,22 @@ class NonceStore:
             # Duplicate nonce: replay
             raise ValueError("Nonce already used") from e
 
-        # Opportunistic cleanup to bound DB size.
+        # Opportunistic cleanup to bound DB size. The claim is committed, so housekeeping
+        # (e.g. "database is locked" under concurrent workers) must not fail the request:
+        # a retry would be rejected as a replay.
         if self._cfg.cleanup_chance_denom > 0 and random.randint(1, self._cfg.cleanup_chance_denom) == 1:
-            self.cleanup(now=now)
+            try:
+                self.cleanup(now=now)
+            except Exception as e:
+                log.warning("nonce cleanup skipped: %s", e)
 
     def cleanup(self, now: int | None = None) -> int:
         now_i = int(time.time()) if now is None else int(now)
         cutoff = now_i - int(self._cfg.nonce_ttl_s)
         with self._connect() as conn:
-            cur = conn.execute("DELETE FROM nonces WHERE created_at < ?", (cutoff,))
+            # Both clocks must be past the TTL: a future-dated ``ts`` keeps validating
+            # until ts + skew, so evicting on created_at alone would reopen the replay.
+            cur = conn.execute("DELETE FROM nonces WHERE created_at < ? AND ts < ?", (cutoff, cutoff))
             return int(cur.rowcount or 0)
 
 
@@ -114,7 +126,9 @@ class RedisNonceStore:
         return f"{self._cfg.key_prefix}{nonce}"
 
     def claim_or_reject(self, nonce: str, ts: int) -> None:
-        ok = self._r.set(self._key(nonce), str(ts), ex=int(self._cfg.nonce_ttl_s), nx=True)
+        # Expire TTL after the later of now and the signed ts (see NonceStoreConfig.nonce_ttl_s).
+        expire_at = max(int(time.time()), int(ts)) + int(self._cfg.nonce_ttl_s)
+        ok = self._r.set(self._key(nonce), str(ts), exat=expire_at, nx=True)
         if not ok:
             raise ValueError("Nonce already used")
 

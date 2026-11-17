@@ -59,9 +59,14 @@ def post(url: str, secret: str, payload: dict) -> tuple[int, object]:
 
 
 def source_files(root: Path, dirs: list[str], exts: set[str]) -> list[Path]:
+    """Matching files under ``root / d`` for each ``d``. Raises ValueError for a ``d`` that
+    resolves outside ``root`` (its files would have no repo-relative path)."""
+    root = root.resolve()
     out = []
     for d in dirs:
         base = (root / d).resolve()
+        if not base.is_relative_to(root):
+            raise ValueError(f"{d!r} resolves to {base}, outside --root {root}")
         candidates = [base] if base.is_file() else base.rglob("*")
         for p in candidates:
             if p.is_file() and p.suffix in exts and p.stat().st_size > 0 \
@@ -85,7 +90,11 @@ def main(argv: list[str] | None = None) -> int:
     root = Path(args.root).resolve()
     repo = args.repo or root.name
     exts = {e if e.startswith(".") else f".{e}" for e in args.exts.split(",") if e.strip()}
-    files = source_files(root, args.dirs, exts)
+    try:
+        files = source_files(root, args.dirs, exts)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 2
     if not files:
         print("no matching files", file=sys.stderr)
         return 1

@@ -25,8 +25,8 @@ class FakeQdrant:
         self.upserts: list[tuple[str, int]] = []
         FakeQdrant.instances.append(self)
 
-    async def get_collection(self, name):
-        raise RuntimeError("missing")  # force create_collection
+    async def collection_exists(self, name):
+        return False  # force create_collection
 
     async def create_collection(self, collection_name, vectors_config=None, **kw):
         self.created.append(collection_name)
@@ -47,6 +47,56 @@ class FakeQdrant:
 class FakeEmbedder:
     async def embed(self, texts, profile="text"):
         return SimpleNamespace(vectors=[[0.1, 0.2, 0.3] for _ in texts], truncated=[False for _ in texts])
+
+
+class CollectionExistsTests(unittest.TestCase):
+    def test_qdrant_errors_are_not_reported_as_missing(self) -> None:
+        class Down:
+            async def get_collection(self, name):
+                raise ConnectionError("qdrant unreachable")
+
+            async def collection_exists(self, name):
+                raise ConnectionError("qdrant unreachable")
+
+        with self.assertRaises(ConnectionError):
+            asyncio.run(ip._collection_exists(Down(), "docs"))
+
+    def test_existing_and_missing_collections(self) -> None:
+        from qdrant_client import AsyncQdrantClient, models as qm
+
+        async def run():
+            q = AsyncQdrantClient(location=":memory:")
+            await q.create_collection("docs", vectors_config=qm.VectorParams(size=2, distance=qm.Distance.COSINE))
+            return await ip._collection_exists(q, "docs"), await ip._collection_exists(q, "nope")
+
+        self.assertEqual(asyncio.run(run()), (True, False))
+
+
+class IdentityFilterTests(unittest.TestCase):
+    """``source=None`` / no repo must match points whose key is absent, not only explicit nulls."""
+
+    def _matching_ids(self, flt) -> list:
+        from qdrant_client import QdrantClient, models as qm
+
+        q = QdrantClient(location=":memory:")
+        q.create_collection("c", vectors_config=qm.VectorParams(size=2, distance=qm.Distance.COSINE))
+        q.upsert("c", [
+            qm.PointStruct(id=1, vector=[1, 0], payload={"path": "a.py", "source": None, "repo": None}),
+            qm.PointStruct(id=2, vector=[1, 0], payload={"path": "a.py"}),  # keys absent
+            qm.PointStruct(id=3, vector=[1, 0], payload={"path": "a.py", "source": "s", "repo": "r"}),
+        ])
+        return sorted(p.id for p in q.scroll("c", scroll_filter=flt)[0])
+
+    def test_no_source_matches_null_and_absent_keys(self) -> None:
+        self.assertEqual(self._matching_ids(ip.identity_filter(None, "path", "a.py")), [1, 2])
+
+    def test_no_repo_matches_null_and_absent_keys(self) -> None:
+        flt = ip.identity_filter(None, "path", "a.py", repo=None, by_repo=True)
+        self.assertEqual(self._matching_ids(flt), [1, 2])
+
+    def test_named_source_and_repo_match_only_themselves(self) -> None:
+        flt = ip.identity_filter("s", "path", "a.py", repo="r", by_repo=True)
+        self.assertEqual(self._matching_ids(flt), [3])
 
 
 class AllowedCollectionsTests(unittest.TestCase):

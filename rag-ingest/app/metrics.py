@@ -18,6 +18,8 @@ _UUID_RE = re.compile(
 )
 _INT_SEGMENT_RE = re.compile(r"(?<=/)\d+(?=/|$)")
 _SKIP_PATHS = {"/metrics", "/health", "/ready"}
+# Label for requests no route matched (404s): one series, however many paths are probed.
+UNMATCHED_PATH = "<unmatched>"
 
 REQ_COUNT = Counter(
     "http_requests_total",
@@ -51,6 +53,14 @@ def observe_request(*, method: str, path: str, status_code: int, duration_s: flo
     REQ_LATENCY.labels(method=method, path=norm_path).observe(duration_s)
 
 
+def route_label(request: Request) -> str:
+    """The matched route's template (``/items/{item_id}``), never the raw path:
+    raw paths make a series per id, and per probe of a random URL."""
+    route = request.scope.get("route")
+    template = getattr(route, "path_format", None) or getattr(route, "path", None)
+    return template if isinstance(template, str) and template else UNMATCHED_PATH
+
+
 def observe_gpu_oom(*, operation: str) -> None:
     GPU_OOM_COUNT.labels(operation=operation).inc()
 
@@ -70,7 +80,7 @@ class MetricsMiddleware(BaseHTTPMiddleware):
         finally:
             observe_request(
                 method=request.method,
-                path=path,
+                path=route_label(request),
                 status_code=status_code,
                 duration_s=time.perf_counter() - start,
             )
