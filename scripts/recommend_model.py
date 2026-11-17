@@ -84,11 +84,14 @@ def recommend_chat_model(r: Resources) -> str:
     # Heuristics are conservative; Ollama can run larger models slowly, but this aims for "usable".
     vram = r.gpu_vram_gb
     if vram is not None:
-        if vram >= 24:
+        # nvidia-smi reports MiB, so cards land just under their nominal size (24 GB -> ~23.99,
+        # 8 GB -> ~7.8): every tier compares against a slightly lower figure.
+        # A 70B q4 is ~40+ GB, so it only fits a 48 GB card; on a 24 GB card it mostly runs
+        # on the CPU, so that tier stays on 8B.
+        if vram >= 47.5:
             return "llama3.1:70b"
-        if vram >= 12:
+        if vram >= 11.5:
             return "llama3.1:8b"
-        # nvidia-smi reports in MB; 8GB cards often show ~7.8GB
         if vram >= 7.5:
             # If you have enough RAM to spill, let 8B be an option; otherwise favor 3B for speed.
             if r.ram_gb >= 48:
