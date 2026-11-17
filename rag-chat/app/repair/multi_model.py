@@ -11,11 +11,23 @@ from typing import AsyncIterator, Optional
 
 import httpx
 
-from app.config import CHAT_MODEL, OLLAMA_TIMEOUT, OLLAMA_URL, ollama_keep_alive
+from app.config import AUDIT_API_TOKEN, CHAT_MODEL, OLLAMA_TIMEOUT, OLLAMA_URL, ollama_keep_alive
 from app.gpu_lease import OllamaLeaseUnavailable, ollama_lease
 from app.repair.context_builder import build_repair_context
 from app.repair.models import RepairIteration, RepairRequest
 from app.repair.patch_applier import extract_patch
+
+# The audit API gates every non-GET route on this token. Without it each call got a 401, which
+# the "degrade gracefully" branches below counted as a pass.
+_AUTH_REFUSED = (401, 403)
+
+
+def _audit_headers() -> dict[str, str]:
+    return {"X-API-Token": AUDIT_API_TOKEN} if AUDIT_API_TOKEN else {}
+
+
+def _refused(status: int) -> list[str]:
+    return [f"audit API refused the request (HTTP {status}): set AI_AUDIT_API_TOKEN to the audit API's token"]
 
 log = logging.getLogger("rag-chat.repair")
 
@@ -144,7 +156,10 @@ async def _validate_via_api(
             r = await client.post(
                 f"{audit_api_url.rstrip('/')}/audit/diff",
                 json={"repo": repo, "diff": patch},
+                headers=_audit_headers(),
             )
+        if r.status_code in _AUTH_REFUSED:
+            return False, _refused(r.status_code)
         if r.status_code != 200:
             log.debug("Audit API returned %d", r.status_code)
             return True, []
@@ -186,7 +201,10 @@ async def _validate_via_tests(
             r = await client.post(
                 f"{audit_api_url.rstrip('/')}/audit/validate_patch",
                 json={"repo": repo, "patch": patch, "timeout_s": max(60, timeout - 30)},
+                headers=_audit_headers(),
             )
+        if r.status_code in _AUTH_REFUSED:
+            return False, _refused(r.status_code)
         # 404 means the endpoint isn't deployed yet — skip silently
         if r.status_code == 404:
             return True, []

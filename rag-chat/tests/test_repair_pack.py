@@ -526,3 +526,29 @@ class AuditUrlPolicyTests(unittest.TestCase):
             self.assertIn("link-local", self.check(url, allowlist="*"))
         for url in ("file:///etc/passwd", "ftp://audit:21", "http://", "not a url", "http://h:99999"):
             self.assertIn("http(s)", self.check(url, allowlist="*"))
+
+
+class AuditValidationAuthTests(unittest.IsolatedAsyncioTestCase):
+    """The audit API gates non-GET routes on X-API-Token; a refusal must never read as a pass."""
+
+    async def test_validation_calls_send_the_token(self) -> None:
+        seen: list[tuple[str, str | None]] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen.append((req.url.path, req.headers.get("x-api-token")))
+            if req.url.path == "/audit/diff":
+                return httpx.Response(200, json={"findings": []})
+            return httpx.Response(200, json={"passed": True})
+
+        with patch.object(multi_model, "AUDIT_API_TOKEN", "tok"), _patch_http(handler):
+            await multi_model._validate_via_api("diff", "repo", "http://audit")
+            await multi_model._validate_via_tests("diff", "repo", "http://audit")
+        self.assertEqual(seen, [("/audit/diff", "tok"), ("/audit/validate_patch", "tok")])
+
+    async def test_a_refused_token_fails_validation(self) -> None:
+        handler = lambda req: httpx.Response(401, json={"detail": "nope"})  # noqa: E731
+        with patch.object(multi_model, "AUDIT_API_TOKEN", ""), _patch_http(handler):
+            for check in (multi_model._validate_via_api, multi_model._validate_via_tests):
+                passed, errors = await check("diff", "repo", "http://audit")
+                self.assertFalse(passed, check.__name__)
+                self.assertIn("AI_AUDIT_API_TOKEN", errors[0])

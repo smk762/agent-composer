@@ -403,6 +403,7 @@ async def _fetch_diff_from_branch(
             r = await client.post(
                 f"{audit_api_url.rstrip('/')}/audit/git/diff",
                 json={"repo": repo, "compare_branch": compare_branch},
+                headers={"X-API-Token": AUDIT_API_TOKEN} if AUDIT_API_TOKEN else {},
             )
     except httpx.ConnectError:
         return "", f"Audit API unreachable at {audit_api_url}."
