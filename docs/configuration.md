@@ -129,7 +129,8 @@ The sidecar-side settings (`XTTS_PREPROCESS*`, `XTTS_GPT_COND_LEN`, `MISO_KEEP_A
 | `EMBED_MAX_CHARS` / `EMBED_MIN_CHARS` | `4000` / `200` | Embedder input bounds |
 | `EMBED_TIMEOUT_S` / `EMBED_RETRIES` | `120` / `6` | |
 | `INGEST_UPSERT_BATCH_SIZE` | `64` | |
-| `INGEST_NONCE_STORE` | `sqlite` | `sqlite` (`INGEST_NONCE_DB`, default `/data/nonces.db`) or `redis` (`INGEST_REDIS_URL`, `INGEST_NONCE_KEY_PREFIX`) |
+| `INGEST_NONCE_STORE` | `sqlite` | `sqlite` (`INGEST_NONCE_DB`, default `/data/nonces.db`) or `redis` (`INGEST_REDIS_URL`, `INGEST_NONCE_KEY_PREFIX`). With `redis` unreachable, signed requests and `/health` answer 503 until it is back |
+| `INGEST_NONCE_ALLOW_SQLITE_FALLBACK` | `0` | `1`: if Redis is unreachable at startup, fall back to this node's SQLite store (not shared between replicas; logged as an error, `/health` says `sqlite-fallback`) |
 
 ## modernbert
 

@@ -19,7 +19,7 @@ from typing import Any, Dict, Literal, Optional
 
 from cryptography.fernet import Fernet, InvalidToken
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from app.gpu_lease import OllamaLeaseUnavailable, PriorityMiddleware
@@ -62,6 +62,7 @@ NONCE_DB_PATH = os.environ.get("INGEST_NONCE_DB", "/data/nonces.db")
 NONCE_STORE_BACKEND = os.environ.get("INGEST_NONCE_STORE", "sqlite").strip().lower()
 INGEST_REDIS_URL = os.environ.get("INGEST_REDIS_URL", "").strip()
 INGEST_NONCE_KEY_PREFIX = os.environ.get("INGEST_NONCE_KEY_PREFIX", "ingest:nonce:")
+NONCE_ALLOW_SQLITE_FALLBACK = os.environ.get("INGEST_NONCE_ALLOW_SQLITE_FALLBACK", "0") == "1"
 MAX_SKEW_S = int(os.environ.get("INGEST_MAX_SKEW_S", "300"))
 EMBED_MODEL = os.environ.get("EMBED_MODEL", "nomic-embed-text")
 
@@ -92,10 +93,15 @@ def _redacted(url: str) -> str:
 
 
 def _build_nonce_store():
-    """Select the nonce backend. With INGEST_NONCE_STORE=redis we probe the
-    server at startup and fall back to the local SQLite store if it's
-    unreachable, so replay protection degrades gracefully rather than 500-ing
-    every ingest when the stateful node's Redis is down."""
+    """Select the nonce backend.
+
+    INGEST_NONCE_STORE=redis is a choice of a *shared* store (several replicas must see
+    each other's nonces), so an unreachable Redis at startup fails closed: the Redis store
+    is kept, the process still starts, /health answers 503 and every signed request is
+    refused with 503 until Redis answers. It recovers on its own, without a restart.
+    INGEST_NONCE_ALLOW_SQLITE_FALLBACK=1 restores the old downgrade to this node's SQLite
+    store, which is only safe with a single replica; it is logged as an error and
+    reported as ``sqlite-fallback`` in /health."""
     sqlite_cfg = NonceStoreConfig(db_path=NONCE_DB_PATH, nonce_ttl_s=_NONCE_TTL_S)
 
     if NONCE_STORE_BACKEND != "redis":
@@ -104,24 +110,34 @@ def _build_nonce_store():
     if not INGEST_REDIS_URL:
         raise RuntimeError("INGEST_REDIS_URL is required when INGEST_NONCE_STORE=redis")
 
-    try:
-        store = RedisNonceStore(
-            RedisNonceStoreConfig(
-                redis_url=INGEST_REDIS_URL,
-                nonce_ttl_s=_NONCE_TTL_S,
-                key_prefix=INGEST_NONCE_KEY_PREFIX,
-            )
+    store = RedisNonceStore(
+        RedisNonceStoreConfig(
+            redis_url=INGEST_REDIS_URL,
+            nonce_ttl_s=_NONCE_TTL_S,
+            key_prefix=INGEST_NONCE_KEY_PREFIX,
         )
+    )
+    try:
         store.ping()
         log.info("nonce store: redis @ %s", _redacted(INGEST_REDIS_URL))
         return store, "redis"
     except Exception as e:
-        log.warning(
-            "nonce store: redis unreachable (%s); falling back to sqlite at %s",
+        if NONCE_ALLOW_SQLITE_FALLBACK:
+            log.error(
+                "nonce store: redis unreachable (%s); INGEST_NONCE_ALLOW_SQLITE_FALLBACK=1, so replay "
+                "protection is DOWNGRADED to this node's sqlite at %s (not shared between replicas) "
+                "until a restart",
+                e,
+                NONCE_DB_PATH,
+            )
+            return NonceStore(sqlite_cfg), "sqlite-fallback"
+        log.error(
+            "nonce store: redis @ %s unreachable (%s); signed requests are refused (503) until it "
+            "answers. Set INGEST_NONCE_ALLOW_SQLITE_FALLBACK=1 to fall back to node-local sqlite instead.",
+            _redacted(INGEST_REDIS_URL),
             e,
-            NONCE_DB_PATH,
         )
-        return NonceStore(sqlite_cfg), "sqlite-fallback"
+        return store, "redis"
 
 
 _nonce_store, NONCE_BACKEND = _build_nonce_store()
@@ -153,6 +169,10 @@ def verify_signature(ts: str, nonce: str, signature: str, body_bytes: bytes, max
         _nonce_store.claim_or_reject(nonce=nonce, ts=ts_i)
     except ValueError:
         raise HTTPException(401, "Replay detected (nonce already used)")
+    except Exception as e:
+        # Fail closed: a request whose nonce can't be recorded is never processed.
+        log.error("nonce store (%s) unavailable: %s", NONCE_BACKEND, e)
+        raise HTTPException(503, "Replay-protection store unavailable", headers={"Retry-After": "5"})
 
 def _fernet() -> Fernet:
     key = base64.urlsafe_b64encode(hashlib.sha256(SHARED_SECRET.encode("utf-8")).digest())
@@ -186,7 +206,14 @@ class IngestDoc(BaseModel):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "nonce_store": NONCE_BACKEND}
+    body: Dict[str, Any] = {"ok": True, "nonce_store": NONCE_BACKEND}
+    if isinstance(_nonce_store, RedisNonceStore):
+        try:
+            _nonce_store.ping()
+        except Exception:
+            # Not ready: every signed request would be refused, so keep it out of rotation.
+            return JSONResponse({**body, "ok": False, "nonce_store_reachable": False}, status_code=503)
+    return body
 
 
 @app.get("/ui/ingest", response_class=HTMLResponse)
