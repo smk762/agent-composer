@@ -37,6 +37,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 
 from app.auth import require_user
 from app.db import get_db
@@ -91,6 +92,36 @@ def _require_whisper():
 def _require_tts():
     if not TTS_ENGINES:
         raise HTTPException(503, detail="No TTS engine configured")
+
+
+def _upstream_error(exc: httpx.HTTPError, service: str) -> HTTPException:
+    """Map a failed sidecar call to a client-facing error instead of a bare 500.
+
+    An HTTP error response keeps its status and body (the sidecar's own message);
+    a timeout is a 504 and any other transport failure a 503. Transport errors
+    are logged here, not echoed: their text names internal hosts and ports.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return HTTPException(exc.response.status_code, detail=exc.response.text)
+    log.warning("voice: %s request failed: %r", service, exc)
+    if isinstance(exc, httpx.TimeoutException):
+        return HTTPException(504, detail=f"{service} timed out")
+    return HTTPException(503, detail=f"{service} unreachable")
+
+
+def _json_body(r: httpx.Response, service: str):
+    """The sidecar's JSON body, or a 502 when a 2xx answer isn't JSON."""
+    try:
+        return r.json()
+    except ValueError:
+        log.warning("voice: %s returned a non-JSON body (status %s)", service, r.status_code)
+        raise HTTPException(502, detail=f"{service} returned an invalid response")
+
+
+def _no_engine_error(last_exc: Optional[Exception]) -> HTTPException:
+    """Every engine in the chain was unreachable: log why, tell the client only that."""
+    log.warning("voice: no reachable TTS engine (last error: %r)", last_exc)
+    return HTTPException(503, detail="No reachable TTS engine")
 
 
 def _tts_base(engine: Optional[str]) -> str:
@@ -197,7 +228,9 @@ def _concat_wavs_with_gaps(wav_blobs: list[bytes], gap_ms: int) -> tuple[bytes, 
         raise ValueError("no audio to concatenate")
 
     gap_frames = max(0, int(params.framerate * gap_ms / 1000))
-    silence = b"\x00" * (gap_frames * params.sampwidth * params.nchannels)
+    # 8-bit WAV PCM is unsigned (silence = 0x80); wider widths are signed (0x00).
+    fill = b"\x80" if params.sampwidth == 1 else b"\x00"
+    silence = fill * (gap_frames * params.sampwidth * params.nchannels)
 
     out = io.BytesIO()
     with wave.open(out, "wb") as w:
@@ -244,13 +277,25 @@ async def _synthesise_paced(chain, base_payload: dict, sentences: list[str], gap
                 url = data.get("audio_url")
                 if not url:
                     raise HTTPException(502, detail="engine returned no audio_url to pace")
-                ar = await client.get(url)
-                ar.raise_for_status()
+                try:
+                    ar = await client.get(url)
+                    ar.raise_for_status()
+                except _UNREACHABLE as exc:
+                    if resolved:
+                        raise
+                    # The engine answered but its audio host can't be reached:
+                    # treat it like an unreachable engine and try the next one.
+                    last_exc = exc
+                    log.warning("voice: paced engine=%s audio fetch unreachable, trying next: %s", name, exc)
+                    continue
+                # Any other fetch failure (an httpx.HTTPError) propagates to
+                # synthesise(), whose _PACING_FAILURES handler degrades to a
+                # single-shot render rather than a 500.
                 resolved = (name, base)
                 blob = ar.content
                 break
             if blob is None:
-                raise HTTPException(503, detail=f"No reachable TTS engine ({last_exc})")
+                raise _no_engine_error(last_exc)
             wav_blobs.append(blob)
 
     combined, total_seconds = await asyncio.to_thread(_concat_wavs_with_gaps, wav_blobs, gap_ms)
@@ -338,7 +383,7 @@ async def transcribe(
     """Proxy audio to Whisper STT on Dragon."""
     _require_whisper()
 
-    audio_bytes = await audio.read()
+    audio_bytes = await read_upload(audio, "audio", VOICE_CLIP_MAX_BYTES)
     files = {"audio": (audio.filename or "audio.webm", audio_bytes, audio.content_type or "audio/webm")}
     params = {}
     if language:
@@ -349,13 +394,11 @@ async def transcribe(
         async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
             r = await client.post(f"{WHISPER_URL}/transcribe", files=files, params=params)
             r.raise_for_status()
-    except httpx.ConnectError:
-        raise HTTPException(503, detail="Whisper STT unreachable")
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(exc.response.status_code, detail=exc.response.text)
+    except httpx.HTTPError as exc:
+        raise _upstream_error(exc, "Whisper STT")
 
     elapsed_ms = int((time.monotonic() - t0) * 1000)
-    data = r.json()
+    data = _json_body(r, "Whisper STT")
     log.info("voice: transcribe elapsed=%dms lang=%s", elapsed_ms, data.get("language"))
     return data
 
@@ -420,7 +463,7 @@ async def synthesise(req: SynthesiseRequest):
         )
         return data
 
-    raise HTTPException(503, detail=f"No reachable TTS engine ({last_exc})")
+    raise _no_engine_error(last_exc)
 
 
 @router.post("/synthesise/stream")
@@ -469,10 +512,15 @@ async def synthesise_stream(req: SynthesiseStreamRequest):
                     log.warning("voice: stream engine=%s unreachable, trying next: %s", name, exc)
                     continue
                 except httpx.HTTPStatusError as exc:
-                    yield f"data: {json.dumps({'error': exc.response.text, 'chunk_index': i})}\n\n"
+                    # The upstream body and exception text can name internal
+                    # hosts: log them, send the client only the status.
+                    status = exc.response.status_code
+                    log.warning("voice: stream engine=%s HTTP %s: %s", name, status, exc.response.text[:500])
+                    yield f"data: {json.dumps({'error': 'TTS engine error', 'status': status, 'chunk_index': i})}\n\n"
                     return
                 except Exception as exc:
-                    yield f"data: {json.dumps({'error': str(exc), 'chunk_index': i})}\n\n"
+                    log.warning("voice: stream engine=%s failed: %r", name, exc)
+                    yield f"data: {json.dumps({'error': 'TTS engine error', 'chunk_index': i})}\n\n"
                     return
             if not sent:
                 yield f"data: {json.dumps({'error': 'No reachable TTS engine', 'chunk_index': i})}\n\n"
@@ -512,12 +560,15 @@ async def synthesise_pcm(req: SynthesiseRequest):
             last_exc = exc
             log.warning("voice: pcm engine=%s unreachable, trying next: %s", name, exc)
             continue
+        except httpx.HTTPError as exc:
+            await client.aclose()
+            raise _upstream_error(exc, "TTS engine")
         except Exception:
             await client.aclose()
             raise
     if upstream is None:
         await client.aclose()
-        raise HTTPException(503, detail=f"No reachable TTS engine ({last_exc})")
+        raise _no_engine_error(last_exc)
 
     if upstream.status_code != 200:
         body = await upstream.aread()
@@ -535,16 +586,30 @@ async def synthesise_pcm(req: SynthesiseRequest):
 
     t0 = time.monotonic()
 
+    closed = False
+
+    async def _close():
+        # Idempotent; runs from body_iter's finally and again as the response's
+        # background task, which Starlette runs even if the body is never
+        # iterated (a generator that never started never runs its finally).
+        nonlocal closed
+        if closed:
+            return
+        closed = True
+        await upstream.aclose()
+        await client.aclose()
+        log.info("voice: synthesise/pcm streamed elapsed=%dms", int((time.monotonic() - t0) * 1000))
+
     async def body_iter():
         try:
             async for chunk in upstream.aiter_bytes():
                 yield chunk
         finally:
-            await upstream.aclose()
-            await client.aclose()
-            log.info("voice: synthesise/pcm streamed elapsed=%dms", int((time.monotonic() - t0) * 1000))
+            await _close()
 
-    return StreamingResponse(body_iter(), media_type="application/octet-stream", headers=headers)
+    return StreamingResponse(
+        body_iter(), media_type="application/octet-stream", headers=headers, background=BackgroundTask(_close)
+    )
 
 
 @router.get("/speakers")
@@ -670,13 +735,11 @@ async def clone_voice(
         async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
             r = await client.post(f"{base}/clone-voice", files=files, data=form)
             r.raise_for_status()
-    except httpx.ConnectError:
-        raise HTTPException(503, detail="TTS server unreachable")
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(exc.response.status_code, detail=exc.response.text)
+    except httpx.HTTPError as exc:
+        raise _upstream_error(exc, "TTS server")
 
     elapsed_ms = int((time.monotonic() - t0) * 1000)
-    data = r.json()
+    data = _json_body(r, "TTS server")
     log.info(
         "voice: clone engine=%s elapsed=%dms id=%s clips=%d",
         engine or TTS_DEFAULT_ENGINE, elapsed_ms, cid, len(audio),
@@ -707,13 +770,11 @@ async def analyze_clips(
         async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
             r = await client.post(f"{base}/analyze-clips", files=files)
             r.raise_for_status()
-    except httpx.ConnectError:
-        raise HTTPException(503, detail="TTS server unreachable")
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(exc.response.status_code, detail=exc.response.text)
+    except httpx.HTTPError as exc:
+        raise _upstream_error(exc, "TTS server")
 
     log.info("voice: analyze elapsed=%dms clips=%d", int((time.monotonic() - t0) * 1000), len(audio))
-    return r.json()
+    return _json_body(r, "TTS server")
 
 
 @router.get("/clones")
@@ -800,13 +861,16 @@ async def delete_clone(companion_id: str, engine: Optional[str] = Query(default=
         async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
             r = await client.delete(f"{base}/clones/{segment}")
             r.raise_for_status()
-    except httpx.ConnectError:
-        raise HTTPException(503, detail="TTS server unreachable")
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(exc.response.status_code, detail=exc.response.text)
+    except httpx.HTTPError as exc:
+        raise _upstream_error(exc, "TTS server")
 
     log.info("voice: delete engine=%s id=%s", engine or TTS_DEFAULT_ENGINE, companion_id)
-    return r.json()
+    # The clone is gone upstream by now: an empty (204) or non-JSON success body
+    # must not turn that into a 500 the caller would retry.
+    try:
+        return r.json()
+    except ValueError:
+        return {"deleted": companion_id}
 
 
 @router.get("/health")
