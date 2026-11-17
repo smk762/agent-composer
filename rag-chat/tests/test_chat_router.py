@@ -1,0 +1,180 @@
+"""/chat: up-front 404/400 in streaming mode, saving streamed turns, seq allocation and tool
+arguments in history. No network, no database (a recording fake session)."""
+
+import asyncio
+import contextlib
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import httpx
+from fastapi import HTTPException
+from sqlalchemy.dialects import postgresql
+
+from app import streaming
+from app.models.orm import Conversation, Message
+from app.models.schemas import AuthContext, ChatRequest, Msg, ToolCall, ToolCallFunction
+from app.routers import chat
+
+real_async_client = httpx.AsyncClient
+AUTH = AuthContext(user_id="u1", via="dev")
+
+
+class _Result:
+    def __init__(self, value=None):
+        self._value = value
+
+    def scalar_one_or_none(self):
+        return self._value
+
+    def scalars(self):
+        return SimpleNamespace(all=lambda: [])
+
+    def fetchall(self):
+        return []
+
+
+class FakeDB:
+    """Records statements and added rows; a conversation lookup finds ``conv`` (or nothing)."""
+
+    def __init__(self, conv=None):
+        self.conv = conv
+        self.statements = []
+        self.added = []
+        self.commits = 0
+        self.no_autoflush = contextlib.nullcontext()
+
+    async def execute(self, stmt):
+        self.statements.append(stmt)
+        sql = str(stmt.compile(dialect=postgresql.dialect()))
+        if sql.startswith("SELECT conversations.id, conversations.user_id"):
+            return _Result(self.conv)
+        return _Result(None)
+
+    def add(self, obj):
+        if isinstance(obj, Conversation) and obj.id is None:
+            obj.id = "conv-new"
+        self.added.append(obj)
+
+    def add_all(self, objs):
+        self.added.extend(objs)
+
+    async def flush(self):
+        pass
+
+    async def commit(self):
+        self.commits += 1
+
+    async def refresh(self, obj):
+        pass
+
+    def messages(self):
+        return [m for m in self.added if isinstance(m, Message)]
+
+
+def _chunk(text):
+    delta = SimpleNamespace(content=text, tool_calls=None)
+    return SimpleNamespace(choices=[SimpleNamespace(delta=delta)],
+                           model_dump_json=lambda **kw: '{"c": "%s"}' % text)
+
+
+class StreamingChatTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        async def fake_stream(base_url, payload, model, conv_id):
+            for text in ("Hel", "lo"):
+                yield _chunk(text)
+
+        @contextlib.asynccontextmanager
+        async def fake_lease(*a, **kw):
+            yield "http://ollama.test"
+
+        async def resolve(m):
+            return "m"
+
+        async def no_ctx(msgs):
+            return None
+
+        def client(*args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(lambda req: httpx.Response(200, json={}))
+            return real_async_client(*args, **kwargs)
+
+        for p in (
+            patch.object(streaming, "stream_ollama_chat", fake_stream),
+            patch.object(chat, "ollama_lease", fake_lease),
+            patch.object(chat, "_resolve_model", resolve),
+            patch.object(chat, "rag_context_for", no_ctx),
+            patch("httpx.AsyncClient", client),
+            patch.object(chat, "CHAT_HISTORY_MAX_MSGS", 0),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+
+    async def _start(self, db, **body):
+        req = ChatRequest(messages=[Msg(role="user", content="hi")], stream=True, **body)
+        return await chat.chat(req, AUTH, db)
+
+    async def _settle(self):
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    async def test_turn_is_saved_when_client_closes_on_done(self) -> None:
+        db = FakeDB()
+        resp = await self._start(db)
+        body = resp.body_iterator
+        async for item in body:
+            if "[DONE]" in item:
+                break  # an SSE client closes here
+        await body.aclose()
+        await self._settle()
+        self.assertEqual([(m.role, m.content) for m in db.messages()], [("user", "hi"), ("assistant", "Hello")])
+
+    async def test_partial_turn_is_saved_on_disconnect_mid_stream(self) -> None:
+        db = FakeDB()
+        resp = await self._start(db)
+        body = resp.body_iterator
+        await body.__anext__()  # first chunk, then the client goes away
+        await body.aclose()
+        await self._settle()
+        self.assertEqual([(m.role, m.content) for m in db.messages()], [("user", "hi"), ("assistant", "Hel")])
+
+    async def test_unknown_conversation_is_a_404_before_streaming(self) -> None:
+        with self.assertRaises(HTTPException) as cm:
+            await self._start(FakeDB(conv=None), conversation_id="someone-elses")
+        self.assertEqual(cm.exception.status_code, 404)
+
+    async def test_missing_user_message_is_a_400_before_streaming(self) -> None:
+        req = ChatRequest(messages=[Msg(role="system", content="x")], stream=True)
+        with self.assertRaises(HTTPException) as cm:
+            await chat.chat(req, AUTH, FakeDB())
+        self.assertEqual(cm.exception.status_code, 400)
+
+
+class NextSeqTests(unittest.IsolatedAsyncioTestCase):
+    async def test_seq_allocation_locks_the_conversation_row(self) -> None:
+        db = FakeDB()
+        self.assertEqual(await chat._next_seq(db, "c1"), 1)
+        sqls = [str(s.compile(dialect=postgresql.dialect())) for s in db.statements]
+        self.assertIn("FOR UPDATE", sqls[0])
+        self.assertIn("conversations", sqls[0])
+        self.assertIn("max(messages.seq)", sqls[1])
+
+
+class ToolArgumentsTests(unittest.TestCase):
+    def _fmt(self, arguments):
+        tc = ToolCall(id="c1", type="function", function=ToolCallFunction(name="f", arguments=arguments))
+        return chat._msg_to_ollama_format(Msg(role="assistant", content="", tool_calls=[tc]))
+
+    def test_truncated_json_arguments_do_not_crash(self) -> None:
+        out = self._fmt('{"city": "Par')
+        self.assertEqual(out["tool_calls"][0]["function"]["arguments"], {"_raw": '{"city": "Par'})
+
+    def test_non_object_arguments_become_an_object(self) -> None:
+        self.assertEqual(self._fmt("[1, 2]")["tool_calls"][0]["function"]["arguments"], {"_raw": "[1, 2]"})
+        self.assertEqual(self._fmt("")["tool_calls"][0]["function"]["arguments"], {})
+
+    def test_object_arguments_pass_through(self) -> None:
+        self.assertEqual(self._fmt('{"city": "Paris"}')["tool_calls"][0]["function"]["arguments"], {"city": "Paris"})
+
+
+if __name__ == "__main__":
+    unittest.main()
