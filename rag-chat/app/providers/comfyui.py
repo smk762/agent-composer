@@ -24,14 +24,33 @@ log = logging.getLogger("rag-chat.provider.comfyui")
 _COMFYUI_URL = os.getenv("COMFYUI_URL", "http://comfyui:8188")
 _POLL_INTERVAL = 2
 _MAX_POLLS = 150  # 5 min at 2s interval
+# Bounds on one request against the shared ComfyUI worker (each image is a 30-step job).
+_MIN_EDGE, _MAX_EDGE = 256, 2048
+_MAX_IMAGES = 4
+
+
+def _parse_size(size: str) -> tuple[int, int]:
+    """``WxH`` (or ``N`` for a square) within the supported range, multiples of 8.
+    Anything else is a LookupError, which the router answers with a 400."""
+    parts = (size or "").lower().split("x")
+    try:
+        w = int(parts[0])
+        h = int(parts[1]) if len(parts) == 2 else w
+    except (ValueError, IndexError):
+        raise LookupError(f"ComfyUI size must be WIDTHxHEIGHT, got {size!r}") from None
+    if len(parts) > 2 or not all(_MIN_EDGE <= d <= _MAX_EDGE and d % 8 == 0 for d in (w, h)):
+        raise LookupError(
+            f"ComfyUI size {size!r} is out of range: each side {_MIN_EDGE}-{_MAX_EDGE}, a multiple of 8"
+        )
+    return w, h
 
 
 class ComfyUIProvider(ImageProvider, VideoProvider):
     name = "comfyui"
+    # Only txt2img has a workflow. Edit and video aren't advertised (and list no models) until
+    # they do, so capability routing never picks ComfyUI for a request it can only fail.
     capabilities = [
         Capability.IMAGE_GENERATE,
-        Capability.IMAGE_EDIT,
-        Capability.VIDEO_GENERATE,
     ]
 
     def __init__(self, api_key: Optional[str] = None, comfyui_url: Optional[str] = None, **kwargs):
@@ -46,10 +65,8 @@ class ComfyUIProvider(ImageProvider, VideoProvider):
             return False
 
     def available_models(self, capability: Capability) -> List[str]:
-        if capability in (Capability.IMAGE_GENERATE, Capability.IMAGE_EDIT):
+        if capability == Capability.IMAGE_GENERATE:
             return ["stable-diffusion-xl", "flux-dev", "flux-schnell"]
-        if capability == Capability.VIDEO_GENERATE:
-            return ["animatediff"]
         return []
 
     async def _queue_prompt(self, workflow: dict) -> str:
@@ -124,9 +141,9 @@ class ComfyUIProvider(ImageProvider, VideoProvider):
         n: int = 1,
         style: Optional[str] = None,
     ) -> GenerationResult:
-        parts = size.split("x")
-        w = int(parts[0]) if len(parts) >= 1 else 1024
-        h = int(parts[1]) if len(parts) >= 2 else w
+        w, h = _parse_size(size)
+        if not 1 <= n <= _MAX_IMAGES:
+            raise LookupError(f"ComfyUI generates 1-{_MAX_IMAGES} images per request, got n={n}")
         model = model or "stable-diffusion-xl"
         negative = negative_prompt or ""
 
