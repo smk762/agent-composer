@@ -168,6 +168,9 @@ class TTSModelManager:
         self._last_used: float = 0.0
         self._lock = asyncio.Lock()
         self._evict_task: Optional[asyncio.Task] = None
+        # The first load runs as its own task so a cancelled caller (client gone,
+        # timeout) can't strand the state in LOADING: the task sets GPU/ERROR itself.
+        self._load_task: Optional[asyncio.Task] = None
         self._in_use = 0
         self._idle = asyncio.Event()
         self._idle.set()
@@ -242,22 +245,43 @@ class TTSModelManager:
         if device == "cpu":
             torch.cuda.empty_cache()
 
+    async def _run_load(self) -> None:
+        try:
+            await asyncio.to_thread(self._load, DEVICE)
+        except Exception as exc:
+            self._state = TTSState.ERROR
+            self._error = str(exc)
+            logger.error("tts_load_failed", error=str(exc))
+            raise
+        self._state = TTSState.GPU
+        self._error = None
+        if self._in_use == 0 and not self._lock.locked():
+            # Nobody is waiting on this load (its caller was cancelled): start
+            # the idle timer so the models don't sit on the GPU forever.
+            self._last_used = time.time()
+            self._arm_evict()
+
+    async def _await_load(self) -> None:
+        """Wait for an in-flight load. Shielded: cancelling the waiter leaves the
+        load running, and the load task still sets the final state."""
+        task = self._load_task
+        if task is not None and not task.done():
+            await asyncio.shield(task)
+
     async def _make_ready(self) -> None:
         # Caller holds self._lock.
+        if self._state == TTSState.LOADING:
+            await self._await_load()  # raises the load's error, if it failed
+
         if self._state == TTSState.GPU:
             return
 
         if self._state in (TTSState.UNLOADED, TTSState.ERROR):
             self._state = TTSState.LOADING
-            try:
-                await asyncio.to_thread(self._load, DEVICE)
-                self._state = TTSState.GPU
-                self._error = None
-            except Exception as exc:
-                self._state = TTSState.ERROR
-                self._error = str(exc)
-                logger.error("tts_load_failed", error=str(exc))
-                raise
+            self._load_task = asyncio.create_task(self._run_load())
+            # Retrieve the exception even when no caller is left to await it.
+            self._load_task.add_done_callback(lambda t: t.cancelled() or t.exception())
+            await self._await_load()
             return
 
         if self._state == TTSState.CPU:
@@ -319,6 +343,7 @@ class TTSModelManager:
         ``keep_alive_gpu`` is (#52)."""
         async with self._lock:
             await self._idle.wait()
+            await self._await_load_quietly()
             if self._state != TTSState.GPU:
                 return
             await self._demote_locked()
@@ -342,10 +367,19 @@ class TTSModelManager:
         """Full unload (waits for in-flight generations)."""
         async with self._lock:
             await self._idle.wait()
+            await self._await_load_quietly()
             if (self._evict_task and not self._evict_task.done()
                     and self._evict_task is not asyncio.current_task()):
                 self._evict_task.cancel()
             self._unload_locked()
+
+    async def _await_load_quietly(self) -> None:
+        """Let an in-flight load finish before demoting/unloading, so the worker
+        thread can't assign models after they were freed. Its failure is not ours."""
+        try:
+            await self._await_load()
+        except Exception:
+            pass
 
     def _arm_evict(self) -> None:
         if self._evict_task and not self._evict_task.done():
@@ -872,13 +906,18 @@ async def health():
 # ── Resident contract (argus-iris argus-http adapter) ─────────────────────────
 # /health carries a ``gpu`` block (loaded, model_state, idle_s, free_vram_mb),
 # POST /admin/evict demotes to CPU, /admin/unload frees the model, /admin/wake
-# preloads it. Set ARGUS_ADMIN_TOKEN to require ``Authorization: Bearer <token>``
-# on the admin routes (open when unset).
+# preloads it. The admin routes need ``Authorization: Bearer <ARGUS_ADMIN_TOKEN>``.
+# They fail closed: with the token unset they answer 503, unless
+# ARGUS_ADMIN_INSECURE=1 explicitly opens them (local dev only).
 
 
 def _require_admin(authorization: Optional[str] = Header(default=None)) -> None:
-    token = os.environ.get("ARGUS_ADMIN_TOKEN", "")
-    if token and not hmac.compare_digest((authorization or "").encode(), f"Bearer {token}".encode()):
+    token = os.environ.get("ARGUS_ADMIN_TOKEN", "").strip()
+    if not token:
+        if os.environ.get("ARGUS_ADMIN_INSECURE", "").strip().lower() in ("1", "true", "yes"):
+            return
+        raise HTTPException(503, detail="admin token not configured (set ARGUS_ADMIN_TOKEN)")
+    if not hmac.compare_digest((authorization or "").encode(), f"Bearer {token}".encode()):
         raise HTTPException(401, detail="admin token required")
 
 
