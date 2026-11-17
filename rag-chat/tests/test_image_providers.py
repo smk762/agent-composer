@@ -95,8 +95,7 @@ class StabilityAspectTests(unittest.TestCase):
 
     def test_only_supported_aspect_ratios_are_sent(self) -> None:
         for w, h in ((1024, 768), (800, 600), (768, 1024), (1024, 1024), (1920, 1080), (640, 480)):
-            with self.subTest(size=f"{w}x{h}"):
-                self.assertIn(stability._closest_aspect(w, h), self.ALLOWED)
+            self.assertIn(stability._closest_aspect(w, h), self.ALLOWED)
 
     def test_four_by_three_maps_symmetrically(self) -> None:
         landscape = stability._closest_aspect(1024, 768)
@@ -173,9 +172,9 @@ class ReplicateTests(unittest.TestCase):
 
     def test_malformed_model_never_reaches_the_api_url(self) -> None:
         for model in ("a/b/../../account", "owner/name?x=1", "x", "owner/name:not-a-version", "../predictions"):
-            with self.subTest(model=model), self.assertRaises(LookupError):
+            with self.assertRaises(LookupError, msg=f'model={model!r}'):
                 _run(self.provider.generate_image("a cat", model=model))
-            with self.subTest(video=model), self.assertRaises(LookupError):
+            with self.assertRaises(LookupError, msg=f'video={model!r}'):
                 _run(self.provider.generate_video("a cat", model=model))
         self.assertEqual(_JsonClient.calls, [])
 

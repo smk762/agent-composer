@@ -119,7 +119,7 @@ class OomRetryTests(unittest.IsolatedAsyncioTestCase):
 
         for interval in (0, -3):
             attempts, sleeps, now = 0, [], 0.0
-            with self.subTest(interval=interval), self.assertRaises(RetryableOomError):
+            with self.assertRaises(RetryableOomError, msg=f'interval={interval!r}'):
                 await run_with_oom_wait(
                     operation,
                     on_oom=lambda: None,
