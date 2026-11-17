@@ -17,6 +17,10 @@ from transformers import AutoModel, AutoModelForSequenceClassification, AutoToke
 logger = logging.getLogger(__name__)
 
 
+class ModelUnavailableError(RuntimeError):
+    """The model can't be made ready (load or GPU move failed). The API answers 503."""
+
+
 class ModelState(str, Enum):
     UNLOADED = "unloaded"
     LOADING = "loading"
@@ -51,6 +55,7 @@ class ModelManager:
         self._error: Optional[str] = None
         self._model = None
         self._tokenizer = None
+        self._num_labels: Optional[int] = None  # head size of the loaded classify model
         self._last_used: float = 0.0
         self._lock: asyncio.Lock = asyncio.Lock()
         self._evict_task: Optional[asyncio.Task] = None
@@ -112,7 +117,8 @@ class ModelManager:
         model.eval()
         return tok, model  # stays on CPU until _promote
 
-    async def _do_load(self, num_labels: int) -> None:
+    async def _do_load(self, num_labels: Optional[int]) -> None:
+        num_labels = num_labels or 2
         self._state = ModelState.LOADING
         loop = asyncio.get_event_loop()
         try:
@@ -128,6 +134,7 @@ class ModelManager:
             logger.error("Load failed: %s", exc)
             raise
         self._tokenizer, self._model = tok, model
+        self._num_labels = num_labels if self.task == "classify" else None
         self._state = ModelState.CPU
         self._error = None
         logger.info("Model on CPU — %s", self.model_id)
@@ -168,8 +175,16 @@ class ModelManager:
 
     # ------------------------------------------------------------------ public
 
-    async def _make_ready(self, num_labels: int) -> None:
+    async def _make_ready(self, num_labels: Optional[int]) -> None:
         # Caller holds self._lock.
+        if (num_labels and self._num_labels is not None and num_labels != self._num_labels
+                and self._state in (ModelState.CPU, ModelState.GPU)):
+            # A classify head is sized at load: one for another label count would hand back
+            # logits for the wrong classes. Reload once the current leases are done.
+            logger.info("Reloading %s for %d labels (loaded with %d)",
+                        self.model_id, num_labels, self._num_labels)
+            await self._idle.wait()
+            self._unload_locked()
         if self._state == ModelState.GPU:
             pass
         elif self._state == ModelState.CPU:
@@ -181,19 +196,24 @@ class ModelManager:
             await self._do_load(num_labels)
             await self._promote()
 
-    async def _make_ready_or_arm(self, num_labels: int) -> None:
+    async def _make_ready_or_arm(self, num_labels: Optional[int]) -> None:
         # Caller holds self._lock. A failed or cancelled make-ready can still leave a model
         # resident (e.g. a promote that finished after its caller was cancelled): give it an
         # idle timer, or nothing would ever evict it.
         try:
             await self._make_ready(num_labels)
-        except BaseException:
+        except BaseException as exc:
             if self._in_use == 0 and self._state in (ModelState.CPU, ModelState.GPU):
                 self._arm_evict()
+            if isinstance(exc, Exception) and not isinstance(exc, ModelUnavailableError):
+                raise ModelUnavailableError(f"model {self.model_id} unavailable") from exc
             raise
 
-    async def ensure_ready(self, num_labels: int = 2) -> None:
+    async def ensure_ready(self, num_labels: Optional[int] = None) -> None:
         """Guarantee model is on GPU (or CPU if MODERNBERT_DEVICE=cpu) and reset keep-alive.
+
+        ``num_labels`` sizes a classify head (default: keep the loaded one, else 2); a
+        different count from the loaded head's reloads the model.
 
         Does not protect a following inference; use ``use()`` for that.
         """
@@ -204,7 +224,7 @@ class ModelManager:
                 self._arm_evict()
 
     @asynccontextmanager
-    async def use(self, num_labels: int = 2) -> AsyncIterator["ModelManager"]:
+    async def use(self, num_labels: Optional[int] = None) -> AsyncIterator["ModelManager"]:
         """Make the model ready and hold it for the whole block.
 
         While any lease is held the model is neither demoted nor unloaded. Don't call
@@ -245,6 +265,7 @@ class ModelManager:
             self._model = None
             gc.collect()
             torch.cuda.empty_cache()
+        self._num_labels = None
         self._state = ModelState.UNLOADED
         logger.info("Model unloaded")
 

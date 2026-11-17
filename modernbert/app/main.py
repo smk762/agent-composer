@@ -14,7 +14,7 @@ import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException
 
 from .classifier import Classifier
-from .model import ModelManager, ModelState
+from .model import ModelManager, ModelState, ModelUnavailableError
 from .schemas import (ClassifyRequest, ClassifyResponse, EmbedRequest,
                       EmbedResponse, LabelUpdate, ModelStatus)
 
@@ -25,9 +25,14 @@ manager = ModelManager()
 classifier = Classifier(manager)
 
 
+def _env_flag(name: str, default: str = "0") -> bool:
+    """Boolean env var: 1/true/yes/on (any case) is on; anything else is off."""
+    return os.environ.get(name, default).strip().lower() in {"1", "true", "yes", "on"}
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if int(os.environ.get("MODERNBERT_PRELOAD", "0")):
+    if _env_flag("MODERNBERT_PRELOAD"):
         try:
             async with manager.use():
                 await classifier._embed_labels()
@@ -164,20 +169,35 @@ async def update_labels(body: LabelUpdate):
     }
 
 
+def _is_unavailable(exc: BaseException) -> bool:
+    """Model can't serve right now (load/move failed, CUDA OOM): a 503 the caller may retry."""
+    oom = getattr(getattr(torch, "cuda", None), "OutOfMemoryError", ())
+    return isinstance(exc, ModelUnavailableError) or (bool(oom) and isinstance(exc, oom))
+
+
+async def _run_inference(what: str, call):
+    # Only model-unavailable conditions are a 503, with a generic detail (the exception text
+    # can carry model paths or CUDA internals; it goes to the log). Anything else, a bug
+    # included, propagates: FastAPI logs it and answers a plain 500.
+    try:
+        return await call()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        if not _is_unavailable(exc):
+            raise
+        logger.warning("%s: model unavailable", what, exc_info=True)
+        raise HTTPException(status_code=503, detail="model unavailable") from exc
+
+
 @app.post("/classify", response_model=ClassifyResponse)
 async def classify(req: ClassifyRequest):
-    try:
-        return await classifier.classify(req)
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+    return await _run_inference("classify", lambda: classifier.classify(req))
 
 
 @app.post("/embed", response_model=EmbedResponse)
 async def embed(req: EmbedRequest):
-    try:
-        return await classifier.embed(req)
-    except Exception as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
+    return await _run_inference("embed", lambda: classifier.embed(req))
 
 
 if __name__ == "__main__":

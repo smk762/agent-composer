@@ -8,6 +8,7 @@ memory. Exposes /health plus /admin/status, /admin/wake and /admin/evict.
 
 import asyncio
 import hmac
+import logging
 import os
 import signal
 import time
@@ -18,6 +19,7 @@ import uvicorn
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
+logger = logging.getLogger("infinity-manager")
 
 LISTEN_HOST = os.getenv("INFINITY_MANAGER_HOST", "0.0.0.0")
 LISTEN_PORT = int(os.getenv("INFINITY_MANAGER_PORT", "7997"))
@@ -59,6 +61,8 @@ _lock = asyncio.Lock()
 _process: Optional[asyncio.subprocess.Process] = None
 _last_used = 0.0
 _active_requests = 0
+# The loop holds tasks only weakly: keep the reaper referenced so it can't be collected.
+_reaper_task: Optional["asyncio.Task[None]"] = None
 
 
 def _base_command() -> List[str]:
@@ -151,15 +155,38 @@ async def _idle_reaper() -> None:
                 await _stop_locked()
 
 
+def _reaper_done(task: "asyncio.Task[None]") -> None:
+    """Log a reaper that died and start a new one, so idle models still get stopped."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is None:
+        return
+    logger.error("idle reaper crashed; restarting", exc_info=exc)
+    _start_reaper()
+
+
+def _start_reaper() -> None:
+    global _reaper_task
+    _reaper_task = asyncio.create_task(_idle_reaper())
+    _reaper_task.add_done_callback(_reaper_done)
+
+
 @app.on_event("startup")
 async def startup() -> None:
     if os.getenv("INFINITY_PRELOAD", "1") == "1":
         await _ensure_started()
-    asyncio.create_task(_idle_reaper())
+    _start_reaper()
 
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
+    global _reaper_task
+    task, _reaper_task = _reaper_task, None
+    if task is not None:
+        task.remove_done_callback(_reaper_done)
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
     async with _lock:
         await _stop_locked()
 

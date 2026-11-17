@@ -11,7 +11,7 @@ from typing import List, Optional
 import torch
 import torch.nn.functional as F
 
-from .model import ModelManager, ModelState
+from .model import ModelManager, ModelState, ModelUnavailableError
 from .schemas import ClassifyRequest, ClassifyResponse, EmbedRequest, EmbedResponse
 
 logger = logging.getLogger(__name__)
@@ -55,7 +55,8 @@ class Classifier:
         """Embed ``labels`` (default: the current set) and return the embeddings.
 
         Caller must hold a manager.use() lease. The result is cached only if the label set
-        hasn't been replaced meanwhile, so the cache always matches ``self.labels``."""
+        hasn't been replaced meanwhile, so the cache always matches ``self.labels``. The cache
+        lives on the CPU: a GPU copy would outlast an evict/unload and keep holding VRAM."""
         labels = self.labels if labels is None else labels
         if not labels:
             return None
@@ -63,7 +64,7 @@ class Classifier:
         embs = await loop.run_in_executor(None, lambda: self._encode_sync(labels))
         embs = F.normalize(embs, dim=-1)
         if self.labels is labels:
-            self._label_embeddings = embs
+            self._label_embeddings = embs.cpu()
             logger.debug("Label embeddings ready (%d labels)", len(labels))
         return embs
 
@@ -155,7 +156,7 @@ class Classifier:
         if len(names) != len(probs):
             # The loaded head was sized for another label set; zip would silently truncate or
             # misname the scores.
-            raise RuntimeError(
+            raise ModelUnavailableError(
                 f"model has {len(probs)} outputs but {len(names)} labels are configured; "
                 "unload the model so it reloads with the current label set"
             )
