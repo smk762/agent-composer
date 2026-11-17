@@ -366,8 +366,10 @@ services:
     container_name: whisper
     restart: unless-stopped
     environment:
-      # argus-iris resident contract: Bearer token for /admin/* (open when empty).
+      # argus-iris resident contract: Bearer token for /admin/* (503 when empty,
+      # unless ARGUS_ADMIN_INSECURE=1).
       - ARGUS_ADMIN_TOKEN=${ARGUS_ADMIN_TOKEN:-}
+      - ARGUS_ADMIN_INSECURE=${ARGUS_ADMIN_INSECURE:-}  # 1 = open /admin/* with no token (dev only)
       - STT_MODEL=${STT_MODEL:-large-v3-turbo}
       - STT_DEVICE=${STT_DEVICE:-cuda}
       - STT_COMPUTE_TYPE=${STT_COMPUTE_TYPE:-float16}
@@ -472,8 +474,10 @@ services:
     container_name: xtts
     restart: unless-stopped
     environment:
-      # argus-iris resident contract: Bearer token for /admin/* (open when empty).
+      # argus-iris resident contract: Bearer token for /admin/* (503 when empty,
+      # unless ARGUS_ADMIN_INSECURE=1).
       - ARGUS_ADMIN_TOKEN=${ARGUS_ADMIN_TOKEN:-}
+      - ARGUS_ADMIN_INSECURE=${ARGUS_ADMIN_INSECURE:-}  # 1 = open /admin/* with no token (dev only)
       - XTTS_MODEL=${XTTS_MODEL:-tts_models/multilingual/multi-dataset/xtts_v2}
       - XTTS_DEVICE=${XTTS_DEVICE:-cuda:0}
       - XTTS_PRELOAD=${XTTS_PRELOAD:-0}
