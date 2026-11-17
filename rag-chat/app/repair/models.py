@@ -1,8 +1,20 @@
 """Pydantic schemas for the agentic repair pipeline."""
 from __future__ import annotations
 
+import re
 from typing import Literal, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# A git revision name: no leading '-' (git would parse it as an option such as --output=),
+# no whitespace/control characters, no '..' (range syntax) or '@{', none of git's ref
+# metacharacters. Branches, tags, remote refs (origin/dev) and SHAs all fit.
+_REF_RE = re.compile(r"^(?!-)(?!.*\.\.)(?!.*@\{)(?!.*//)[A-Za-z0-9._/@+-]{1,255}$")
+
+
+def _check_ref(value: str) -> str:
+    if value and (not _REF_RE.match(value) or value.endswith((".", "/", ".lock")) or value.startswith("/")):
+        raise ValueError("must be a plain git ref name (no leading '-', whitespace, '..' or ~^:?*[\\)")
+    return value
 
 
 class GitOpsConfig(BaseModel):
@@ -55,7 +67,11 @@ class RepairRequest(BaseModel):
         description="Server-populated: rendered pack block. Any client-supplied value is overwritten.",
     )
     diff: str = Field("", description="Unified diff text to repair")
-    compare_branch: str = Field("", description="Generate diff via git diff <branch>...HEAD")
+    compare_branch: str = Field(
+        "",
+        description="Generate diff via git diff <branch>...HEAD. A plain ref name: a leading '-', "
+                    "whitespace, '..' and git's ref metacharacters are a 422.",
+    )
     errors: list[str] = Field(default_factory=list, description="Validation errors to fix")
     mode: Literal["auto_fix", "review", "suggest"] = Field(
         "review",
@@ -95,6 +111,9 @@ class RepairRequest(BaseModel):
             "after a successful auto_fix apply.  Ignored for review and suggest modes."
         ),
     )
+
+
+    _compare_branch_is_a_ref = field_validator("compare_branch")(_check_ref)
 
 
 class RepairIteration(BaseModel):

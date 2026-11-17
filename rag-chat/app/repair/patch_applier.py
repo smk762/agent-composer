@@ -6,6 +6,7 @@ apply_inplace=True (requires write access to the repo path).
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -16,26 +17,41 @@ from typing import Callable
 log = logging.getLogger("rag-chat.repair")
 
 
+# An opening fence at the start of a line, with an optional info string, then the body up
+# to a closing fence alone on its line (a diff line never starts with ```).
+_FENCE_RE = re.compile(r"^```[ \t]*([\w+-]*)[^\n]*\n(.*?)^```[ \t]*$", re.MULTILINE | re.DOTALL)
+
+# Lines a unified / git diff can contain once it has started.
+_DIFF_LINE_PREFIXES = (
+    " ", "+", "-", "\\", "@@",
+    "diff --git ", "index ", "new file mode", "deleted file mode", "old mode", "new mode",
+    "similarity index", "dissimilarity index", "rename from", "rename to", "copy from", "copy to",
+    "Binary files ",
+)
+
+
 def extract_patch(llm_response: str) -> str:
     """Pull a unified diff out of a free-form LLM response.
 
     Tries (in order):
-    1. Fenced code block:  ```diff ... ```  or  ``` ... ```
-    2. First line that starts ``diff --git``, ``---``, or ``@@ ``
+    1. Each fenced code block (```diff ... ```, ``` ... ```, ...), first one that looks like a diff
+    2. Inline: from the first line that starts ``diff --git``, ``---`` or ``@@ `` up to the
+       first line that is not diff syntax (prose, a closing fence)
     3. Empty string if nothing plausible is found.
     """
-    # Fenced block
-    m = re.search(r"```(?:diff|patch)?\n(.*?)```", llm_response, re.DOTALL)
-    if m:
-        candidate = m.group(1).strip()
+    for m in _FENCE_RE.finditer(llm_response):
+        candidate = m.group(2).strip()
         if _looks_like_diff(candidate):
             return candidate
 
-    # Inline diff — find the first diff-looking line
+    # Inline diff — find the first diff-looking line, stop where the diff ends
     lines = llm_response.splitlines()
     for i, line in enumerate(lines):
         if line.startswith(("diff --git ", "--- ", "@@ ")):
-            return "\n".join(lines[i:]).strip()
+            end = i + 1
+            while end < len(lines) and _is_diff_line(lines[end]):
+                end += 1
+            return "\n".join(lines[i:end]).strip()
 
     return ""
 
@@ -45,6 +61,12 @@ def _looks_like_diff(text: str) -> bool:
         text.startswith(("---", "diff --git ", "@@ "))
         or re.search(r"^@@\s+-\d+", text, re.MULTILINE)
     )
+
+
+def _is_diff_line(line: str) -> bool:
+    if line.startswith("```"):
+        return False
+    return line == "" or line.startswith(_DIFF_LINE_PREFIXES)
 
 
 def apply_to_temp(
@@ -95,32 +117,31 @@ def apply_to_temp(
 def apply_inplace(repo_path: Path, patch_text: str) -> None:
     """Apply *patch_text* directly to *repo_path* using ``git apply``.
 
+    The patch goes to git on stdin: nothing is written inside the working tree, where a
+    committed symlink at a fixed name could redirect the write.
+
     Raises:
         PermissionError: if the path is not writable.
         RuntimeError: if the patch does not apply cleanly.
     """
     _check_writable(repo_path)
 
-    patch_file = repo_path / ".ai_repair_patch.tmp"
-    try:
-        patch_file.write_text(patch_text, encoding="utf-8")
-        result = subprocess.run(
-            ["git", "apply", "--whitespace=fix", str(patch_file)],
-            cwd=repo_path,
-            capture_output=True,
-            text=True,
-        )
-    finally:
-        patch_file.unlink(missing_ok=True)
-
+    result = subprocess.run(
+        ["git", "apply", "--whitespace=fix", "-"],
+        cwd=repo_path,
+        input=patch_text,
+        capture_output=True,
+        text=True,
+    )
     if result.returncode != 0:
         raise RuntimeError(f"git apply failed: {result.stderr.strip()[:600]}")
 
 
 def _check_writable(path: Path) -> None:
-    probe = path / ".ai_repair_write_probe"
+    # mkstemp creates a fresh file (O_EXCL), so a planted symlink can't redirect the probe.
     try:
-        probe.touch()
-        probe.unlink()
+        fd, probe = tempfile.mkstemp(prefix=".ai_repair_write_probe", dir=path)
+        os.close(fd)
+        os.unlink(probe)
     except (PermissionError, OSError) as exc:
         raise PermissionError(f"Repo path is not writable: {path}") from exc

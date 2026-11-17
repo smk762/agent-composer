@@ -148,7 +148,12 @@ async def _validate_via_api(
     repo: str,
     audit_api_url: str,
 ) -> tuple[bool, list[str]]:
-    """POST patch to /audit/diff (static analysis), return (passed, errors)."""
+    """POST patch to /audit/diff (static analysis), return (passed, errors).
+
+    Fails closed: when the audit API is configured but gives no usable verdict (non-200,
+    timeout, connection error, malformed payload) the patch has not been analysed, so it
+    does not pass.
+    """
     if not audit_api_url or not patch:
         return True, []
     try:
@@ -161,10 +166,11 @@ async def _validate_via_api(
         if r.status_code in _AUTH_REFUSED:
             return False, _refused(r.status_code)
         if r.status_code != 200:
-            log.debug("Audit API returned %d", r.status_code)
-            return True, []
+            return _unavailable("diff audit", f"HTTP {r.status_code}")
         data = r.json()
-        findings = data.get("findings", [])
+        findings = data.get("findings") if isinstance(data, dict) else None
+        if not isinstance(findings, list) or not all(isinstance(f, dict) for f in findings):
+            return _unavailable("diff audit", "malformed response")
         critical = [
             f"{f.get('severity')} {f.get('file_path')}:{f.get('line')} — {f.get('title')}"
             for f in findings
@@ -172,8 +178,18 @@ async def _validate_via_api(
         ]
         return len(critical) == 0, critical
     except Exception as exc:
-        log.debug("Validation call failed: %s", exc)
-        return True, []
+        return _unavailable("diff audit", f"{type(exc).__name__}: {exc}")
+
+
+def _unavailable(what: str, reason: str) -> tuple[bool, list[str]]:
+    """A check that could not run: logged loudly and reported as not passed."""
+    log.warning("repair: %s unavailable (%s); the patch is not validated", what, reason)
+    return False, [f"audit unavailable ({what}): {reason}"]
+
+
+# How much longer than the server's test budget the client waits, for the server to copy
+# the repo and apply the patch before the tests and to answer after them.
+_VALIDATE_CLIENT_MARGIN_S = 60
 
 
 async def _validate_via_tests(
@@ -189,30 +205,32 @@ async def _validate_via_tests(
     pre-filtered from the raw test output.  This avoids filling the local
     model's context with thousands of lines of pytest boilerplate.
 
-    Degrades gracefully:
-    - Returns (True, []) when the endpoint is unavailable (404 or connection error).
-    - Returns (True, []) when validation is skipped (read-only mount, no test runner).
+    The server gets ``timeout`` seconds for the tests; the client waits that plus
+    ``_VALIDATE_CLIENT_MARGIN_S``.
+
+    - Returns (True, []) when the server reports validation skipped (read-only mount,
+      no test runner).
     - Returns (False, [<patch-error>]) when git apply fails on the temp copy.
+    - Fails closed: a timeout, an unreachable or missing endpoint, a non-200 answer or a
+      malformed payload is (False, [<reason>]), never a pass.
     """
     if not audit_api_url or not patch:
         return True, []
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout + _VALIDATE_CLIENT_MARGIN_S) as client:
             r = await client.post(
                 f"{audit_api_url.rstrip('/')}/audit/validate_patch",
-                json={"repo": repo, "patch": patch, "timeout_s": max(60, timeout - 30)},
+                json={"repo": repo, "patch": patch, "timeout_s": timeout},
                 headers=_audit_headers(),
             )
         if r.status_code in _AUTH_REFUSED:
             return False, _refused(r.status_code)
-        # 404 means the endpoint isn't deployed yet — skip silently
-        if r.status_code == 404:
-            return True, []
         if r.status_code != 200:
-            log.debug("validate_patch returned %d", r.status_code)
-            return True, []
+            return _unavailable("test validation", f"HTTP {r.status_code}")
 
         data = r.json()
+        if not isinstance(data, dict):
+            return _unavailable("test validation", "malformed response")
 
         # Skipped (read-only mount, no test runner) → don't penalise
         if data.get("skipped_reason"):
@@ -244,12 +262,11 @@ async def _validate_via_tests(
             return True, []
         return passed, failure_summary
 
-    except httpx.ConnectError:
-        log.debug("validate_patch: audit API unreachable")
-        return True, []
+    except httpx.TimeoutException:
+        log.warning("validate_patch: no answer within %ds (repo=%s)", timeout + _VALIDATE_CLIENT_MARGIN_S, repo)
+        return False, ["Validation timed out (tests may hang)"]
     except Exception as exc:
-        log.debug("validate_patch call failed: %s", exc)
-        return True, []
+        return _unavailable("test validation", f"{type(exc).__name__}: {exc}")
 
 
 # ── Main repair loop ──────────────────────────────────────────────────────────
@@ -350,13 +367,17 @@ async def repair_loop(
 
         # Merge all error signals for the next iteration's context.
         # Static-audit errors come first (higher signal), test errors follow.
-        current_errors = list(iter_result.validation_errors) + test_errors
+        # Only a validated patch replaces them: an iteration with no patch (or with
+        # validation off) keeps the errors the fixer still has to fix.
+        validated = bool(request.audit_api_url and patch)
+        if validated:
+            current_errors = list(iter_result.validation_errors) + test_errors
 
         yield iter_result
 
-        # Stop when all validations pass, or when the model produced nothing useful
-        static_ok = iter_result.validation_passed is not False
-        if static_ok and test_passed and patch:
+        # Stop when all validations ran and passed, or when the model produced nothing
+        # useful. With validation off nothing passed, so the loop runs max_iterations.
+        if validated and iter_result.validation_passed is True and test_passed:
             log.info("Repair loop: all validations passed at iteration %d", iteration)
             break
         if not patch and iteration == 1:
