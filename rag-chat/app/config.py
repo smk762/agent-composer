@@ -100,6 +100,8 @@ OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "300"))
 OOM_WAIT_MAX_SECONDS = _env_int("OOM_WAIT_MAX_SECONDS", 180)
 OOM_WAIT_INTERVAL_SECONDS = _env_int("OOM_WAIT_INTERVAL_SECONDS", 5)
 INFERENCE_WORKER_CONCURRENCY = _env_int("INFERENCE_WORKER_CONCURRENCY", 1)
+# Largest image (or mask) /api/edit/image and /api/generate/video accept; bigger is a 413.
+GENERATION_UPLOAD_MAX_BYTES = _env_int("GENERATION_UPLOAD_MAX_BYTES", 25 * 1024 * 1024)
 # One SingGuard pass at a time: cull scans and darkroom pre-flights share Ollama.
 GUARD_WORKER_CONCURRENCY = _env_int("GUARD_WORKER_CONCURRENCY", 1)
 

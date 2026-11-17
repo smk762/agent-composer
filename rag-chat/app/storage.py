@@ -61,6 +61,11 @@ class LocalMediaStore:
             return None
         return Path(p).read_bytes()
 
+    async def delete(self, file_path: str) -> None:
+        p = self.resolve_path(file_path)
+        if p is not None:
+            Path(p).unlink(missing_ok=True)
+
 
 class MinioMediaStore:
     def __init__(
@@ -121,6 +126,9 @@ class MinioMediaStore:
         except ClientError:
             return None
         return out["Body"].read()
+
+    async def delete(self, file_path: str) -> None:
+        self._client.delete_object(Bucket=self._bucket, Key=file_path)
 
 
 def _build_store():
