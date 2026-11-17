@@ -48,6 +48,9 @@ HOP_BY_HOP_HEADERS = {
     "transfer-encoding",
     "upgrade",
 }
+# aiohttp decompresses the upstream body (auto_decompress), so its encoding and length no longer
+# describe what is sent on; the response computes its own Content-Length.
+STALE_BODY_HEADERS = {"content-encoding", "content-length"}
 
 
 app = FastAPI(title="Infinity Idle Manager")
@@ -287,7 +290,7 @@ async def proxy(path: str, request: Request) -> Response:
                 response_headers = {
                     key: value
                     for key, value in upstream_response.headers.items()
-                    if key.lower() not in HOP_BY_HOP_HEADERS
+                    if key.lower() not in HOP_BY_HOP_HEADERS and key.lower() not in STALE_BODY_HEADERS
                 }
                 content_type = upstream_response.headers.get("content-type")
                 status_code = upstream_response.status
