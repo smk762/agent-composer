@@ -1,9 +1,31 @@
 """Abstract media-generation provider interfaces (BaseProvider, ImageProvider, VideoProvider), capabilities and result types."""
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import List, Optional
+
+
+_SIZE_RE = re.compile(r"\s*(\d{1,5})\s*(?:[x×]\s*(\d{1,5}))?\s*", re.IGNORECASE)
+_MIN_EDGE, _MAX_EDGE = 64, 4096
+
+
+def parse_size(size: Optional[str], default: int = 1024) -> tuple[int, int]:
+    """``WxH`` (case-insensitive) or ``N`` for a square; empty means ``default`` square.
+
+    Anything else, or a side outside 64-4096, is a LookupError, which the generation
+    router answers with a 400 rather than letting ``int()`` raise a 500."""
+    if not size or not size.strip():
+        return default, default
+    m = _SIZE_RE.fullmatch(size)
+    if not m:
+        raise LookupError(f"size must be WIDTHxHEIGHT, got {size!r}")
+    w = int(m.group(1))
+    h = int(m.group(2)) if m.group(2) else w
+    if not (_MIN_EDGE <= w <= _MAX_EDGE and _MIN_EDGE <= h <= _MAX_EDGE):
+        raise LookupError(f"size {size!r} is out of range: each side {_MIN_EDGE}-{_MAX_EDGE}")
+    return w, h
 
 
 class Capability(str, Enum):

@@ -58,12 +58,15 @@ class ProviderRegistry:
         Instantiate and return a configured provider for the given capability.
 
         If *provider_name* is specified, use that provider. Otherwise pick the
-        first enabled provider that supports the capability.
+        first enabled provider that supports the capability, in a fixed order: the one
+        configured first (then by name), so the same request always reaches the same backend.
         """
         stmt = select(ProviderConfig).where(ProviderConfig.user_id == user_id)
         if provider_name:
             stmt = stmt.where(ProviderConfig.provider_name == provider_name)
-        stmt = stmt.where(ProviderConfig.enabled.is_(True))
+        stmt = stmt.where(ProviderConfig.enabled.is_(True)).order_by(
+            ProviderConfig.created_at, ProviderConfig.provider_name, ProviderConfig.id,
+        )
         res = await db.execute(stmt)
         configs = res.scalars().all()
 
@@ -77,6 +80,12 @@ class ProviderRegistry:
 
             api_key = decrypt_value(pc.encrypted_api_key) if pc.encrypted_api_key else None
             settings = json.loads(pc.settings_json) if pc.settings_json else {}
+            # The key comes from the encrypted column only; a stored "api_key" setting would
+            # also collide with the explicit argument (TypeError) and lock the provider out.
+            if isinstance(settings, dict) and settings.pop("api_key", None) is not None:
+                log.warning("Ignoring 'api_key' in settings_json for provider %s", pc.provider_name)
+            elif not isinstance(settings, dict):
+                settings = {}
             instance = cls(api_key=api_key, **settings)
             return instance
 
@@ -91,7 +100,8 @@ class ProviderRegistry:
         db: AsyncSession, user_id: str, provider_name: Optional[str] = None,
     ) -> ImageProvider:
         p = await ProviderRegistry.get_provider(db, user_id, Capability.IMAGE_GENERATE, provider_name)
-        assert isinstance(p, ImageProvider)
+        if not isinstance(p, ImageProvider):
+            raise LookupError(f"Provider {p.name!r} is not an image provider")
         return p
 
     @staticmethod
@@ -99,5 +109,6 @@ class ProviderRegistry:
         db: AsyncSession, user_id: str, provider_name: Optional[str] = None,
     ) -> VideoProvider:
         p = await ProviderRegistry.get_provider(db, user_id, Capability.VIDEO_GENERATE, provider_name)
-        assert isinstance(p, VideoProvider)
+        if not isinstance(p, VideoProvider):
+            raise LookupError(f"Provider {p.name!r} is not a video provider")
         return p

@@ -12,7 +12,7 @@ from uuid import uuid4
 import httpx
 
 from app.providers.base import (
-    Capability, GeneratedMedia, GenerationResult, ImageProvider, VideoProvider,
+    Capability, GeneratedMedia, GenerationResult, ImageProvider, VideoProvider, parse_size,
 )
 from app.providers.registry import register_provider
 
@@ -21,6 +21,7 @@ log = logging.getLogger("rag-chat.provider.replicate")
 _API_BASE = "https://api.replicate.com/v1"
 _POLL_INTERVAL = 3
 _MAX_POLLS = 100
+_MAX_IMAGES = 4
 
 _IMAGE_MODELS = {
     "flux-1.1-pro": "black-forest-labs/flux-1.1-pro",
@@ -101,7 +102,25 @@ class ReplicateProvider(ImageProvider, VideoProvider):
         r.raise_for_status()
         return r.json()["id"]
 
+    async def _cancel_prediction(self, pred_id: str) -> None:
+        """Best-effort: stop a prediction we gave up on so it doesn't keep billing compute."""
+        try:
+            async with httpx.AsyncClient(timeout=15) as c:
+                await c.post(
+                    f"{_API_BASE}/predictions/{pred_id}/cancel",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                )
+        except Exception as exc:
+            log.warning("Could not cancel Replicate prediction %s: %s", pred_id, exc)
+
     async def _poll_prediction(self, pred_id: str) -> dict:
+        try:
+            return await self._poll_until_done(pred_id)
+        except (TimeoutError, asyncio.CancelledError):
+            await self._cancel_prediction(pred_id)
+            raise
+
+    async def _poll_until_done(self, pred_id: str) -> dict:
         for _ in range(_MAX_POLLS):
             await asyncio.sleep(_POLL_INTERVAL)
             async with httpx.AsyncClient(timeout=15) as c:
@@ -131,11 +150,11 @@ class ReplicateProvider(ImageProvider, VideoProvider):
         model_key = model or "flux-schnell"
         version = _resolve_model(model_key, _IMAGE_MODELS)
 
-        parts = size.split("x")
-        w = int(parts[0]) if len(parts) >= 1 else 1024
-        h = int(parts[1]) if len(parts) >= 2 else w
+        w, h = parse_size(size)
+        if not 1 <= n <= _MAX_IMAGES:
+            raise LookupError(f"Replicate generates 1-{_MAX_IMAGES} images per request, got n={n}")
 
-        input_data = {"prompt": prompt, "width": w, "height": h, "num_outputs": min(n, 4)}
+        input_data = {"prompt": prompt, "width": w, "height": h, "num_outputs": n}
         if negative_prompt:
             input_data["negative_prompt"] = negative_prompt
 
@@ -197,7 +216,9 @@ class ReplicateProvider(ImageProvider, VideoProvider):
                 data=r.content,
                 mime_type="video/mp4",
                 filename=f"replicate_vid_{i}_{uuid4().hex[:8]}.mp4",
-                duration_seconds=duration,
+                # The requested duration isn't sent (the models' inputs differ), so the clip's
+                # length is unknown here; don't report the request as if it were the output.
+                duration_seconds=None,
             ))
 
         return GenerationResult(media=media, model=model_key, provider=self.name)

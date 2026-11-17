@@ -8,7 +8,7 @@ from uuid import uuid4
 import httpx
 
 from app.providers.base import (
-    Capability, GeneratedMedia, GenerationResult, ImageProvider,
+    Capability, GeneratedMedia, GenerationResult, ImageProvider, parse_size,
 )
 from app.providers.registry import register_provider
 
@@ -55,9 +55,7 @@ class TogetherAIProvider(ImageProvider):
         style: Optional[str] = None,
     ) -> GenerationResult:
         model = model or "black-forest-labs/FLUX.1-schnell-Free"
-        parts = size.split("x")
-        w = int(parts[0]) if len(parts) >= 1 else 1024
-        h = int(parts[1]) if len(parts) >= 2 else w
+        w, h = parse_size(size)
 
         body = {
             "model": model,
@@ -85,7 +83,10 @@ class TogetherAIProvider(ImageProvider):
 
         media = []
         for i, item in enumerate(data.get("data", [])):
-            b64 = item.get("b64_json", "")
+            b64 = item.get("b64_json")
+            if not b64:
+                # e.g. a url item or a partial/error result: an error, never an empty "PNG".
+                raise RuntimeError("Together returned an image without b64_json data")
             img_bytes = base64.b64decode(b64)
             media.append(GeneratedMedia(
                 data=img_bytes,
@@ -94,6 +95,8 @@ class TogetherAIProvider(ImageProvider):
                 width=w, height=h,
             ))
 
+        if not media:
+            raise RuntimeError("Together returned no images")
         return GenerationResult(media=media, model=model, provider=self.name)
 
 

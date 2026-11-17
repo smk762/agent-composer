@@ -2,13 +2,14 @@
 
 import logging
 import math
+import struct
 from typing import List, Optional
 from uuid import uuid4
 
 import httpx
 
 from app.providers.base import (
-    Capability, GeneratedMedia, GenerationResult, ImageProvider,
+    Capability, GeneratedMedia, GenerationResult, ImageProvider, parse_size,
 )
 from app.providers.registry import register_provider
 
@@ -83,9 +84,7 @@ class StabilityAIProvider(ImageProvider):
     ) -> GenerationResult:
         model = model or _DEFAULT_SD3
         endpoint, extra = _generate_target(model)
-        parts = size.split("x")
-        w = int(parts[0]) if len(parts) >= 1 else 1024
-        h = int(parts[1]) if len(parts) >= 2 else w
+        w, h = parse_size(size)
         aspect = _closest_aspect(w, h)
 
         all_media: list[GeneratedMedia] = []
@@ -109,11 +108,14 @@ class StabilityAIProvider(ImageProvider):
                     files=form,
                 )
             r.raise_for_status()
+            # Stability renders its own resolution for the aspect ratio, not w x h: report
+            # what came back (None when it can't be read), never the requested size.
+            out_w, out_h = _png_size(r.content)
             all_media.append(GeneratedMedia(
                 data=r.content,
                 mime_type="image/png",
                 filename=f"stability_{uuid4().hex[:8]}.png",
-                width=w, height=h,
+                width=out_w, height=out_h,
             ))
 
         return GenerationResult(media=all_media, model=model, provider=self.name)
@@ -171,6 +173,17 @@ class StabilityAIProvider(ImageProvider):
             model=model,
             provider=self.name,
         )
+
+
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def _png_size(data: bytes) -> tuple[Optional[int], Optional[int]]:
+    """Width and height from a PNG's IHDR chunk; (None, None) if it isn't a PNG."""
+    if len(data) < 24 or not data.startswith(_PNG_SIGNATURE) or data[12:16] != b"IHDR":
+        return None, None
+    w, h = struct.unpack(">II", data[16:24])
+    return w, h
 
 
 # The v2beta stable-image ``aspect_ratio`` enum. 4:3 and 3:4 are not in it (a 400).

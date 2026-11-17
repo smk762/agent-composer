@@ -64,6 +64,11 @@ class OpenAIProvider(ImageProvider, VideoProvider):
         style: Optional[str] = None,
     ) -> GenerationResult:
         model = model or "gpt-image-1"
+        if n < 1:
+            raise LookupError(f"OpenAI image generation needs n >= 1, got n={n}")
+        if model == "dall-e-3" and n > 1:
+            # The API answers n>1 for dall-e-3 with a 400; say so before sending.
+            raise LookupError(f"dall-e-3 generates one image per request, got n={n}")
         body: dict = {
             "model": model,
             "prompt": prompt,

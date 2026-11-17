@@ -95,6 +95,22 @@ class ComfyUIProvider(ImageProvider, VideoProvider):
                 raise RuntimeError(f"ComfyUI workflow failed: {entry}")
         raise TimeoutError("ComfyUI prompt timed out")
 
+    async def _cancel_prompt(self, prompt_id: str) -> None:
+        """Best-effort: drop a prompt we gave up on so it stops holding the shared GPU queue.
+
+        Deletes it if still pending; interrupts it only if it is the one running (a bare
+        /interrupt would stop whatever job is running, possibly someone else's)."""
+        try:
+            async with httpx.AsyncClient(timeout=10) as c:
+                q = await c.get(f"{self.base_url}/queue")
+                running = q.json().get("queue_running", []) if q.status_code == 200 else []
+                # queue entries are [number, prompt_id, prompt, extra, outputs]
+                if any(len(item) > 1 and item[1] == prompt_id for item in running):
+                    await c.post(f"{self.base_url}/interrupt", json={"prompt_id": prompt_id})
+                await c.post(f"{self.base_url}/queue", json={"delete": [prompt_id]})
+        except Exception as exc:
+            log.warning("Could not cancel ComfyUI prompt %s: %s", prompt_id, exc)
+
     async def _download_output(self, filename: str, subfolder: str = "", output_type: str = "output") -> bytes:
         params = {"filename": filename, "subfolder": subfolder, "type": output_type}
         async with httpx.AsyncClient(timeout=60) as c:
@@ -151,7 +167,11 @@ class ComfyUIProvider(ImageProvider, VideoProvider):
         for _ in range(n):
             workflow = self._build_txt2img_workflow(prompt, negative, w, h, model)
             prompt_id = await self._queue_prompt(workflow)
-            result = await self._poll_result(prompt_id)
+            try:
+                result = await self._poll_result(prompt_id)
+            except (TimeoutError, asyncio.CancelledError):
+                await self._cancel_prompt(prompt_id)
+                raise
             outputs = result.get("outputs", {})
             for node_id, node_out in outputs.items():
                 for img in node_out.get("images", []):
