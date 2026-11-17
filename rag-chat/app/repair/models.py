@@ -46,7 +46,9 @@ class RepairRequest(BaseModel):
     audit_api_base: str = Field(
         "",
         description="Audit API base URL used to fetch ``pack_id``. Default: env "
-                    "AI_AUDIT_PUBLIC_BASE_URL, else AUDIT_API_URL, else http://127.0.0.1:8765.",
+                    "AI_AUDIT_PUBLIC_BASE_URL, else AUDIT_API_URL, else http://127.0.0.1:8765. "
+                    "Must be a configured origin or in AUDIT_API_ALLOWED_HOSTS; anything else "
+                    "is a 422 (routers/repair.py, repair/url_policy.py).",
     )
     pack_context: str = Field(
         "",
@@ -74,8 +76,9 @@ class RepairRequest(BaseModel):
     max_iterations: int = Field(3, ge=1, le=10)
     audit_api_url: str = Field(
         "",
-        description="Base URL of the ai-code-auditor audit API for validation; "
-                    "empty disables validation between iterations.",
+        description="Base URL of the ai-code-auditor audit API for validation. Empty uses "
+                    "the server's AUDIT_API_URL. Must be a configured origin or in "
+                    "AUDIT_API_ALLOWED_HOSTS; anything else is a 422 (repair/url_policy.py).",
     )
     validate_tests: bool = Field(
         True,

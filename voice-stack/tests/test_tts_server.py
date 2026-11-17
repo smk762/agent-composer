@@ -54,6 +54,109 @@ async def _spin(seconds: float = 0.05) -> None:
     await asyncio.sleep(seconds)
 
 
+def _blocking_load(mgr: TTSModelManager, fail: bool = False):
+    """Replace ``mgr._load`` with one that blocks its worker thread until released."""
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+
+    def load(device):
+        started.set()
+        release.wait(5)
+        if fail:
+            raise RuntimeError("boom")
+        mgr._base_model = FakeWrapper()
+        mgr._custom_model = FakeWrapper()
+
+    mgr._load = load
+    return started, release
+
+
+async def _until(cond, timeout: float = 2.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not cond():
+        if loop.time() > deadline:
+            raise AssertionError("condition not reached")
+        await asyncio.sleep(0.01)
+
+
+@mock.patch.object(tts_server, "DEVICE", "cuda:0")
+class LoadCancelTests(unittest.IsolatedAsyncioTestCase):
+    """A caller cancelled during the first load must not strand the manager in LOADING."""
+
+    async def _cancel_mid_load(self, mgr, started):
+        async def gen():
+            async with mgr.use():
+                pass
+
+        t = asyncio.create_task(gen())
+        await _until(started.is_set)
+        self.assertEqual(mgr.state, TTSState.LOADING)
+        t.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await t
+        self.assertEqual(mgr._in_use, 0)
+        self.assertFalse(mgr._lock.locked())
+
+    async def test_cancelled_first_load_still_reaches_gpu_and_idle_timer(self):
+        mgr = TTSModelManager()
+        mgr.keep_alive_gpu, mgr.keep_alive_cpu = 0.05, 0
+        started, release = _blocking_load(mgr)
+        await self._cancel_mid_load(mgr, started)
+
+        release.set()
+        await _until(lambda: mgr.state == TTSState.GPU)
+        self.assertTrue(mgr.is_ready)
+        # Nobody is left to arm eviction: the load did, so the models leave the GPU.
+        await _until(lambda: mgr.state == TTSState.UNLOADED)
+
+    async def test_request_during_orphaned_load_waits_for_it(self):
+        mgr = TTSModelManager()
+        mgr.keep_alive_gpu, mgr.keep_alive_cpu = -1, -1
+        started, release = _blocking_load(mgr)
+        await self._cancel_mid_load(mgr, started)
+
+        async def gen():
+            async with mgr.use():
+                return mgr.base_model, mgr.state
+
+        t = asyncio.create_task(gen())
+        await _spin()
+        self.assertFalse(t.done())  # no lease handed out while still loading
+        release.set()
+        model, state = await asyncio.wait_for(t, 2)
+        self.assertIsNotNone(model)
+        self.assertEqual(state, TTSState.GPU)
+
+    async def test_unload_during_orphaned_load_waits_then_frees(self):
+        mgr = TTSModelManager()
+        mgr.keep_alive_gpu, mgr.keep_alive_cpu = -1, -1
+        started, release = _blocking_load(mgr)
+        await self._cancel_mid_load(mgr, started)
+
+        u = asyncio.create_task(mgr.unload())
+        await _spin()
+        self.assertFalse(u.done())
+        release.set()
+        await asyncio.wait_for(u, 2)
+        self.assertEqual(mgr.state, TTSState.UNLOADED)
+        self.assertIsNone(mgr.base_model)
+
+    async def test_cancelled_load_that_fails_lands_in_error_and_retries(self):
+        mgr = TTSModelManager()
+        started, release = _blocking_load(mgr, fail=True)
+        await self._cancel_mid_load(mgr, started)
+        release.set()
+        await _until(lambda: mgr.state == TTSState.ERROR)
+        self.assertEqual(mgr._error, "boom")
+
+        started, release = _blocking_load(mgr)
+        release.set()
+        async with mgr.use():
+            self.assertEqual(mgr.state, TTSState.GPU)
+
+
 @mock.patch.object(tts_server, "DEVICE", "cuda:0")
 class LeaseTests(unittest.IsolatedAsyncioTestCase):
     async def test_immediate_keep_alive_does_not_demote_mid_generation(self):

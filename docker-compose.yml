@@ -413,8 +413,9 @@ services:
     container_name: tts
     restart: unless-stopped
     environment:
-      # argus-iris resident contract: Bearer token for /admin/* (open when empty).
+      # argus-iris resident contract: Bearer token for /admin/* (503 when empty: fails closed).
       - ARGUS_ADMIN_TOKEN=${ARGUS_ADMIN_TOKEN:-}
+      - ARGUS_ADMIN_INSECURE=${ARGUS_ADMIN_INSECURE:-}  # 1 = open /admin/* with no token (dev only)
       - TTS_MODEL_SIZE=${TTS_MODEL_SIZE:-0.6b}
       - TTS_DEVICE=${TTS_DEVICE:-cuda:0}
       - TTS_LOAD_MODELS=${TTS_LOAD_MODELS:-both}

@@ -47,6 +47,7 @@ services:
       - "8031:8031"
     environment:
       - ARGUS_ADMIN_TOKEN=${ARGUS_ADMIN_TOKEN:-}  # argus-iris: Bearer token for /admin/*
+      - ARGUS_ADMIN_INSECURE=${ARGUS_ADMIN_INSECURE:-}  # 1 = open /admin/* with no token (dev only)
       - TTS_MODEL_SIZE=${TTS_MODEL_SIZE:-0.6b}
       - TTS_DEVICE=${TTS_DEVICE:-cuda:0}
       - TTS_LOAD_MODELS=${TTS_LOAD_MODELS:-both}
