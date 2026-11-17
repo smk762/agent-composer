@@ -60,7 +60,7 @@ async def stream_ollama_chat(
     If *client* is provided it will be used as-is (caller manages its
     lifecycle).  Otherwise a temporary client is created per call.
     """
-    payload["stream"] = True
+    payload = {**payload, "stream": True}  # a copy: the caller's dict is left as it was
 
     # All chunks in a single stream share the same id and creation timestamp,
     # consistent with the OpenAI streaming format.
