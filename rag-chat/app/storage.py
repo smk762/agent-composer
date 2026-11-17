@@ -88,15 +88,28 @@ class LocalMediaStore:
             return None
         return p
 
-    async def save_bytes(self, data: bytes, *, user_id: str, generation_id: str, filename: str) -> str:
+    def _write(self, rel_path: str, data: bytes) -> None:
         self.ensure_dirs()
-        rel_path = _rel_path(user_id=user_id, generation_id=generation_id,
-                             name=f"{uuid.uuid4().hex}{_safe_ext(filename)}")
         full_path = self._full_path(rel_path)
         if full_path is None:
             raise ValueError("media path escapes the media directory")
         full_path.parent.mkdir(parents=True, exist_ok=True)
         full_path.write_bytes(data)
+
+    def _read(self, file_path: str, user_id: Optional[str]) -> Optional[bytes]:
+        p = self.resolve_path(file_path, user_id=user_id)
+        return None if p is None else Path(p).read_bytes()
+
+    def _unlink(self, file_path: str) -> None:
+        p = self.resolve_path(file_path)
+        if p is not None:
+            Path(p).unlink(missing_ok=True)
+
+    # File I/O runs in a thread so large media never blocks the event loop.
+    async def save_bytes(self, data: bytes, *, user_id: str, generation_id: str, filename: str) -> str:
+        rel_path = _rel_path(user_id=user_id, generation_id=generation_id,
+                             name=f"{uuid.uuid4().hex}{_safe_ext(filename)}")
+        await asyncio.to_thread(self._write, rel_path, data)
         return rel_path
 
     def resolve_path(self, file_path: str, *, user_id: Optional[str] = None) -> Optional[str]:
@@ -106,15 +119,10 @@ class LocalMediaStore:
         return str(p)
 
     async def read_bytes(self, file_path: str, *, user_id: Optional[str] = None) -> Optional[bytes]:
-        p = self.resolve_path(file_path, user_id=user_id)
-        if p is None:
-            return None
-        return Path(p).read_bytes()
+        return await asyncio.to_thread(self._read, file_path, user_id)
 
     async def delete(self, file_path: str) -> None:
-        p = self.resolve_path(file_path)
-        if p is not None:
-            Path(p).unlink(missing_ok=True)
+        await asyncio.to_thread(self._unlink, file_path)
 
 
 class MinioMediaStore:

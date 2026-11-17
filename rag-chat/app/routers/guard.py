@@ -280,7 +280,9 @@ async def guard_check(req: GuardCheckRequest):
             used, verdict = await _guard_workers.run(_run)
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc)) from exc
-    except httpx.ConnectError:
+    except httpx.TimeoutException:
+        raise HTTPException(504, detail="Ollama guard timed out")
+    except httpx.TransportError:
         raise HTTPException(503, detail="Ollama unreachable")
     except httpx.HTTPStatusError as exc:
         detail = exc.response.text

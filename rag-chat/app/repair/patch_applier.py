@@ -38,11 +38,15 @@ def extract_patch(llm_response: str) -> str:
     2. Inline: from the first line that starts ``diff --git``, ``---`` or ``@@ `` up to the
        first line that is not diff syntax (prose, a closing fence)
     3. Empty string if nothing plausible is found.
+
+    A found patch ends with a newline. Only blank lines are trimmed around it: a hunk's
+    last context line may be a lone space, and dropping it would corrupt the hunk.
     """
+    llm_response = llm_response.replace("\r\n", "\n")
     for m in _FENCE_RE.finditer(llm_response):
-        candidate = m.group(2).strip()
+        candidate = m.group(2).strip("\n")
         if _looks_like_diff(candidate):
-            return candidate
+            return candidate + "\n"
 
     # Inline diff — find the first diff-looking line, stop where the diff ends
     lines = llm_response.splitlines()
@@ -51,7 +55,9 @@ def extract_patch(llm_response: str) -> str:
             end = i + 1
             while end < len(lines) and _is_diff_line(lines[end]):
                 end += 1
-            return "\n".join(lines[i:end]).strip()
+            while end > i + 1 and lines[end - 1] == "":
+                end -= 1
+            return "\n".join(lines[i:end]) + "\n"
 
     return ""
 

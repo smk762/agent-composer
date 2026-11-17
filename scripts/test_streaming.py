@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """
-Test streaming support in rag-chat.
+Smoke-test streaming support in a running rag-chat (manual script, not a pytest module:
+the checks are named ``check_*`` and return a bool so ``main`` can run all of them).
+
+    CHAT_URL=http://127.0.0.1:9150 RAG_API_KEY=... python3 scripts/test_streaming.py
 """
 
 import json
@@ -23,7 +26,27 @@ def _auth_headers() -> dict[str, str]:
     return headers
 
 
-def test_basic_streaming():
+def _delta(chunk: dict[str, Any]) -> dict[str, Any]:
+    """The first choice's delta; ``{}`` for chunks without choices (e.g. usage-only)."""
+    choices = chunk.get('choices') or [{}]
+    return choices[0].get('delta') or {}
+
+
+def _merge_tool_calls(acc: dict[int, dict[str, Any]], fragments: list[dict[str, Any]]) -> None:
+    """Fold streamed tool-call fragments into ``acc`` by index. Only the first fragment of a
+    call carries its id/name; later ones carry more ``arguments`` to append."""
+    for pos, tc in enumerate(fragments):
+        idx = tc.get('index', pos)
+        call = acc.setdefault(idx, {'id': None, 'name': '', 'arguments': ''})
+        fn = tc.get('function') or {}
+        if tc.get('id'):
+            call['id'] = tc['id']
+        if fn.get('name'):
+            call['name'] += fn['name']
+        call['arguments'] += fn.get('arguments') or ''
+
+
+def check_basic_streaming() -> bool:
     """Test basic streaming without tools."""
     print("\n=== Test 1: Basic Streaming ===")
     
@@ -72,10 +95,10 @@ def test_basic_streaming():
                             print(f"FAIL: Error in stream: {chunk['error']}")
                             return False
                         
-                        delta = chunk.get('choices', [{}])[0].get('delta', {})
-                        if 'content' in delta:
-                            print(delta['content'], end='', flush=True)
-                            accumulated += delta['content']
+                        content = _delta(chunk).get('content')
+                        if content:
+                            print(content, end='', flush=True)
+                            accumulated += content
                             chunks_received += 1
                     except json.JSONDecodeError as e:
                         print(f"\nWARN: JSON decode error: {e}")
@@ -95,7 +118,7 @@ def test_basic_streaming():
         return False
 
 
-def test_streaming_with_tools():
+def check_streaming_with_tools() -> bool:
     """Test streaming with tools."""
     print("\n=== Test 2: Streaming with Tools ===")
     
@@ -128,7 +151,7 @@ def test_streaming_with_tools():
         with urllib.request.urlopen(req, timeout=30) as response:
             print("Streaming with tools:")
             accumulated_content = ""
-            tool_calls_received = None
+            tool_calls: dict[int, dict[str, Any]] = {}
             
             for line in response:
                 line_str = line.decode('utf-8').strip()
@@ -141,23 +164,28 @@ def test_streaming_with_tools():
                 
                 try:
                     chunk = json.loads(data_str)
-                    delta = chunk.get('choices', [{}])[0].get('delta', {})
+                    delta = _delta(chunk)
                     
-                    if 'content' in delta:
-                        print(delta['content'], end='', flush=True)
-                        accumulated_content += delta['content']
+                    content = delta.get('content')
+                    if content:
+                        print(content, end='', flush=True)
+                        accumulated_content += content
                     
-                    if 'tool_calls' in delta:
-                        tool_calls_received = delta['tool_calls']
-                        print(f"\n✓ Tool calls received: {len(tool_calls_received)}")
-                        for tc in tool_calls_received:
-                            print(f"  - {tc['function']['name']}: {tc['function']['arguments']}")
+                    if delta.get('tool_calls'):
+                        _merge_tool_calls(tool_calls, delta['tool_calls'])
                 
                 except json.JSONDecodeError:
                     pass
             
             print("\n")
-            if accumulated_content or tool_calls_received:
+            if tool_calls:
+                print(f"✓ Tool calls received: {len(tool_calls)}")
+                for _, call in sorted(tool_calls.items()):
+                    print(f"  - {call['name']}: {call['arguments']}")
+                if not all(call['name'] for call in tool_calls.values()):
+                    print("FAIL: Tool call without a function name")
+                    return False
+            if accumulated_content or tool_calls:
                 print("OK: Streaming with tools works!")
                 return True
             else:
@@ -169,7 +197,7 @@ def test_streaming_with_tools():
         return False
 
 
-def test_non_streaming_still_works():
+def check_non_streaming_still_works() -> bool:
     """Verify non-streaming still works."""
     print("\n=== Test 3: Non-Streaming (Backward Compat) ===")
     
@@ -190,9 +218,12 @@ def test_non_streaming_still_works():
         with urllib.request.urlopen(req, timeout=30) as response:
             data = json.loads(response.read().decode('utf-8'))
             
-            if 'choices' in data and data['choices']:
-                message = data['choices'][0].get('message', {})
-                content = message.get('content', '')
+            if data.get('choices'):
+                message = data['choices'][0].get('message') or {}
+                content = message.get('content') or ''
+                if not content and not message.get('tool_calls'):
+                    print("FAIL: Empty response")
+                    return False
                 print(f"Response: {content[:100]}")
                 print("OK: Non-streaming works!")
                 return True
@@ -212,9 +243,9 @@ def main():
     print(f"Endpoint: {CHAT_URL}")
     
     ok = True
-    ok &= test_non_streaming_still_works()  # Test backward compat first
-    ok &= test_basic_streaming()
-    ok &= test_streaming_with_tools()
+    ok &= check_non_streaming_still_works()  # Test backward compat first
+    ok &= check_basic_streaming()
+    ok &= check_streaming_with_tools()
     
     print("\n" + "="*70)
     if ok:

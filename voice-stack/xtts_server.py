@@ -583,7 +583,8 @@ def _audio_duration(path: str) -> float | None:
         import torchaudio
 
         info = torchaudio.info(path)
-        if info.sample_rate:
+        # num_frames is 0 when the backend can't tell without decoding: unknown, not 0 s.
+        if info.sample_rate > 0 and info.num_frames > 0:
             return info.num_frames / info.sample_rate
     except Exception:
         pass
@@ -891,6 +892,43 @@ def _padded_spans(ts: list[dict], pad: float, sr: int, total_len: int) -> list[t
     return spans
 
 
+def _normalise_loudness(audio_np, sr: int, report: dict):
+    """LUFS-normalise to PREPROCESS_TARGET_LUFS, then pull peaks under 0.99.
+
+    When that peak guard attenuates, ``lufs_out``/``gain_db`` report the level
+    that actually came out (below target) and ``lufs_peak_limited`` is warned."""
+    import numpy as np
+
+    try:
+        import pyloudnorm as pyln
+
+        meter = pyln.Meter(sr)
+        loud_in = meter.integrated_loudness(audio_np)
+        if np.isfinite(loud_in):
+            report["lufs_in"] = round(float(loud_in), 1)
+            normed = pyln.normalize.loudness(audio_np, loud_in, PREPROCESS_TARGET_LUFS)
+            peak = float(np.max(np.abs(normed))) if normed.size else 0.0
+            lufs_out = float(PREPROCESS_TARGET_LUFS)
+            if peak > 0.99:
+                normed = normed * (0.99 / peak)
+                # The peak guard pulled the level below target: report what came out.
+                lufs_out -= 20.0 * math.log10(peak / 0.99)
+                report["warnings"].append("lufs_peak_limited")
+            audio_np = normed.astype(np.float32)
+            report["lufs_out"] = round(lufs_out, 1)
+            report["gain_db"] = round(lufs_out - float(loud_in), 1)
+            report["applied"].append("lufs_norm")
+        else:
+            report["warnings"].append("lufs_unmeasurable")
+    except Exception as exc:
+        report["warnings"].append(f"lufs_failed:{exc}")
+        peak = float(np.max(np.abs(audio_np))) if audio_np.size else 0.0
+        if peak > 0:
+            audio_np = (audio_np * (0.97 / peak)).astype(np.float32)
+            report["applied"].append("peak_norm")
+    return audio_np
+
+
 def _preprocess_clip(in_path: str) -> tuple[str, dict]:
     """Standardise a reference clip for cloning and report what changed.
 
@@ -1013,29 +1051,7 @@ def _preprocess_clip(in_path: str) -> tuple[str, dict]:
     report["kept_seconds"] = round(samples.shape[-1] / sr, 2)
     audio_np = samples.numpy().astype(np.float32)
 
-    try:
-        import pyloudnorm as pyln
-
-        meter = pyln.Meter(sr)
-        loud_in = meter.integrated_loudness(audio_np)
-        if np.isfinite(loud_in):
-            report["lufs_in"] = round(float(loud_in), 1)
-            normed = pyln.normalize.loudness(audio_np, loud_in, PREPROCESS_TARGET_LUFS)
-            peak = float(np.max(np.abs(normed))) if normed.size else 0.0
-            if peak > 0.99:
-                normed = normed * (0.99 / peak)
-            audio_np = normed.astype(np.float32)
-            report["lufs_out"] = PREPROCESS_TARGET_LUFS
-            report["gain_db"] = round(float(PREPROCESS_TARGET_LUFS - loud_in), 1)
-            report["applied"].append("lufs_norm")
-        else:
-            report["warnings"].append("lufs_unmeasurable")
-    except Exception as exc:
-        report["warnings"].append(f"lufs_failed:{exc}")
-        peak = float(np.max(np.abs(audio_np))) if audio_np.size else 0.0
-        if peak > 0:
-            audio_np = (audio_np * (0.97 / peak)).astype(np.float32)
-            report["applied"].append("peak_norm")
+    audio_np = _normalise_loudness(audio_np, sr, report)
 
     out = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     out.close()
@@ -1150,7 +1166,8 @@ def _analyze_clips(raw_paths: list[str], names: list[str]) -> dict:
         try:
             item.update(_quick_clip_metrics(path))
         except Exception as exc:
-            item["flags"].append(f"unreadable:{exc}")
+            logger.warning("clip_unreadable", name=name, error=str(exc))
+            item["flags"].append("unreadable")
             items.append(item)
             embeddings.append(None)
             continue
@@ -1161,7 +1178,8 @@ def _analyze_clips(raw_paths: list[str], names: list[str]) -> dict:
             emb = spk.detach().cpu().flatten().float()
             emb = emb / (emb.norm() + 1e-9)
         except Exception as exc:
-            item["flags"].append(f"embed_failed:{exc}")
+            logger.warning("clip_embed_failed", name=name, error=str(exc))
+            item["flags"].append("embed_failed")
 
         embeddings.append(emb)
         items.append(item)
@@ -1229,11 +1247,11 @@ def _score_clips(items: list[dict]) -> None:
             item["flags"].append("clipping")
         if snr is not None and snr < 15:
             item["flags"].append("noisy")
-        if speech and speech < 2.0:
+        if speech < 2.0:
             item["flags"].append("very_short")
         if cons_norm < 0.3:
             item["flags"].append("outlier")
-        item["recommended"] = score >= ANALYZE_SCORE_THRESHOLD
+        item["recommended"] = score >= ANALYZE_SCORE_THRESHOLD and speech > 0
         item["flags"] = sorted(set(item["flags"]))
 
 
@@ -1351,6 +1369,7 @@ async def clone_voice(
         except _ClipTooLarge as exc:
             return JSONResponse(status_code=413, content={"error": str(exc)})
         total_duration = 0.0
+        measured = False  # any clip's length known (kept_seconds or a probe)
         for clip, raw_path in zip(clips, raw_paths):
             if PREPROCESS:
                 try:
@@ -1358,6 +1377,8 @@ async def clone_voice(
                     report["name"] = clip.filename
                     latent_paths.append(proc_path)
                     reports.append(report)
+                    if report.get("kept_seconds") is not None:
+                        measured = True
                     total_duration += report.get("kept_seconds") or 0.0
                     continue
                 except Exception as exc:
@@ -1367,11 +1388,13 @@ async def clone_voice(
 
             latent_paths.append(raw_path)
             dur = await asyncio.to_thread(_audio_duration, raw_path)
+            if dur is not None:
+                measured = True
             total_duration += dur or 0.0
 
-        # total_duration stays 0 only when no clip could be probed (e.g. exotic
-        # container); let get_conditioning_latents be the real arbiter then.
-        if total_duration and total_duration < 3.0:
+        # When no clip could be measured (e.g. exotic container), let
+        # get_conditioning_latents be the real arbiter; a measured 0 is refused.
+        if measured and total_duration < 3.0:
             return JSONResponse(
                 status_code=422,
                 content={"error": "Usable speech totals under 3 seconds after preprocessing (6+ recommended)"},
@@ -1457,14 +1480,44 @@ def _list_clones() -> list[dict]:
                 buf = io.BytesIO()
                 try:
                     client.download_fileobj(S3_BUCKET_NAME, key, buf)
-                    clones.append(json.loads(buf.getvalue().decode("utf-8")))
+                    meta = json.loads(buf.getvalue().decode("utf-8"))
                 except (ClientError, ValueError, json.JSONDecodeError) as exc:
                     logger.warning("clone_meta_unreadable", key=key, error=str(exc))
+                    continue
+                if not isinstance(meta, dict):
+                    logger.warning("clone_meta_unreadable", key=key, error="not a JSON object")
+                    continue
+                clones.append(meta)
     except ClientError as exc:
         logger.error("clone_list_failed", error=str(exc))
         raise
-    clones.sort(key=lambda c: c.get("created_at", 0), reverse=True)
+    clones.sort(key=_created_at_key, reverse=True)
     return clones
+
+
+def _created_at_key(meta: dict) -> float:
+    """``created_at`` as epoch seconds whatever a sidecar stored (number, numeric
+    or ISO-8601 string); 0 when missing or unparseable, so sorting never mixes types."""
+    value = meta.get("created_at")
+    if isinstance(value, bool):
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value) if math.isfinite(value) else 0.0
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            pass
+        try:
+            from datetime import datetime, timezone
+
+            dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.timestamp()
+        except ValueError:
+            return 0.0
+    return 0.0
 
 
 @app.get("/clones")
@@ -1474,7 +1527,7 @@ async def list_clones():
         clones = await asyncio.to_thread(_list_clones)
     except Exception as exc:
         logger.error("clone_list_error", error=str(exc))
-        return JSONResponse(status_code=500, content={"error": f"Failed to list clones: {exc}"})
+        return JSONResponse(status_code=500, content={"error": "Failed to list clones"})
     return {"clones": clones}
 
 
@@ -1515,11 +1568,11 @@ async def download_clone(companion_id: str):
         return JSONResponse(status_code=422, content={"error": _COMPANION_ID_ERROR})
     try:
         data = await asyncio.to_thread(_build_clone_zip, companion_id)
-    except FileNotFoundError as exc:
-        return JSONResponse(status_code=404, content={"error": str(exc)})
+    except FileNotFoundError:
+        return JSONResponse(status_code=404, content={"error": "Voice clone not found"})
     except Exception as exc:
         logger.error("clone_download_error", companion_id=companion_id, error=str(exc))
-        return JSONResponse(status_code=500, content={"error": f"Failed to bundle clone: {exc}"})
+        return JSONResponse(status_code=500, content={"error": "Failed to bundle clone"})
 
     headers = {"Content-Disposition": f'attachment; filename="{companion_id}.zip"'}
     return Response(content=data, media_type="application/zip", headers=headers)
@@ -1656,6 +1709,16 @@ def _import_clone(zip_bytes: bytes, companion_override: str, name_override: str,
     def _text(value) -> str:
         return value.strip() if isinstance(value, str) else ""
 
+    def _number(value) -> float:
+        ok = isinstance(value, (int, float)) and not isinstance(value, bool)
+        return float(value) if ok and math.isfinite(value) and value >= 0 else 0.0
+
+    def _count(value) -> int:
+        return int(_number(value))
+
+    def _seconds(value) -> float:
+        return round(_number(value), 2)
+
     companion_id = _text(companion_override) or _text(src_meta.get("companion_id"))
     companion_id = _slug_id(companion_id or _text(name_override) or _text(src_meta.get("name")) or "imported-voice")
     if not _COMPANION_ID_RE.fullmatch(companion_id):  # _slug_id guarantees it; belt and braces
@@ -1671,9 +1734,9 @@ def _import_clone(zip_bytes: bytes, companion_override: str, name_override: str,
     meta = {
         "voice_clone_id": s3_key,
         "companion_id": companion_id,
-        "name": name_override or src_meta.get("name") or companion_id,
-        "num_clips": src_meta.get("num_clips", 0),
-        "total_seconds": src_meta.get("total_seconds", 0),
+        "name": _text(name_override) or _text(src_meta.get("name")) or companion_id,
+        "num_clips": _count(src_meta.get("num_clips")),
+        "total_seconds": _seconds(src_meta.get("total_seconds")),
         "imported": True,
         "created_at": time.time(),
     }
@@ -1712,7 +1775,7 @@ async def import_clone(
         return JSONResponse(status_code=422, content={"error": str(exc)})
     except Exception as exc:
         logger.error("clone_import_error", error=str(exc))
-        return JSONResponse(status_code=500, content={"error": f"Failed to import voice: {exc}"})
+        return JSONResponse(status_code=500, content={"error": "Failed to import voice"})
     return meta
 
 

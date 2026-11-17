@@ -22,7 +22,8 @@ class PageTests(unittest.TestCase):
     def test_guard_page_explains_the_rule(self) -> None:
         from pathlib import Path
 
-        html = Path("app/routers/ui.py").read_text(encoding="utf-8")
+        ui = Path(__file__).resolve().parents[1] / "app" / "routers" / "ui.py"
+        html = ui.read_text(encoding="utf-8")
         self.assertIn("SingGuard Safety Tester", html)
         self.assertIn('id="guardPolicy"', html)
         self.assertIn('id="whyDisplay"', html)

@@ -81,8 +81,9 @@ async def sync(src: str, dst: str, *, scheme: str, dry_run: bool = False, batch:
 
         to_embed = [pid for pid, p in src_points.items()
                     if pid not in dst_points or dst_points[pid].get("text") != p.get("text")]
+        embed_set = set(to_embed)  # membership below: a list scan would make the plan O(src x embed)
         to_relabel = [pid for pid, p in src_points.items()
-                      if pid in dst_points and pid not in to_embed
+                      if pid in dst_points and pid not in embed_set
                       and _without_label(dst_points[pid]) != _without_label(p)]
         to_delete = [pid for pid in dst_points if pid not in src_points]
         plan = {"src": src, "dst": dst, "embedder": label, "src_points": len(src_points),

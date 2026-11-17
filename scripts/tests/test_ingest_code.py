@@ -3,7 +3,9 @@
     python3 -m unittest discover -s scripts/tests
 """
 
+import contextlib
 import importlib.util
+import io
 import os
 import tempfile
 import unittest
@@ -47,6 +49,18 @@ class SourceFilesTests(unittest.TestCase):
 
     def test_main_reports_outside_dir_without_a_traceback(self) -> None:
         self.assertEqual(ingest_code.main(["--root", str(self.real), "--dry-run", "../shared"]), 2)
+
+
+class ArgsTests(unittest.TestCase):
+    def test_exts_are_stripped_before_the_dot(self) -> None:
+        self.assertEqual(ingest_code.parse_exts("py, md ,.ts,,"), {".py", ".md", ".ts"})
+
+    def test_batch_below_one_is_rejected(self) -> None:
+        for bad in ("0", "-3"):
+            with self.subTest(batch=bad), contextlib.redirect_stderr(io.StringIO()), \
+                    self.assertRaises(SystemExit) as cm:
+                ingest_code.main(["--batch", bad, "--dry-run"])
+            self.assertEqual(cm.exception.code, 2)
 
 
 if __name__ == "__main__":

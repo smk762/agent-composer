@@ -113,6 +113,8 @@ class AccessAuthTest(unittest.TestCase):
             r = self._get()
             self.assertEqual(r.status_code, 200)
             self.assertEqual(r.json()["via"], "dev")
+        # Each case below tests one credential source: the cookie above would be valid now.
+        self.client.cookies.clear()
         with patch.object(auth, "DEV_AUTH_BYPASS", True):
             r = self._get(**{"Cf-Access-Jwt-Assertion": _token(key=_OTHER_KEY)})
             self.assertEqual(r.json()["via"], "dev")

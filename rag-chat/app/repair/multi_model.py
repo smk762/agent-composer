@@ -307,6 +307,10 @@ async def repair_loop(
             qdrant_snippets=qdrant_snippets,
             pack_context=request.pack_context,
         )
+        # Notes describe one attempt: an iteration whose critic/adversary is skipped (no
+        # patch) must not hand the next one notes about an older patch.
+        critic_notes = ""
+        adversary_notes = ""
 
         # ── Model A: fixer ────────────────────────────────────────────────────
         fixer_prompt_text = _fixer_prompt(context, iteration)

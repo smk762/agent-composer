@@ -77,8 +77,20 @@ def _metrics(ranks: List[Optional[int]]) -> Dict[str, float]:
         "recall@1": round(sum(1 for r in ranks if r and r <= 1) / n, 3),
         "recall@5": round(sum(1 for r in ranks if r and r <= 5) / n, 3),
         "recall@10": round(sum(1 for r in ranks if r and r <= 10) / n, 3),
-        "mrr@10": round(sum(1 / r for r in ranks if r) / n, 3),
+        "mrr@10": round(sum(1 / r for r in ranks if r and r <= 10) / n, 3),
     }
+
+
+ARMS = ("baseline", "candidate")
+
+
+def _compare(rows: List[Dict[str, Any]], level: str) -> Dict[str, Any]:
+    """Metrics per arm plus wins/losses. Rows key each arm's ranks by its label, not its
+    collection, so two schemes over one collection don't overwrite each other."""
+    out: Dict[str, Any] = {arm: _metrics([r[arm][level] for r in rows]) for arm in ARMS}
+    out["candidate_better"] = sum(1 for r in rows if (r["candidate"][level] or K + 1) < (r["baseline"][level] or K + 1))
+    out["candidate_worse"] = sum(1 for r in rows if (r["candidate"][level] or K + 1) > (r["baseline"][level] or K + 1))
+    return out
 
 
 async def main() -> None:
@@ -118,23 +130,19 @@ async def main() -> None:
                     continue
                 row: Dict[str, Any] = {"id": str(p.id), "doc_id": payload.get("doc_id"),
                                        "title": (payload.get("meta") or {}).get("title"), "question": question}
-                for coll, scheme in arms:
+                for arm, (coll, scheme) in zip(ARMS, arms):
                     vec = await embed(http, QUERY_PREFIX[scheme] + question)
                     hits = await q.search(collection_name=coll, query_vector=vec, limit=K, with_payload=["doc_id"])
-                    row[coll] = _ranks(hits, p.id, payload.get("doc_id"))
+                    row[arm] = _ranks(hits, p.id, payload.get("doc_id"))
                 rows.append(row)
 
-        (b, _), (c, _) = arms
         report: Dict[str, Any] = {
             "baseline": args.baseline, "candidate": args.candidate, "questions": len(rows),
             "pool": len(points), "seed": args.seed, "question_model": CHAT_MODEL, "embed_model": EMBED_MODEL,
             "seconds": round(time.monotonic() - started, 1),
         }
         for level in ("chunk", "doc"):
-            report[level] = {coll: _metrics([r[coll][level] for r in rows]) for coll in (b, c)}
-            better = sum(1 for r in rows if (r[c][level] or K + 1) < (r[b][level] or K + 1))
-            worse = sum(1 for r in rows if (r[c][level] or K + 1) > (r[b][level] or K + 1))
-            report[level]["candidate_better"], report[level]["candidate_worse"] = better, worse
+            report[level] = _compare(rows, level)
         if args.details:
             report["rows"] = rows
         print(json.dumps(report, indent=2))

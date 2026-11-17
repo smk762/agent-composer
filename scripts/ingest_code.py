@@ -75,6 +75,18 @@ def source_files(root: Path, dirs: list[str], exts: set[str]) -> list[Path]:
     return sorted(set(out))
 
 
+def parse_exts(spec: str) -> set[str]:
+    """``"py, .md"`` -> ``{".py", ".md"}`` (entries are stripped before the dot is added)."""
+    return {s if s.startswith(".") else f".{s}" for s in (e.strip() for e in spec.split(",")) if s}
+
+
+def positive_int(value: str) -> int:
+    n = int(value)
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {n}")
+    return n
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("dirs", nargs="*", default=["."], help="dirs/files under --root to ingest (default: all)")
@@ -82,14 +94,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--repo", help="repo name stored on each chunk (default: --root's dir name)")
     ap.add_argument("--source", help="source stored on each chunk (default: --repo)")
     ap.add_argument("--exts", default=DEFAULT_EXTS, help=f"comma-separated suffixes (default {DEFAULT_EXTS})")
-    ap.add_argument("--batch", type=int, default=8, help="files per request")
+    ap.add_argument("--batch", type=positive_int, default=8, help="files per request")
     ap.add_argument("--url", default=os.environ.get("INGEST_URL", "http://127.0.0.1:9050"))
     ap.add_argument("--dry-run", action="store_true", help="list the files, send nothing")
     args = ap.parse_args(argv)
 
     root = Path(args.root).resolve()
     repo = args.repo or root.name
-    exts = {e if e.startswith(".") else f".{e}" for e in args.exts.split(",") if e.strip()}
+    exts = parse_exts(args.exts)
     try:
         files = source_files(root, args.dirs, exts)
     except ValueError as e:

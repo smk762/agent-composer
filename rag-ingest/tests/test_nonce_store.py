@@ -49,6 +49,43 @@ class SqliteNonceStoreTests(unittest.TestCase):
             store.claim_or_reject("n1", T0 + 50)
         self.assertEqual(store.cleanup(now=T0 + 151), 1)
 
+    def test_every_connection_is_closed(self) -> None:
+        opened: list = []
+
+        class Tracked(sqlite3.Connection):
+            closed = False
+
+            def close(self):
+                self.closed = True
+                super().close()
+
+        real_connect = sqlite3.connect
+
+        def connect(*a, **k):
+            conn = real_connect(*a, factory=Tracked, **k)
+            opened.append(conn)
+            return conn
+
+        with mock.patch.object(ns.sqlite3, "connect", connect):
+            store = _sqlite(denom=1)  # init, claim and cleanup each open one
+            store.claim_or_reject("n1", T0)
+            with self.assertRaises(ValueError):
+                store.claim_or_reject("n1", T0)
+        self.assertGreaterEqual(len(opened), 4)
+        self.assertTrue(all(c.closed for c in opened))
+
+    def test_cleanup_query_uses_an_index(self) -> None:
+        store = _sqlite()
+        conn = sqlite3.connect(store._cfg.db_path)
+        try:
+            plan = " ".join(str(r) for r in conn.execute(
+                "EXPLAIN QUERY PLAN DELETE FROM nonces WHERE created_at < ? AND ts < ?", (1, 1)))
+            cols = {r[2] for r in conn.execute("PRAGMA index_info('idx_nonces_created_at')")}
+        finally:
+            conn.close()
+        self.assertEqual(cols, {"created_at"})
+        self.assertIn("USING INDEX", plan)
+
 
 class RedisNonceStoreTests(unittest.TestCase):
     def test_expiry_counts_from_the_signed_ts_when_it_is_later(self) -> None:

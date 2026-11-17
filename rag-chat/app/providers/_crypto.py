@@ -110,11 +110,17 @@ def encrypt_value(plaintext: str) -> str:
     return PLAIN_PREFIX + base64.urlsafe_b64encode(plaintext.encode()).decode()
 
 
-def _b64_text(value: str) -> str:
+def _b64_text(value: str) -> Optional[str]:
+    """Decode a ``plain:``/legacy base64 value; None when it doesn't decode (never the raw
+    stored value, which would be sent upstream as if it were the key)."""
     try:
-        return base64.urlsafe_b64decode(value.encode()).decode()
+        text = base64.urlsafe_b64decode(value.encode()).decode()
     except (binascii.Error, UnicodeDecodeError, ValueError):
-        return value
+        text = ""
+    if not text:
+        log.error("A stored provider API key could not be decoded; re-save it")
+        return None
+    return text
 
 
 def decrypt_value(token: str) -> Optional[str]:

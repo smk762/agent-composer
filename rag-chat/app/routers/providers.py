@@ -132,12 +132,27 @@ async def test_provider(
     if not pc or not pc.encrypted_api_key:
         return {"ok": False, "error": "No API key configured"}
 
+    # Bad stored config (undecryptable key, corrupt or misshapen settings) is a diagnostic
+    # result like a failed validation, not an unhandled 500.
     from app.providers._crypto import decrypt_value
-    api_key = decrypt_value(pc.encrypted_api_key)
-    settings = json.loads(pc.settings_json) if pc.settings_json else {}
+    try:
+        api_key = decrypt_value(pc.encrypted_api_key)
+    except Exception:
+        api_key = None
+    if not api_key:
+        log.warning("provider %s: stored API key could not be decrypted", provider_name)
+        return {"ok": False, "error": "Stored API key could not be decrypted; re-save it"}
 
-    cls = _PROVIDER_CLASSES[provider_name]
-    instance = cls(api_key=api_key, **settings)
+    try:
+        settings = json.loads(pc.settings_json) if pc.settings_json else {}
+        if not isinstance(settings, dict):
+            raise ValueError("settings must be a JSON object")
+        settings.pop("api_key", None)  # reserved: passed explicitly below
+        cls = _PROVIDER_CLASSES[provider_name]
+        instance = cls(api_key=api_key, **settings)
+    except Exception as e:
+        log.warning("provider %s: stored settings are invalid: %s", provider_name, e)
+        return {"ok": False, "error": "Stored provider settings are invalid; re-save them"}
 
     try:
         valid = await instance.validate_config()

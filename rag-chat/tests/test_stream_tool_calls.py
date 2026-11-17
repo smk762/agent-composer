@@ -104,6 +104,16 @@ class StreamToolCallTests(unittest.TestCase):
     def test_no_calls_is_none(self) -> None:
         self.assertIsNone(_tool_calls_json([]))
 
+    def test_callers_payload_is_not_mutated(self) -> None:
+        payload = {"model": "m", "stream": False}
+
+        async def go():
+            lines = [json.dumps({"message": {"content": "hi"}, "done": True})]
+            return [c async for c in stream_ollama_chat("http://o", payload, "m", client=_Client(lines))]
+
+        asyncio.run(go())
+        self.assertEqual(payload, {"model": "m", "stream": False})
+
 
 if __name__ == "__main__":
     unittest.main()

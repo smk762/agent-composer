@@ -242,3 +242,74 @@ class OllamaEvictTest(unittest.TestCase):
     def test_no_model_evicts_everything_loaded(self) -> None:
         r = self.client.post("/api/runtime/ollama/evict", json={})
         self.assertEqual(r.json()["evicted"], ["qwen2.5:7b", "llama3:latest"])
+
+    def test_evicting_one_model_reports_the_others_still_loaded(self) -> None:
+        r = self.client.post("/api/runtime/ollama/evict", json={"model": "llama3"})
+        self.assertEqual(r.json()["state"], "loaded")
+        self.assertEqual(r.json()["loaded"], ["qwen2.5:7b"])
+
+    def test_evicting_everything_reports_idle(self) -> None:
+        r = self.client.post("/api/runtime/ollama/evict", json={})
+        self.assertEqual(r.json()["state"], "idle")
+        self.assertEqual(r.json()["loaded"], [])
+
+
+class OllamaWakeAndErrorsTest(unittest.TestCase):
+    """Wake falls back to CHAT_MODEL for a blank name; transport failures map to 503/504."""
+
+    def setUp(self) -> None:
+        async def no_db():
+            yield None
+
+        app = FastAPI()
+        app.include_router(runtime.router)
+        app.dependency_overrides[get_db] = no_db
+        self.client = TestClient(app)
+        p = patch.object(auth, "DEV_AUTH_BYPASS", True)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_blank_model_wakes_the_chat_model(self) -> None:
+        sent: list = []
+
+        async def fake_post(path, payload, *, timeout=None):
+            sent.append(payload)
+            return {}
+
+        with patch.object(runtime, "_ollama_post", fake_post), patch.object(runtime, "CHAT_MODEL", "qwen2.5:7b"):
+            r = self.client.post("/api/runtime/ollama/wake", json={"model": "   "})
+        self.assertEqual(r.json()["model"], "qwen2.5:7b")
+        self.assertEqual(sent[0]["model"], "qwen2.5:7b")
+
+    def _client_raising(self, exc):
+        class _Failing:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *e):
+                return False
+
+            async def get(self, *a, **kw):
+                raise exc
+
+            post = get
+
+        return patch.object(runtime.httpx, "AsyncClient", _Failing)
+
+    def test_ollama_timeout_is_a_504(self) -> None:
+        with self._client_raising(httpx.ReadTimeout("slow")):
+            r = self.client.get("/api/runtime/ollama/status")
+        self.assertEqual(r.status_code, 504)
+
+    def test_other_transport_errors_are_a_503(self) -> None:
+        with self._client_raising(httpx.RemoteProtocolError("dropped")):
+            r = self.client.post("/api/runtime/ollama/wake", json={})
+        self.assertEqual(r.status_code, 503)
+
+    def test_infinity_timeout_is_a_504(self) -> None:
+        with self._client_raising(httpx.ConnectTimeout("slow")):
+            r = self.client.post("/api/runtime/infinity/evict")
+        self.assertEqual(r.status_code, 504)

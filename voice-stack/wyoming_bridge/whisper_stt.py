@@ -103,9 +103,9 @@ class WhisperEventHandler(AsyncEventHandler):
             return True
 
         if Transcribe.is_type(event.type):
-            transcribe = Transcribe.from_event(event)
-            if transcribe.language:
-                self._language = transcribe.language
+            # Per request: a Transcribe without a language means the default
+            # (or autodetect), never the previous request's language.
+            self._language = Transcribe.from_event(event).language or DEFAULT_LANGUAGE
             return True
 
         if AudioStart.is_type(event.type):
@@ -132,8 +132,14 @@ class WhisperEventHandler(AsyncEventHandler):
             return True
 
         if AudioStop.is_type(event.type):
-            text, language = await self._transcribe()
-            self._buffer = bytearray()  # don't hold the utterance until the next one
+            try:
+                text, language = await self._transcribe()
+            finally:
+                # Don't hold (or re-send) the utterance, and don't carry this
+                # request's language into the next one.
+                self._buffer = bytearray()
+                self._truncated = False
+                self._language = DEFAULT_LANGUAGE
             await self.write_event(
                 Transcript(text=text, language=language or None).event()
             )

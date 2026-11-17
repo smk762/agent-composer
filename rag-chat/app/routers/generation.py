@@ -101,7 +101,7 @@ async def _store_results(db: AsyncSession, gen: Generation, result, *, user_id: 
         gen.error_message = f"storing results failed: {e}"
         gen.completed_at = datetime.now(tz=UTC)
         await db.commit()
-        raise HTTPException(500, f"Generation succeeded but storing its results failed: {e}")
+        raise HTTPException(500, f"Generation succeeded but storing its results failed (generation {gen_id}); see server logs")
 
 
 async def _run_inference_with_oom_retry(operation, *, metric_operation: str):
@@ -113,6 +113,44 @@ async def _run_inference_with_oom_retry(operation, *, metric_operation: str):
             max_wait_s=OOM_WAIT_MAX_SECONDS,
         )
     )
+
+
+async def _fail(db: AsyncSession, gen: Generation, error_message: str) -> None:
+    gen.status = "failed"
+    gen.error_message = error_message
+    gen.completed_at = datetime.now(tz=UTC)
+    await db.commit()
+
+
+async def _provider_error(db: AsyncSession, gen: Generation, e: Exception, *, what: str) -> HTTPException:
+    """Mark ``gen`` failed after a provider error. The exception (which may carry upstream URLs,
+    hosts or request details) goes to the server log only; the client gets the generation id."""
+    gen_id = gen.id
+    log.error("%s %s failed: %s", what, gen_id, e, exc_info=True)
+    await _fail(db, gen, "provider error (details in server logs)")
+    return HTTPException(502, f"{what} failed (generation {gen_id}); see server logs")
+
+
+async def _lookup_provider(db: AsyncSession, gen: Generation, lookup, *, what: str):
+    """Resolve the provider; only the registry's own "not configured" LookupError is a 400 with
+    its message (a KeyError raised during inference must not land there)."""
+    try:
+        return await lookup()
+    except LookupError as e:
+        await _fail(db, gen, str(e))
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise await _provider_error(db, gen, e, what=what)
+
+
+async def _run_provider(db: AsyncSession, gen: Generation, operation, *, metric_operation: str, what: str):
+    try:
+        return await _run_inference_with_oom_retry(operation, metric_operation=metric_operation)
+    except RetryableOomError as e:
+        await _fail(db, gen, _RETRYABLE_OOM_JOB_ERROR)
+        raise HTTPException(503, str(e))
+    except Exception as e:
+        raise await _provider_error(db, gen, e, what=what)
 
 
 # ---- Image generation ----
@@ -135,38 +173,22 @@ async def generate_image(
     await db.commit()
     await db.refresh(gen)
 
-    try:
-        provider = await ProviderRegistry.get_image_provider(db, auth.user_id, req.provider)
-        result = await _run_inference_with_oom_retry(
-            lambda: provider.generate_image(
-                req.prompt,
-                negative_prompt=req.negative_prompt,
-                model=req.model,
-                size=req.size,
-                n=req.n,
-                style=req.style,
-            ),
-            metric_operation="image_generate",
-        )
-    except LookupError as e:
-        gen.status = "failed"
-        gen.error_message = str(e)
-        gen.completed_at = datetime.now(tz=UTC)
-        await db.commit()
-        raise HTTPException(400, str(e))
-    except RetryableOomError as e:
-        gen.status = "failed"
-        gen.error_message = _RETRYABLE_OOM_JOB_ERROR
-        gen.completed_at = datetime.now(tz=UTC)
-        await db.commit()
-        raise HTTPException(503, str(e))
-    except Exception as e:
-        gen.status = "failed"
-        gen.error_message = str(e)
-        gen.completed_at = datetime.now(tz=UTC)
-        await db.commit()
-        log.error("generate_image failed: %s", e, exc_info=True)
-        raise HTTPException(502, f"Generation failed: {e}")
+    provider = await _lookup_provider(
+        db, gen, lambda: ProviderRegistry.get_image_provider(db, auth.user_id, req.provider),
+        what="Generation",
+    )
+    result = await _run_provider(
+        db, gen,
+        lambda: provider.generate_image(
+            req.prompt,
+            negative_prompt=req.negative_prompt,
+            model=req.model,
+            size=req.size,
+            n=req.n,
+            style=req.style,
+        ),
+        metric_operation="image_generate", what="Generation",
+    )
 
     assets = await _store_results(db, gen, result, user_id=auth.user_id, media_type="image")
 
@@ -205,33 +227,18 @@ async def edit_image(
     await db.commit()
     await db.refresh(gen)
 
-    try:
-        prov = await ProviderRegistry.get_provider(db, auth.user_id, Capability.IMAGE_EDIT, provider)
+    async def _edit_provider():
         from app.providers.base import ImageProvider
-        assert isinstance(prov, ImageProvider)
-        result = await _run_inference_with_oom_retry(
-            lambda: prov.edit_image(prompt, image_bytes, mask=mask_bytes, model=model, size=size),
-            metric_operation="image_edit",
-        )
-    except LookupError as e:
-        gen.status = "failed"
-        gen.error_message = str(e)
-        gen.completed_at = datetime.now(tz=UTC)
-        await db.commit()
-        raise HTTPException(400, str(e))
-    except RetryableOomError as e:
-        gen.status = "failed"
-        gen.error_message = _RETRYABLE_OOM_JOB_ERROR
-        gen.completed_at = datetime.now(tz=UTC)
-        await db.commit()
-        raise HTTPException(503, str(e))
-    except Exception as e:
-        gen.status = "failed"
-        gen.error_message = str(e)
-        gen.completed_at = datetime.now(tz=UTC)
-        await db.commit()
-        log.error("edit_image failed: %s", e, exc_info=True)
-        raise HTTPException(502, f"Edit failed: {e}")
+        p = await ProviderRegistry.get_provider(db, auth.user_id, Capability.IMAGE_EDIT, provider)
+        assert isinstance(p, ImageProvider)
+        return p
+
+    prov = await _lookup_provider(db, gen, _edit_provider, what="Edit")
+    result = await _run_provider(
+        db, gen,
+        lambda: prov.edit_image(prompt, image_bytes, mask=mask_bytes, model=model, size=size),
+        metric_operation="image_edit", what="Edit",
+    )
 
     assets = await _store_results(db, gen, result, user_id=auth.user_id, media_type="image",
                                   record_result=False)
@@ -273,34 +280,18 @@ async def generate_video(
     await db.commit()
     await db.refresh(gen)
 
-    try:
-        prov = await ProviderRegistry.get_video_provider(db, auth.user_id, provider)
-        result = await _run_inference_with_oom_retry(
-            lambda: prov.generate_video(
-                prompt, image=image_bytes, model=model,
-                duration=duration, aspect_ratio=aspect_ratio,
-            ),
-            metric_operation="video_generate",
-        )
-    except LookupError as e:
-        gen.status = "failed"
-        gen.error_message = str(e)
-        gen.completed_at = datetime.now(tz=UTC)
-        await db.commit()
-        raise HTTPException(400, str(e))
-    except RetryableOomError as e:
-        gen.status = "failed"
-        gen.error_message = _RETRYABLE_OOM_JOB_ERROR
-        gen.completed_at = datetime.now(tz=UTC)
-        await db.commit()
-        raise HTTPException(503, str(e))
-    except Exception as e:
-        gen.status = "failed"
-        gen.error_message = str(e)
-        gen.completed_at = datetime.now(tz=UTC)
-        await db.commit()
-        log.error("generate_video failed: %s", e, exc_info=True)
-        raise HTTPException(502, f"Video generation failed: {e}")
+    prov = await _lookup_provider(
+        db, gen, lambda: ProviderRegistry.get_video_provider(db, auth.user_id, provider),
+        what="Video generation",
+    )
+    result = await _run_provider(
+        db, gen,
+        lambda: prov.generate_video(
+            prompt, image=image_bytes, model=model,
+            duration=duration, aspect_ratio=aspect_ratio,
+        ),
+        metric_operation="video_generate", what="Video generation",
+    )
 
     assets = await _store_results(db, gen, result, user_id=auth.user_id, media_type="video")
 

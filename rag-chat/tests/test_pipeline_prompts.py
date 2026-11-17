@@ -61,3 +61,53 @@ class PipelinePromptTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PipelineModelOverrideTests(unittest.TestCase):
+    """Picking a non-default model loads it into Ollama, so it needs a signed-in user."""
+
+    def setUp(self) -> None:
+        from app import auth
+        from app.db import get_db
+
+        self.models: list[str] = []
+
+        async def fake_generate(model, system, prompt):
+            self.models.append(model)
+            return "ok"
+
+        async def no_db():
+            yield None
+
+        for p in (
+            patch.object(pipeline, "_ollama_generate", fake_generate),
+            patch.object(pipeline, "CHAT_MODEL", "qwen2.5:7b"),
+            patch.object(auth, "DEV_AUTH_BYPASS", False),
+            patch.object(auth, "CF_ACCESS_AUD", ""),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+        app = FastAPI()
+        app.include_router(pipeline.router)
+        app.dependency_overrides[get_db] = no_db
+        self.client = TestClient(app)
+
+    def test_default_model_needs_no_user(self) -> None:
+        for model in ("", "  ", "qwen2.5:7b"):
+            r = self.client.post("/api/pipeline/brain", json={**BRAIN, "model": model})
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.json()["model"], "qwen2.5:7b")
+        self.assertEqual(self.models, ["qwen2.5:7b"] * 3)
+
+    def test_another_model_needs_a_user(self) -> None:
+        r = self.client.post("/api/pipeline/brain", json={**BRAIN, "model": "llama3:70b"})
+        self.assertEqual(r.status_code, 401)
+        self.assertEqual(self.models, [])
+
+    def test_a_signed_in_user_can_pick_a_model(self) -> None:
+        from app import auth
+
+        with patch.object(auth, "DEV_AUTH_BYPASS", True):
+            r = self.client.post("/api/pipeline/brain", json={**BRAIN, "model": "llama3:70b"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(self.models, ["llama3:70b"])

@@ -2,7 +2,7 @@
 
 from uuid import uuid4
 
-from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text, func
+from sqlalchemy import BigInteger, Boolean, Column, DateTime, Float, Integer, String, Text, func
 
 from app.db import Base
 
@@ -77,7 +77,7 @@ class MediaAsset(Base):
     mime_type = Column(String, nullable=False)
     filename = Column(String, nullable=False)
     file_path = Column(String, nullable=False)
-    file_size_bytes = Column(Integer, nullable=True)
+    file_size_bytes = Column(BigInteger, nullable=True)
     width = Column(Integer, nullable=True)
     height = Column(Integer, nullable=True)
     duration_seconds = Column(Float, nullable=True)

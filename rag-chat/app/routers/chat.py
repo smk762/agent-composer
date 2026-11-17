@@ -85,9 +85,12 @@ async def _ollama_tag_names() -> List[str]:
         async with httpx.AsyncClient(timeout=30) as client:
             r = await client.get(f"{OLLAMA_URL}/api/tags")
     except Exception as e:
-        raise HTTPException(502, f"Ollama unreachable: {e}")
+        log.error("ollama /api/tags unreachable: %s", e)
+        raise HTTPException(502, "Ollama unreachable")
     if r.status_code != 200:
-        raise HTTPException(r.status_code, r.text)
+        # A gateway failure: Ollama's status and body go to the log, not to the client.
+        log.error("ollama /api/tags returned %d: %s", r.status_code, (r.text or "")[:500])
+        raise HTTPException(502, "Model list backend error")
     data = r.json() or {}
     names: List[str] = []
     for m in data.get("models") or []:
@@ -128,7 +131,8 @@ async def ollama_embed(text: str) -> list[float]:
         async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
             r = await client.post(f"{base_url}/api/embeddings", json=payload)
     if r.status_code != 200:
-        raise HTTPException(r.status_code, r.text)
+        log.error("ollama embeddings returned %d: %s", r.status_code, (r.text or "")[:500])
+        raise HTTPException(502, "Embedding backend error")
     data = r.json()
     emb = data.get("embedding")
     if not isinstance(emb, list) or not emb:
@@ -208,7 +212,8 @@ async def rag_context_for(msgs: List[Msg]) -> Optional[str]:
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(502, f"Embedding failed: {e}")
+        log.error("rag: query embedding failed: %s", e)
+        raise HTTPException(502, "Embedding backend error")
 
     async def _embedded(_: str) -> list[float]:
         return q_emb
@@ -325,6 +330,14 @@ async def _save_stream_turn(db: AsyncSession, conv: Conversation, user_msg: str,
         log.error("chat: stream persist error: %s", e, exc_info=True)
 
 
+async def _store_new_conversation(db: AsyncSession, conv: Conversation) -> None:
+    """Insert a conversation this request created (no id yet); an existing one is left alone."""
+    if conv.id is None:
+        db.add(conv)
+        await db.commit()
+        await db.refresh(conv)
+
+
 def _conv_out(c: Conversation) -> ConversationOut:
     return ConversationOut(
         id=c.id, title=c.title, summary=c.summary,
@@ -396,7 +409,7 @@ async def get_conversation(
             try:
                 tool_calls_data = json.loads(m.tool_calls)
                 tool_calls = [ToolCall(**tc) for tc in tool_calls_data]
-            except (json.JSONDecodeError, ValueError):
+            except (ValueError, TypeError):  # bad JSON, or not a list of tool-call objects
                 pass
         msg_list.append(Msg(role=m.role, content=m.content, tool_calls=tool_calls, tool_call_id=m.tool_call_id))
     return ConversationDetail(**_conv_out(conv).model_dump(), messages=msg_list)
@@ -436,10 +449,9 @@ async def chat(
         requested_model = conv.model or req.model or CHAT_MODEL
     else:
         requested_model = req.model or CHAT_MODEL
+        # Stored only once a model answers (_store_new_conversation), so a request that fails
+        # on the model doesn't leave an empty conversation behind.
         conv = Conversation(user_id=auth.user_id, model=None)
-        db.add(conv)
-        await db.commit()
-        await db.refresh(conv)
 
     # STREAMING PATH
     if req.stream:
@@ -465,6 +477,7 @@ async def chat(
                 yield f'data: {json.dumps({"error": f"Model not found. Tried: {tried}"})}\n\n'
                 yield 'data: [DONE]\n\n'
                 return
+            await _store_new_conversation(db, conv)
 
             msgs = req.messages
             if not msgs or msgs[0].role != "system":
@@ -578,7 +591,7 @@ async def chat(
                     return await client.post(f"{base_url}/api/chat", json={**payload, "model": model_name})
             except Exception as e:
                 log.error("chat: ollama unreachable for model %r: %s", model_name, e)
-                raise HTTPException(502, f"Ollama unreachable: {e}")
+                raise HTTPException(502, "Ollama unreachable")
 
     log.info("chat: resolved model=%r, calling ollama (non-stream)", model)
     t0 = time.monotonic()
@@ -600,9 +613,11 @@ async def chat(
     elapsed = time.monotonic() - t0
 
     if r.status_code != 200:
+        # A gateway failure: Ollama's status, body and the models tried stay in the log.
         log.error("chat: ollama failed after %.1fs, status=%d tried=%s body=%s",
                   elapsed, r.status_code, tried, (r.text or "")[:500])
-        raise HTTPException(r.status_code, (r.text or "") + (f"\nTried models: {tried}" if tried else ""))
+        raise HTTPException(502, "Chat backend error")
+    await _store_new_conversation(db, conv)
 
     data = r.json()
     prompt_tok = data.get("prompt_eval_count", 0)
