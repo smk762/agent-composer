@@ -1520,8 +1520,16 @@ def chat_ui():
                   }};
                 }}
 
+                // Conversation ids are server-made UUIDs; anything else (e.g. "..") is refused
+                // rather than steering this authenticated fetch to another route.
+                const CONV_ID_RE = /^[0-9a-f]{{8}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{4}}-[0-9a-f]{{12}}$/i;
+
                 async function loadConversation(convId) {{
                   if (!convId) return;
+                  if (!CONV_ID_RE.test(convId)) {{
+                    statusEl.textContent = "Invalid conversation id.";
+                    return;
+                  }}
                   statusEl.textContent = "Loading conversation...";
                   try {{
                     const r = await fetch("/conversations/" + encodeURIComponent(convId), {{ headers: authHeaders() }});
@@ -1842,10 +1850,10 @@ def pipeline_ui():
       animation: pulse-border 1.6s ease-in-out infinite; }
     .stage-card.complete { border-color: rgba(52,211,153,0.65); background: rgba(52,211,153,0.04); }
     .stage-card.s-error  { border-color: rgba(239,68,68,0.55); }
-    @keyframes pulse-border {{
-      0%,100% {{ border-color: rgba(251,191,36,0.4); }}
-      50%      {{ border-color: rgba(251,191,36,0.85); }}
-    }}
+    @keyframes pulse-border {
+      0%,100% { border-color: rgba(251,191,36,0.4); }
+      50%      { border-color: rgba(251,191,36,0.85); }
+    }
     .stage-connector {
       display: flex; align-items: center; justify-content: center;
       color: var(--muted); font-size: 20px; padding: 2px 0;
@@ -1873,7 +1881,7 @@ def pipeline_ui():
       border-top-color: #fbbf24; border-radius: 50%;
       animation: spin 0.75s linear infinite; display: inline-block; flex-shrink: 0;
     }
-    @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+    @keyframes spin { to { transform: rotate(360deg); } }
     .stage-meta { font-size: 12px; color: var(--muted); display: flex; flex-direction: column; gap: 3px; }
     .stage-knows { font-style: italic; margin-bottom: 2px; cursor: default; }
     .stage-io b { color: var(--text); font-weight: 600; }
@@ -1980,7 +1988,7 @@ def pipeline_ui():
     }
     .btn-danger { border-color: rgba(239,68,68,0.4); color: #f87171; }
     .btn-danger:hover { background: rgba(239,68,68,0.1); }
-    @media (max-width: 900px) {{ .pl-columns {{ grid-template-columns: 1fr; }} }}
+    @media (max-width: 900px) { .pl-columns { grid-template-columns: 1fr; } }
     """
 
     body = f"""
@@ -2641,7 +2649,7 @@ def pipeline_ui():
         const a = document.createElement("a");
         a.href = URL.createObjectURL(blob);
         a.download = "pipeline-run-" + Date.now() + ".json";
-        a.click(); URL.revokeObjectURL(a.href);
+        a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
       }}
 
       // ---- render stage 1 ----
@@ -2923,7 +2931,7 @@ def guard_ui():
           }
           const data = await r.json();
           showResult(data, input);
-          addHistory(data, input);
+          addHistory(data, body, !!imageFile);
           statusEl.textContent = "";
         } catch (e) {
           statusEl.textContent = "Request failed: " + e.message;
@@ -2958,10 +2966,17 @@ def guard_ui():
       }
 
       // ── History ──
-      function addHistory(data, input) {
+      // Keeps the full request (bar the image) so a recalled entry re-checks exactly what was judged;
+      // the list view truncates with CSS only.
+      function addHistory(data, req, hadImage) {
         history.unshift({
           ts: new Date().toISOString(),
-          input: input.slice(0, 200),
+          input: req.input,
+          input_role: req.input_role,
+          conversation: req.conversation || null,
+          policy: req.policy || "",
+          req_thinking: req.thinking,
+          had_image: hadImage,
           safe: data.safe,
           verdict: data.verdict,
           rule: data.rule || "",
@@ -3000,6 +3015,15 @@ def guard_ui():
             if (h) {
               showResult(h);
               inputEl.value = h.input;
+              // Entries saved before the full request was kept have no input_role: leave settings alone.
+              if (h.input_role !== undefined) {
+                roleEl.value = h.input_role || "user";
+                policyEl.value = h.policy || "";
+                if (h.req_thinking) thinkingEl.value = h.req_thinking;
+                turnsEl.innerHTML = "";
+                (h.conversation || []).forEach(t => addTurn(t.role, t.content));
+              }
+              if (h.had_image) statusEl.textContent = "That check included an image; attach it again to re-check it.";
             }
           });
         });
@@ -3392,7 +3416,8 @@ def voice_ui():
             a.href = URL.createObjectURL(blob);
             a.download = "voice-" + Date.now() + "." + format;
             a.click();
-            URL.revokeObjectURL(a.href);
+            // Some browsers start the download asynchronously: revoking now can cancel it.
+            setTimeout(() => URL.revokeObjectURL(a.href), 1000);
           });
       }
 
@@ -3950,15 +3975,20 @@ def voice_clone_ui():
 
       // ── Recording via Web Audio (capture PCM → WAV so the sidecar can read it) ──
       let recording = false;
+      let recStarting = false;  // set before awaiting the mic, so a double click can't open a second capture
       let audioCtx = null, mediaStream = null, processor = null, srcNode = null, sink = null;
       let recBuffers = [], recSampleRate = 16000, recStart = 0, recTimerInt = null;
 
       async function startRecording() {
+        if (recStarting || recording) return;
+        recStarting = true;
         try {
           mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
         } catch (err) {
           recLabel.textContent = "Mic access denied: " + err.message;
           return;
+        } finally {
+          recStarting = false;
         }
         const AC = window.AudioContext || window.webkitAudioContext;
         audioCtx = new AC();
@@ -4030,8 +4060,11 @@ def voice_clone_ui():
       // ── Score / rank clips ──
       scoreBtn.addEventListener("click", async () => {
         if (!clips.length) { scoreSummary.textContent = "Add clips first."; return; }
+        // Results come back by position: apply them to the clips actually sent, not to whatever
+        // `clips` holds after removes/recordings/uploads made while the request was in flight.
+        const sent = clips.slice();
         const fd = new FormData();
-        clips.forEach(c => fd.append("audio", c.blob, c.name));
+        sent.forEach(c => fd.append("audio", c.blob, c.name));
         scoreBtn.disabled = true;
         scoreBtn.textContent = "Scoring…";
         scoreSummary.textContent = "Scoring " + clips.length + " clip(s) (GPU may need to wake)…";
@@ -4041,20 +4074,21 @@ def voice_clone_ui():
           const d = await r.json();
           scoreThreshold = d.threshold != null ? d.threshold : scoreThreshold;
           (d.clips || []).forEach((rep, i) => {
-            if (!clips[i]) return;
-            clips[i].scored = (rep.score != null);
-            clips[i].score = rep.score;
-            clips[i].rank = rep.rank;
-            clips[i].snr_db = rep.snr_db;
-            clips[i].speech_seconds = rep.speech_seconds;
-            clips[i].clip_ratio = rep.clip_ratio;
-            clips[i].consistency = rep.consistency;
-            clips[i].flags = rep.flags || [];
-            clips[i].selected = !!rep.recommended;  // default-select clips over threshold
+            const c = sent[i];
+            if (!c) return;
+            c.scored = (rep.score != null);
+            c.score = rep.score;
+            c.rank = rep.rank;
+            c.snr_db = rep.snr_db;
+            c.speech_seconds = rep.speech_seconds;
+            c.clip_ratio = rep.clip_ratio;
+            c.consistency = rep.consistency;
+            c.flags = rep.flags || [];
+            c.selected = !!rep.recommended;  // default-select clips over threshold
           });
-          const sel = clips.filter(c => c.selected !== false).length;
-          const dropped = clips.length - sel;
-          scoreSummary.textContent = "Scored " + clips.length + " · " + sel + " selected"
+          const sel = sent.filter(c => c.selected !== false).length;
+          const dropped = sent.length - sel;
+          scoreSummary.textContent = "Scored " + sent.length + " · " + sel + " selected"
             + (dropped ? ", " + dropped + " below threshold (" + scoreThreshold + ")" : "")
             + " · best-first order set";
           renderClips();
