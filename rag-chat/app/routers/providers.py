@@ -14,7 +14,7 @@ from app.config import UTC
 from app.db import get_db
 from app.models.orm import ProviderConfig
 from app.models.schemas import AuthContext, ProviderConfigCreate, ProviderConfigOut, ProviderInfo
-from app.providers._crypto import encrypt_value
+from app.providers._crypto import ProviderKeyEncryptionError, encrypt_value
 from app.providers.registry import ProviderRegistry, _PROVIDER_CLASSES
 
 log = logging.getLogger("rag-chat.providers")
@@ -77,7 +77,11 @@ async def configure_provider(
     res = await db.execute(stmt)
     pc = res.scalar_one_or_none()
 
-    enc_key = encrypt_value(body.api_key) if body.api_key else None
+    try:
+        enc_key = encrypt_value(body.api_key) if body.api_key else None
+    except ProviderKeyEncryptionError as e:
+        # Refused rather than stored as reversible base64 (no PROVIDER_ENCRYPTION_KEY).
+        raise HTTPException(503, str(e))
     settings_json = json.dumps(body.settings) if body.settings else None
 
     if pc:

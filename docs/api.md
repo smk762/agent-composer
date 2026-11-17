@@ -132,7 +132,7 @@ It prints the secret once (only the hash is stored). The key acts as `--user`.
 
 ### Media generation (`routers/generation.py`, `routers/media.py`, `routers/providers.py`)
 
-Image and video generation go through pluggable providers (`app/providers/`: `openai`, `stability`, `replicate`, `together`, `comfyui`). Each user configures their own provider API keys. Keys are encrypted at rest only when `PROVIDER_ENCRYPTION_KEY` is set (see [configuration.md](configuration.md#security-relevant)).
+Image and video generation go through pluggable providers (`app/providers/`: `openai`, `stability`, `replicate`, `together`, `comfyui`). Each user configures their own provider API keys. Keys are encrypted at rest with `PROVIDER_ENCRYPTION_KEY`; without it, saving a key is a 503 unless `ALLOW_PLAINTEXT_PROVIDER_KEYS=1` (see [configuration.md](configuration.md#security-relevant)).
 
 | Method | Path | Auth | Key fields |
 |---|---|---|---|

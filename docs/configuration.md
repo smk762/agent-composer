@@ -14,7 +14,8 @@ Every service reads its settings from environment variables, which compose passe
 | `CF_ACCESS_AUD` | rag-chat | (empty) | Application Audience (AUD) tag of the Access app; the JWT's `aud` must contain it. |
 | `DEV_DEFAULT_USER` | rag-chat | `dev@example.com` | User id when bypassing auth without `X-Dev-User` |
 | `DEV_AUTH_USERS` | rag-chat | (empty) | Comma-separated extra users the dev bypass may act as via `X-Dev-User`. Empty: only `DEV_DEFAULT_USER` |
-| `PROVIDER_ENCRYPTION_KEY` | rag-chat | (empty) | Passphrase (PBKDF2 → Fernet) that encrypts stored image/video provider API keys. **If unset, provider keys are stored as plain base64**, and only a startup warning is logged. Set it before configuring any provider. Changing it later makes existing stored keys unreadable. |
+| `PROVIDER_ENCRYPTION_KEY` | rag-chat | (empty) | Passphrase (PBKDF2 → Fernet) that encrypts stored image/video provider API keys. **If unset, saving a provider key is refused (503)** and startup logs an error; set but unusable (`cryptography` missing) fails startup. Keys saved by older versions as plain base64 stay readable (re-save them to encrypt). Changing the passphrase later makes encrypted keys unreadable. |
+| `ALLOW_PLAINTEXT_PROVIDER_KEYS` | rag-chat | (unset) | `1` lets provider keys be saved without `PROVIDER_ENCRYPTION_KEY`, as `plain:`-prefixed base64. Development only. |
 | `CF_TUNNEL_TOKEN` | cloudflared | (empty) | Only needed with `--profile cloud` |
 | `BIND_ADDR`, `*_BIND_IP` | compose | `127.0.0.1` | Host interface for published ports (`RAG_CHAT_BIND_IP`, `RAG_INGEST_BIND_IP`, `OLLAMA_BIND_IP`, `WYOMING_{TTS,MISO,STT}_BIND_IP`, …) |
 
