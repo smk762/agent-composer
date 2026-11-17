@@ -34,6 +34,7 @@ def whisper(monkeypatch):
 
     monkeypatch.setattr(ws, "_decoder_status", decoder_ok)
     monkeypatch.delenv("ARGUS_ADMIN_TOKEN", raising=False)
+    monkeypatch.setenv("ARGUS_ADMIN_INSECURE", "1")
     monkeypatch.setattr(ws, "_model", None)
     monkeypatch.setattr(ws, "_last_used", 0.0)
     monkeypatch.setattr(ws, "_active", 0)
@@ -73,6 +74,33 @@ def test_whisper_admin_token(whisper, monkeypatch, route):
     assert whisper.post(route).status_code == 401
     assert whisper.post(route, headers={"Authorization": "Bearer nope"}).status_code == 401
     assert whisper.post(route, headers={"Authorization": "Bearer s3cret"}).status_code == 200
+
+
+@pytest.mark.parametrize("route", ["/admin/unload", "/admin/evict", "/admin/wake"])
+@pytest.mark.parametrize("token", [None, "", "  "])
+def test_whisper_admin_fails_closed_without_token(whisper, monkeypatch, route, token):
+    """ea4a750415: no ARGUS_ADMIN_TOKEN means 503, not an open admin route."""
+    monkeypatch.delenv("ARGUS_ADMIN_INSECURE", raising=False)
+    if token is None:
+        monkeypatch.delenv("ARGUS_ADMIN_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("ARGUS_ADMIN_TOKEN", token)
+    model = object()
+    monkeypatch.setattr(ws, "_model", model)
+
+    async def no_load():
+        raise AssertionError("admin route ran")
+
+    monkeypatch.setattr(ws, "_ensure_model", no_load)
+    for headers in ({}, {"Authorization": "Bearer "}, {"Authorization": "Bearer anything"}):
+        r = whisper.post(route, headers=headers)
+        assert r.status_code == 503, (route, headers, r.status_code)
+    assert ws._model is model  # nothing ran
+
+
+def test_whisper_admin_insecure_opt_in_does_not_override_a_token(whisper, monkeypatch):
+    monkeypatch.setenv("ARGUS_ADMIN_TOKEN", "s3cret")  # ARGUS_ADMIN_INSECURE=1 from the fixture
+    assert whisper.post("/admin/unload").status_code == 401
 
 
 def test_whisper_health_stays_open_with_token(whisper, monkeypatch):

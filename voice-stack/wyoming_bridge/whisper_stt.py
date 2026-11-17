@@ -36,6 +36,12 @@ TARGET_RATE = 16000
 TARGET_WIDTH = 2
 TARGET_CHANNELS = 1
 
+# Longest utterance buffered per audio stream. Past it further chunks are
+# dropped (the first MAX_SECONDS are still transcribed), so a client that never
+# sends audio-stop can't grow the buffer without bound.
+MAX_SECONDS = float(os.getenv("WYOMING_STT_MAX_SECONDS", "120"))
+MAX_BUFFER_BYTES = int(MAX_SECONDS * TARGET_RATE * TARGET_WIDTH * TARGET_CHANNELS)
+
 LANGS = [
     "en", "es", "fr", "de", "it", "pt", "nl", "ru", "zh", "ja",
     "ko", "ar", "hi", "pl", "tr", "cs", "hu",
@@ -85,6 +91,7 @@ class WhisperEventHandler(AsyncEventHandler):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._buffer = bytearray()
+        self._truncated = False
         self._converter = AudioChunkConverter(
             rate=TARGET_RATE, width=TARGET_WIDTH, channels=TARGET_CHANNELS
         )
@@ -103,18 +110,30 @@ class WhisperEventHandler(AsyncEventHandler):
 
         if AudioStart.is_type(event.type):
             self._buffer = bytearray()
+            self._truncated = False
             self._converter = AudioChunkConverter(
                 rate=TARGET_RATE, width=TARGET_WIDTH, channels=TARGET_CHANNELS
             )
             return True
 
         if AudioChunk.is_type(event.type):
+            room = MAX_BUFFER_BYTES - len(self._buffer)
+            if room <= 0:
+                if not self._truncated:
+                    self._truncated = True
+                    _LOGGER.warning("audio stream passed %.0f s; dropping the rest", MAX_SECONDS)
+                return True
             chunk = self._converter.convert(AudioChunk.from_event(event))
-            self._buffer.extend(chunk.audio)
+            audio = chunk.audio
+            if len(audio) > room:
+                room -= room % (TARGET_WIDTH * TARGET_CHANNELS)  # whole samples only
+                audio = audio[:room]
+            self._buffer.extend(audio)
             return True
 
         if AudioStop.is_type(event.type):
             text, language = await self._transcribe()
+            self._buffer = bytearray()  # don't hold the utterance until the next one
             await self.write_event(
                 Transcript(text=text, language=language or None).event()
             )

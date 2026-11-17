@@ -6,6 +6,8 @@ one that installs a fake model, so these run without a GPU or Coqui weights.
 
 import asyncio
 import io
+import itertools
+import json
 import os
 
 import pytest
@@ -368,3 +370,319 @@ def test_concurrent_streams_do_not_starve_default_executor(monkeypatch, mgr):
 
     asyncio.run(asyncio.wait_for(run(), 30))
 
+
+
+# ── 7cb28ebefe: a caller cancelled mid-load/move doesn't strand the state ─────
+
+
+def _blocking(fn_after):
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+
+    def blocked(*args):
+        started.set()
+        release.wait(5)
+        fn_after(*args)
+
+    return started, release, blocked
+
+
+async def _until(cond, timeout=2.0):
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not cond():
+        assert loop.time() < deadline, "condition not reached"
+        await asyncio.sleep(0.01)
+
+
+@pytest.fixture
+def real_mgr(monkeypatch):
+    """A manager with its real load/promote logic; only the weights are fake."""
+    m = xs.XTTSModelManager()
+    m.keep_alive_gpu = m.keep_alive_cpu = -1
+    model = _FakeModel()
+    monkeypatch.setattr(xs, "DEVICE", "cuda:0")
+    monkeypatch.setattr(m, "_move_to_device", lambda device: None)
+    m.fake = model
+    return m
+
+
+def _cancel_during(started, coro_fn):
+    async def go():
+        t = asyncio.create_task(coro_fn())
+        await _until(started.is_set)
+        t.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await t
+
+    return go()
+
+
+def test_cancelled_first_load_does_not_stick_in_loading(real_mgr, monkeypatch):
+    m = real_mgr
+    started, release, load = _blocking(lambda: setattr(m, "_model", m.fake))
+    monkeypatch.setattr(m, "_load_to_cpu", load)
+
+    async def run():
+        await _cancel_during(started, m.acquire)
+        assert m.active == 0 and not m._lock.locked()
+        release.set()
+        await _until(lambda: m.state == xs.TTSState.CPU)
+        async with m.lease() as model:
+            assert model is m.fake
+            assert m.state == xs.TTSState.GPU
+
+    asyncio.run(run())
+
+
+def test_lease_during_orphaned_load_waits_for_the_model(real_mgr, monkeypatch):
+    m = real_mgr
+    started, release, load = _blocking(lambda: setattr(m, "_model", m.fake))
+    monkeypatch.setattr(m, "_load_to_cpu", load)
+
+    async def run():
+        await _cancel_during(started, m.acquire)
+
+        async def use():
+            async with m.lease() as model:
+                return model
+
+        t = asyncio.create_task(use())
+        await asyncio.sleep(0.05)
+        assert not t.done()  # no lease handed out mid-load
+        release.set()
+        assert await asyncio.wait_for(t, 2) is m.fake
+
+    asyncio.run(run())
+
+
+def test_cancelled_load_that_fails_lands_in_error(real_mgr, monkeypatch):
+    m = real_mgr
+
+    def boom():
+        raise RuntimeError("no weights")
+
+    started, release, load = _blocking(boom)
+    monkeypatch.setattr(m, "_load_to_cpu", load)
+
+    async def run():
+        await _cancel_during(started, m.acquire)
+        release.set()
+        await _until(lambda: m.state == xs.TTSState.ERROR)
+        assert m._error == "no weights"
+
+    asyncio.run(run())
+
+
+def test_cancelled_promote_still_lands_on_gpu(real_mgr, monkeypatch):
+    m = real_mgr
+    m._model, m._state = m.fake, xs.TTSState.CPU
+    started, release, move = _blocking(lambda device: None)
+    monkeypatch.setattr(m, "_move_to_device", move)
+
+    async def run():
+        await _cancel_during(started, m.acquire)
+        release.set()
+        await _until(lambda: m.state == xs.TTSState.GPU)
+
+    asyncio.run(run())
+
+
+def test_lease_never_yields_a_missing_model(real_mgr):
+    m = real_mgr
+    m._state = xs.TTSState.LOADING  # stranded, with no load running
+
+    async def run():
+        with pytest.raises(RuntimeError):
+            async with m.lease():
+                pass
+        assert m.active == 0
+
+    asyncio.run(run())
+
+
+# ── clip analysis: 8720a216fb, 119643bf2a, 95ca17862c ─────────────────────────
+
+
+_GOOD = {"flags": [], "raw_seconds": 8.0, "peak": 0.5, "clip_ratio": 0.0, "speech_seconds": 8.0, "snr_db": 30.0}
+
+
+class _EmbedModel:
+    def __init__(self, fail=()):
+        self.fail = set(fail)
+
+    def get_conditioning_latents(self, paths):
+        if paths[0] in self.fail:
+            raise RuntimeError("embedding failed")
+        return None, torch.ones(1, 512, 1)
+
+
+def _analyze(monkeypatch, paths, model):
+    def metrics(path):
+        if "bad" in path:
+            raise RuntimeError("could not decode")
+        return {**_GOOD, "flags": []}
+
+    monkeypatch.setattr(xs, "_quick_clip_metrics", metrics)
+    monkeypatch.setattr(xs, "_mgr", type("M", (), {"model": model})())
+    return xs._analyze_clips(paths, paths)
+
+
+def test_unreadable_clip_scores_zero_and_sorts_last(monkeypatch):
+    monkeypatch.setattr(xs, "ANALYZE_SCORE_THRESHOLD", 40.0)
+    out = _analyze(monkeypatch, ["good1", "bad", "good2"], _EmbedModel())
+    bad = out["clips"][1]
+    assert bad["score"] == 0
+    assert bad["recommended"] is False
+    assert out["order"][-1] == 1
+    assert all(c["recommended"] for i, c in enumerate(out["clips"]) if i != 1)
+
+
+def test_clip_whose_embedding_failed_is_not_given_neutral_consistency(monkeypatch):
+    out = _analyze(monkeypatch, ["good1", "noembed", "good2"], _EmbedModel(fail=["noembed"]))
+    clip = out["clips"][1]
+    assert any(f.startswith("embed_failed") for f in clip["flags"])
+    assert "outlier" in clip["flags"]
+    assert clip["score"] < out["clips"][0]["score"]
+
+
+def _fake_audio_stack(monkeypatch, wav, sr, timestamps):
+    """Stub torchaudio + silero_vad so the clip helpers run on a given tensor."""
+    import sys
+    import types
+
+    ta = types.ModuleType("torchaudio")
+    af = types.ModuleType("torchaudio.functional")
+    af.resample = lambda x, a, b: x
+    af.highpass_biquad = lambda x, s, f: x
+    ta.functional = af
+    ta.load = lambda path: (wav.clone(), sr)
+    sv = types.ModuleType("silero_vad")
+    sv.get_speech_timestamps = lambda *a, **k: list(timestamps)
+    monkeypatch.setitem(sys.modules, "torchaudio", ta)
+    monkeypatch.setitem(sys.modules, "torchaudio.functional", af)
+    monkeypatch.setitem(sys.modules, "silero_vad", sv)
+    monkeypatch.setattr(xs, "_get_vad_model", lambda: None)
+
+
+def test_clip_with_no_speech_reports_no_speech_seconds(monkeypatch):
+    _fake_audio_stack(monkeypatch, torch.rand(1, 16000 * 5) * 0.01, 16000, [])
+    m = xs._quick_clip_metrics("silence.wav")
+    assert "vad_no_speech" in m["flags"]
+    assert m["raw_seconds"] == 5.0
+    assert m["speech_seconds"] == 0.0
+
+
+def test_padded_vad_segments_do_not_repeat_audio(monkeypatch):
+    sr = xs.PREPROCESS_SR
+    # Two segments 0.1 s apart; a 0.1 s pad on each side makes them overlap by 0.1 s.
+    ts = [{"start": 1.0, "end": 2.0}, {"start": 2.1, "end": 3.0}]
+    _fake_audio_stack(monkeypatch, torch.rand(1, sr * 4) - 0.5, sr, ts)
+    monkeypatch.setattr(xs, "PREPROCESS_VAD_PAD", 0.1)
+    monkeypatch.setattr(xs, "PREPROCESS_DENOISE", False)
+    monkeypatch.setattr(xs, "PREPROCESS_HIGHPASS_HZ", 0)
+    path, report = xs._preprocess_clip("clip.wav")
+    os.unlink(path)
+    assert "vad_trim" in report["applied"]
+    assert report["kept_seconds"] == 2.2  # 0.9 s .. 3.1 s, each sample once
+
+
+def test_padded_spans_merge_overlaps():
+    ts = [{"start": 1.0, "end": 2.0}, {"start": 2.05, "end": 2.1}, {"start": 2.1, "end": 3.0}]
+    spans = xs._padded_spans(ts, 0.1, 100, 1000)
+    assert all(b > a for a, b in spans)
+    assert all(prev[1] <= nxt[0] for prev, nxt in itertools.pairwise(spans))  # no sample twice
+    assert spans[0][0] == 90 and spans[-1][1] == 310
+    assert sum(b - a for a, b in spans) == 220
+
+
+# ── /clones/import: 8b6eb3b552, 980cfee602 ────────────────────────────────────
+
+
+def _archive(meta=None, meta_raw=None, prompt=None, extra=0) -> bytes:
+    import zipfile
+
+    if prompt is None:
+        prompt = {"gpt_cond_latent": torch.randn(1, 32, 1024), "speaker_embedding": torch.randn(1, 512, 1)}
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("prompt.pt", _saved(prompt))
+        if meta_raw is not None:
+            zf.writestr("meta.json", meta_raw)
+        elif meta is not None:
+            zf.writestr("meta.json", json.dumps(meta))
+        for i in range(extra):
+            zf.writestr(f"junk{i}", b"")
+    return buf.getvalue()
+
+
+class _ImportS3:
+    def __init__(self, existing=()):
+        self.existing = set(existing)
+
+    def head_object(self, Bucket, Key):
+        from botocore.exceptions import ClientError
+
+        if Key not in self.existing:
+            raise ClientError({"Error": {"Code": "404"}}, "HeadObject")
+        return {}
+
+
+@pytest.fixture
+def importer(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    uploads = {}
+    s3 = _ImportS3()
+    monkeypatch.setattr(xs, "_get_s3_client", lambda: s3)
+    monkeypatch.setattr(xs, "_upload_to_s3", lambda data, key, ct="": uploads.__setitem__(key, data))
+    client = TestClient(xs.app, raise_server_exceptions=False)
+
+    def post(archive, **form):
+        return client.post("/clones/import", files={"archive": ("v.zip", archive, "application/zip")}, data=form)
+
+    post.uploads, post.s3 = uploads, s3
+    return post
+
+
+def test_import_refuses_an_oversized_meta_json(importer):
+    # ~1 MiB of zeros compresses to a few KiB: a small archive, a large member.
+    r = importer(_archive(meta_raw=b'{"name": "' + b"0" * (1024 * 1024) + b'"}'))
+    assert r.status_code == 422
+    assert "meta.json" in r.json()["error"]
+    assert importer.uploads == {}
+
+
+def test_import_refuses_an_archive_with_too_many_entries(importer):
+    r = importer(_archive(meta={"companion_id": "abc"}, extra=40))
+    assert r.status_code == 422
+    assert importer.uploads == {}
+
+
+def test_import_refuses_an_oversized_archive(importer, monkeypatch):
+    monkeypatch.setattr(xs, "_MAX_ARCHIVE_BYTES", 1000, raising=False)
+    r = importer(_archive(meta={"companion_id": "abc"}))
+    assert r.status_code == 413
+    assert importer.uploads == {}
+
+
+def test_import_does_not_overwrite_an_existing_clone(importer):
+    importer.s3.existing.add("voice_clones/victim/prompt.pt")
+    r = importer(_archive(meta={"companion_id": "victim", "name": "Victim"}))
+    assert r.status_code == 409
+    assert importer.uploads == {}
+
+
+def test_import_replaces_an_existing_clone_only_when_asked(importer):
+    importer.s3.existing.add("voice_clones/victim/prompt.pt")
+    r = importer(_archive(meta={"companion_id": "victim"}), replace="true")
+    assert r.status_code == 200, r.text
+    assert "voice_clones/victim/prompt.pt" in importer.uploads
+
+
+def test_import_of_a_new_id_still_works(importer):
+    r = importer(_archive(meta={"companion_id": "Fresh Voice", "name": "Fresh"}))
+    assert r.status_code == 200, r.text
+    assert r.json()["companion_id"] == "fresh-voice"
+    assert set(importer.uploads) == {"voice_clones/fresh-voice/prompt.pt", "voice_clones/fresh-voice/meta.json"}

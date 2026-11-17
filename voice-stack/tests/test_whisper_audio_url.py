@@ -198,3 +198,73 @@ def test_endpoint_falls_back_across_resolved_addresses(client, monkeypatch):
     assert r.json()["text"] == "v4"
     assert [req.url.host for req in seen] == ["2606:2800:220:1:248:1893:25c8:1946", "93.184.216.34"]
     assert all(req.headers["host"] == "dual.example" for req in seen)
+
+
+# ── size caps (9add322cd9, 7b250ab272) ───────────────────────────────────────
+
+
+def test_audio_url_over_the_cap_by_content_length_is_413(client, monkeypatch):
+    monkeypatch.setattr(ws, "STT_MAX_AUDIO_BYTES", 1000)
+    _mock_upstream(monkeypatch, lambda r: httpx.Response(200, content=b"x" * 5000))
+    r = client.post("/transcriptions", json={"audio_url": "http://public.example/a.wav"})
+    assert r.status_code == 413
+
+
+def test_audio_url_streamed_past_the_cap_is_413(client, monkeypatch):
+    """No Content-Length: the running byte count stops the download."""
+    monkeypatch.setattr(ws, "STT_MAX_AUDIO_BYTES", 1000)
+    pulled = []
+
+    async def chunks():
+        for _ in range(100):
+            pulled.append(1)
+            yield b"x" * 500
+
+    _mock_upstream(monkeypatch, lambda r: httpx.Response(200, content=chunks()))
+    r = client.post("/transcriptions", json={"audio_url": "http://public.example/a.wav"})
+    assert r.status_code == 413
+    assert len(pulled) < 100  # stopped reading once over the cap
+
+
+def test_audio_url_at_the_cap_is_fetched(client, monkeypatch):
+    monkeypatch.setattr(ws, "STT_MAX_AUDIO_BYTES", 1000, raising=False)
+    _mock_upstream(monkeypatch, lambda r: httpx.Response(200, content=b"y" * 1000))
+    r = client.post("/transcriptions", json={"audio_url": "http://public.example/a.wav"})
+    assert r.status_code == 200, r.text
+    assert r.json()["text"] == "y" * 1000
+
+
+def test_audio_base64_over_the_cap_is_413_before_decoding(client, monkeypatch):
+    import base64
+
+    monkeypatch.setattr(ws, "STT_MAX_AUDIO_BYTES", 1000)
+    decoded = []
+    real = ws.base64.b64decode
+    monkeypatch.setattr(ws.base64, "b64decode", lambda raw: decoded.append(1) or real(raw))
+    body = base64.b64encode(b"z" * 10_000).decode()
+    r = client.post("/transcriptions", json={"audio_base64": "data:audio/wav;base64," + body})
+    assert r.status_code == 413
+    assert decoded == []
+
+
+def test_audio_base64_decoding_past_the_cap_is_413(client, monkeypatch):
+    import base64
+
+    monkeypatch.setattr(ws, "STT_MAX_AUDIO_BYTES", 1000)
+    r = client.post("/transcriptions", json={"audio_base64": base64.b64encode(b"z" * 1001).decode()})
+    assert r.status_code == 413
+
+
+def test_audio_base64_within_the_cap_is_transcribed(client, monkeypatch):
+    import base64
+
+    monkeypatch.setattr(ws, "STT_MAX_AUDIO_BYTES", 1000, raising=False)
+    r = client.post("/transcriptions", json={"audio_base64": base64.b64encode(b"z" * 1000).decode()})
+    assert r.status_code == 200, r.text
+    assert r.json()["text"] == "z" * 1000
+
+
+def test_multipart_upload_over_the_cap_is_413(client, monkeypatch):
+    monkeypatch.setattr(ws, "STT_MAX_AUDIO_BYTES", 1000)
+    r = client.post("/transcribe", files={"audio": ("a.wav", b"x" * 5000, "audio/wav")})
+    assert r.status_code == 413

@@ -171,6 +171,9 @@ class TTSModelManager:
         # The first load runs as its own task so a cancelled caller (client gone,
         # timeout) can't strand the state in LOADING: the task sets GPU/ERROR itself.
         self._load_task: Optional[asyncio.Task] = None
+        # Likewise a GPU<->CPU move: its task sets the new state once the weights
+        # have moved, so a cancelled caller can't leave _state naming the old device.
+        self._move_task: Optional[asyncio.Task] = None
         self._in_use = 0
         self._idle = asyncio.Event()
         self._idle.set()
@@ -268,8 +271,37 @@ class TTSModelManager:
         if task is not None and not task.done():
             await asyncio.shield(task)
 
+    async def _move(self, device: str, state: TTSState) -> None:
+        """Move the weights to ``device`` and only then set ``state``, in a task
+        the caller awaits through asyncio.shield: cancelling the caller leaves
+        the move (and its state update) to finish, so ``_state`` always names
+        where the weights are."""
+
+        async def run() -> None:
+            await asyncio.to_thread(self._move_to_device, device)
+            self._state = state
+            if self._in_use == 0 and not self._lock.locked():
+                # Its caller was cancelled and nobody else holds the lock: arm
+                # the idle timer it would have armed, so the next stage still runs.
+                self._last_used = time.time()
+                self._arm_evict()
+
+        self._move_task = asyncio.create_task(run())
+        self._move_task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        await asyncio.shield(self._move_task)
+
+    async def _await_move(self) -> None:
+        """Let an orphaned move finish (and set its state) before reading the state."""
+        task = self._move_task
+        if task is not None and not task.done():
+            try:
+                await asyncio.shield(task)
+            except Exception:
+                pass
+
     async def _make_ready(self) -> None:
         # Caller holds self._lock.
+        await self._await_move()
         if self._state == TTSState.LOADING:
             await self._await_load()  # raises the load's error, if it failed
 
@@ -287,8 +319,7 @@ class TTSModelManager:
         if self._state == TTSState.CPU:
             if DEVICE.startswith("cuda"):
                 logger.info("tts_promoting_to_gpu", device=DEVICE)
-                await asyncio.to_thread(self._move_to_device, DEVICE)
-                self._state = TTSState.GPU
+                await self._move(DEVICE, TTSState.GPU)
                 logger.info("tts_on_gpu")
             else:
                 self._state = TTSState.GPU  # CPU-only: treat as "ready"
@@ -327,14 +358,14 @@ class TTSModelManager:
                 self._arm_evict()
 
     async def _demote_locked(self) -> None:
+        await self._await_move()
         if self._state != TTSState.GPU:
             return
         if DEVICE == "cpu":
             self._state = TTSState.CPU  # nothing to move; lets the CPU stage run
             return
         logger.info("tts_demoting_to_cpu")
-        await asyncio.to_thread(self._move_to_device, "cpu")
-        self._state = TTSState.CPU
+        await self._move("cpu", TTSState.CPU)
         logger.info("tts_on_cpu")
 
     async def demote_to_cpu(self) -> None:
@@ -375,11 +406,13 @@ class TTSModelManager:
 
     async def _await_load_quietly(self) -> None:
         """Let an in-flight load finish before demoting/unloading, so the worker
-        thread can't assign models after they were freed. Its failure is not ours."""
+        thread can't assign models after they were freed. Its failure is not ours.
+        An orphaned GPU<->CPU move is waited for too."""
         try:
             await self._await_load()
         except Exception:
             pass
+        await self._await_move()
 
     def _arm_evict(self) -> None:
         if self._evict_task and not self._evict_task.done():
@@ -410,6 +443,7 @@ class TTSModelManager:
             if self.keep_alive_cpu > 0:
                 await asyncio.sleep(self.keep_alive_cpu)
             async with self._lock:
+                await self._await_move()
                 if self._state != TTSState.CPU or self._in_use:
                     return
                 self._unload_locked()

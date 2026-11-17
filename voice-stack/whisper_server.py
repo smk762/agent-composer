@@ -22,6 +22,12 @@ Env vars:
   STT_KEEP_ALIVE_GPU  — seconds on GPU before eviction. -1 = forever. Default 120.
   STT_DOWNLOAD_TIMEOUT — seconds allowed for an audio_url download (default 30).
   STT_DECODE_TIMEOUT  — seconds allowed for the ffmpeg decode of one upload (default 120).
+  STT_MAX_AUDIO_BYTES — largest audio accepted (upload, decoded audio_base64 or
+                        audio_url download); larger is a 413. Default 100 MiB.
+  STT_INPUT_FORMATS   — ffmpeg demuxers an upload may be decoded with (comma
+                        list; default plain audio containers, no playlists).
+  ARGUS_ADMIN_TOKEN   — Bearer token the /admin/* routes require. Unset, they
+                        answer 503 unless ARGUS_ADMIN_INSECURE=1 (dev only).
   STT_AUDIO_URL_ALLOWED_HOSTS — comma-separated `host` or `host:port` entries
                         that /transcriptions may fetch even though they resolve
                         to a private/loopback address (e.g. `minio:9000` or the
@@ -67,6 +73,9 @@ STT_COMPUTE_TYPE = os.getenv("STT_COMPUTE_TYPE", "float16")
 STT_VAD_FILTER = os.getenv("STT_VAD_FILTER", "1") == "1"
 STT_BEAM_SIZE = int(os.getenv("STT_BEAM_SIZE", "5"))
 STT_DOWNLOAD_TIMEOUT = int(os.getenv("STT_DOWNLOAD_TIMEOUT", "30"))
+# Largest audio accepted on any path (multipart upload, audio_base64 after
+# decoding, audio_url download); larger is a 413 before it is all in memory.
+STT_MAX_AUDIO_BYTES = int(os.getenv("STT_MAX_AUDIO_BYTES", str(100 * 1024 * 1024)))
 STT_KEEP_ALIVE_GPU: float = float(os.getenv("STT_KEEP_ALIVE_GPU", "120"))
 
 
@@ -117,34 +126,55 @@ def _unload_model():
 
 
 async def _ensure_model():
-    global _model, _last_used, _evict_task
+    global _model, _last_used
     async with _lock:
         if _model is None:
             _model = await asyncio.to_thread(_load_model)
-        _last_used = time.time()
-        if _evict_task and not _evict_task.done():
-            _evict_task.cancel()
-        if STT_KEEP_ALIVE_GPU >= 0:
-            _evict_task = asyncio.create_task(_eviction_loop())
+        _last_used = time.monotonic()
+        _arm_evict()
     return _model
 
 
+def _arm_evict() -> None:
+    """(Re)start the idle timer. Called when the model is taken and again when the
+    last transcription finishes, so idle time counts from the end of the work."""
+    global _evict_task
+    if _evict_task and not _evict_task.done():
+        _evict_task.cancel()
+    if STT_KEEP_ALIVE_GPU >= 0:
+        _evict_task = asyncio.create_task(_eviction_loop())
+
+
 async def _eviction_loop():
+    """Unload once the model has been idle for STT_KEEP_ALIVE_GPU seconds.
+
+    A real loop on the monotonic clock: a wake-up that comes early (timer
+    resolution) or after a use that didn't restart this task sleeps for the
+    remainder instead of giving up with the model still loaded. While a
+    transcription holds the model it stops; the request's end re-arms it."""
     try:
-        if STT_KEEP_ALIVE_GPU == 0:
+        while True:
             async with _lock:
-                _unload_model()
-            return
-        await asyncio.sleep(STT_KEEP_ALIVE_GPU)
-        async with _lock:
-            if time.time() - _last_used >= STT_KEEP_ALIVE_GPU:
-                _unload_model()
+                if _model is None or _active:
+                    return
+                remaining = STT_KEEP_ALIVE_GPU - (time.monotonic() - _last_used)
+                if remaining <= 0:
+                    _unload_model()
+                    return
+            await asyncio.sleep(remaining)
     except asyncio.CancelledError:
         pass
 
 
 SAMPLE_RATE = 16000  # what faster-whisper expects for an ndarray input
 STT_DECODE_TIMEOUT = float(os.getenv("STT_DECODE_TIMEOUT", "120"))
+# Demuxers ffmpeg may pick for an upload (it probes the content, whatever the
+# suffix). Plain audio/AV containers only: a playlist or concat demuxer (hls,
+# concat, ...) would open other files named inside the upload. Names match
+# ffmpeg's demuxer list; "mp4" covers mov/m4a and "webm" covers matroska.
+STT_INPUT_FORMATS = os.getenv(
+    "STT_INPUT_FORMATS", "wav,w64,mp3,ogg,flac,webm,matroska,mp4,m4a,aac,aiff,caf,amr,au"
+).replace(" ", "")
 HEALTH_DECODE_TTL_S = 60.0
 
 
@@ -153,12 +183,15 @@ class AudioDecodeError(Exception):
 
 
 def _decode_audio(path: str) -> np.ndarray:
-    """Decode any ffmpeg-readable file to 16 kHz mono float32.
+    """Decode an audio file (a demuxer in STT_INPUT_FORMATS) to 16 kHz mono float32.
 
     Done with the ffmpeg CLI instead of faster-whisper's PyAV-based
     ``decode_audio``, so a PyAV API change can't break every upload (#42)."""
     cmd = [
         "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-threads", "0",
+        # The upload is untrusted: open only local files, and only through an
+        # audio demuxer, so nothing in it can make ffmpeg open another resource.
+        "-protocol_whitelist", "file,pipe", "-format_whitelist", STT_INPUT_FORMATS,
         "-i", path, "-f", "s16le", "-ac", "1", "-ar", str(SAMPLE_RATE), "-",
     ]
     try:
@@ -289,7 +322,9 @@ async def _run_transcription(tmp_path: str, language: str | None, endpoint: str)
         )
     finally:
         _active -= 1
-        _last_used = time.time()  # idle time counts from the end of the work
+        _last_used = time.monotonic()  # idle time counts from the end of the work
+        if not _active:
+            _arm_evict()
 
     elapsed_ms = int((time.monotonic() - t0) * 1000)
     logger.info(
@@ -383,17 +418,39 @@ async def _vet_audio_url(url: str, allowed: Optional[frozenset[str]] = None) -> 
     return pinned, {"Host": host_header}, extensions
 
 
+_AUDIO_TOO_LARGE = f"audio is larger than {STT_MAX_AUDIO_BYTES} bytes"
+
+
+async def _read_capped(resp: httpx.Response) -> bytes:
+    """The body of a streamed response, refused (413) once it passes
+    STT_MAX_AUDIO_BYTES, by its Content-Length or by what actually arrives."""
+    try:
+        declared = int(resp.headers.get("content-length", ""))
+    except ValueError:
+        declared = None
+    if declared is not None and declared > STT_MAX_AUDIO_BYTES:
+        raise AudioURLError(413, _AUDIO_TOO_LARGE)
+    buf = bytearray()
+    async for chunk in resp.aiter_bytes():
+        buf += chunk
+        if len(buf) > STT_MAX_AUDIO_BYTES:
+            raise AudioURLError(413, _AUDIO_TOO_LARGE)
+    return bytes(buf)
+
+
 async def _fetch_audio_url(url: str) -> bytes:
     fetch_urls, headers, extensions = await _vet_audio_url(url)
-    resp = None
     try:
         async with httpx.AsyncClient(
             timeout=STT_DOWNLOAD_TIMEOUT, follow_redirects=False, trust_env=False
         ) as client:
             for i, fetch_url in enumerate(fetch_urls):
                 try:
-                    resp = await client.get(fetch_url, headers=headers, extensions=extensions)
-                    break
+                    async with client.stream("GET", fetch_url, headers=headers, extensions=extensions) as resp:
+                        if resp.status_code != 200:
+                            logger.warning("stt_audio_url_fetch_failed", status=resp.status_code)
+                            raise AudioURLError(502, _AUDIO_URL_FAILED)
+                        return await _read_capped(resp)
                 except (httpx.ConnectError, httpx.ConnectTimeout):
                     # This address is unreachable (e.g. IPv6 in an IPv4-only network): try the next.
                     if i == len(fetch_urls) - 1:
@@ -401,10 +458,8 @@ async def _fetch_audio_url(url: str) -> bytes:
     except httpx.HTTPError as exc:
         logger.warning("stt_audio_url_fetch_failed", error_type=type(exc).__name__)
         raise AudioURLError(502, _AUDIO_URL_FAILED)
-    if resp is None or resp.status_code != 200:
-        logger.warning("stt_audio_url_fetch_failed", status=getattr(resp, "status_code", None))
-        raise AudioURLError(502, _AUDIO_URL_FAILED)
-    return resp.content
+    logger.warning("stt_audio_url_fetch_failed", status=None)
+    raise AudioURLError(502, _AUDIO_URL_FAILED)
 
 
 # ── App ───────────────────────────────────────────────────────────────────────
@@ -419,12 +474,21 @@ async def transcribe(
     audio: UploadFile = File(...),
     language: str | None = Query(default=None, description="ISO 639-1 language hint"),
 ):
-    audio_bytes = await audio.read()
+    if audio.size is not None and audio.size > STT_MAX_AUDIO_BYTES:
+        raise HTTPException(413, detail=_AUDIO_TOO_LARGE)
     suffix = os.path.splitext(audio.filename or "audio.webm")[1] or ".webm"
 
+    # Copied to disk in chunks, so a large upload is refused without being held in memory.
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-        f.write(audio_bytes)
         tmp_path = f.name
+        total = 0
+        while chunk := await audio.read(1024 * 1024):
+            total += len(chunk)
+            if total > STT_MAX_AUDIO_BYTES:
+                f.close()
+                os.unlink(tmp_path)
+                raise HTTPException(413, detail=_AUDIO_TOO_LARGE)
+            f.write(chunk)
 
     try:
         result = await _run_transcription(tmp_path, language, "/transcribe")
@@ -475,10 +539,15 @@ async def transcriptions(req: TranscriptionRequest):
         raw = req.audio_base64
         if "," in raw:
             raw = raw.split(",", 1)[1]
+        # 4 base64 chars per 3 bytes: refuse before decoding, then check the result.
+        if len(raw) > (STT_MAX_AUDIO_BYTES + 2) // 3 * 4 + 1024:
+            raise HTTPException(413, detail=_AUDIO_TOO_LARGE)
         try:
             audio_bytes = base64.b64decode(raw)
         except Exception as exc:
             raise HTTPException(400, detail=f"Invalid base64: {exc}")
+        if len(audio_bytes) > STT_MAX_AUDIO_BYTES:
+            raise HTTPException(413, detail=_AUDIO_TOO_LARGE)
 
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
         f.write(audio_bytes)
@@ -530,14 +599,30 @@ async def health():
 
 # ── Resident contract (argus-iris argus-http adapter) ─────────────────────────
 # /health carries a ``gpu`` block, POST /admin/unload frees the model, and
-# /admin/wake preloads it. Set ARGUS_ADMIN_TOKEN to require
-# ``Authorization: Bearer <token>`` on the admin routes (open when unset).
+# /admin/wake preloads it. The admin routes need ``Authorization: Bearer <ARGUS_ADMIN_TOKEN>``.
+# They fail closed: with the token unset they answer 503, unless
+# ARGUS_ADMIN_INSECURE=1 explicitly opens them (local dev only). Same rule as tts_server.
 
 
 def _require_admin(authorization: Optional[str] = Header(default=None)) -> None:
-    token = os.environ.get("ARGUS_ADMIN_TOKEN", "")
-    if token and not hmac.compare_digest((authorization or "").encode(), f"Bearer {token}".encode()):
+    token = os.environ.get("ARGUS_ADMIN_TOKEN", "").strip()
+    if not token:
+        if os.environ.get("ARGUS_ADMIN_INSECURE", "").strip().lower() in ("1", "true", "yes"):
+            return
+        logger.warning("admin_refused_no_token", hint="set ARGUS_ADMIN_TOKEN, or ARGUS_ADMIN_INSECURE=1 for dev")
+        raise HTTPException(503, detail="admin token not configured (set ARGUS_ADMIN_TOKEN)")
+    if not hmac.compare_digest((authorization or "").encode(), f"Bearer {token}".encode()):
         raise HTTPException(401, detail="admin token required")
+
+
+if not os.environ.get("ARGUS_ADMIN_TOKEN", "").strip():
+    logger.warning(
+        "admin_token_unset",
+        admin_routes="open (ARGUS_ADMIN_INSECURE)"
+        if os.environ.get("ARGUS_ADMIN_INSECURE", "").strip().lower() in ("1", "true", "yes")
+        else "refused with 503",
+        hint="set ARGUS_ADMIN_TOKEN to the suite's shared value",
+    )
 
 
 def _free_vram_mb() -> Optional[int]:
@@ -557,7 +642,7 @@ def _resident_gpu() -> dict:
     return {
         "loaded": loaded,
         "model_state": "gpu" if loaded else "unloaded",
-        "idle_s": round(time.time() - _last_used, 1) if _last_used and not _active else None,
+        "idle_s": round(time.monotonic() - _last_used, 1) if _last_used and not _active else None,
         "free_vram_mb": _free_vram_mb(),
     }
 

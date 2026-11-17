@@ -47,6 +47,48 @@ def test_decode_garbage_raises_decode_error(tmp_path):
         ws._decode_audio(str(p))
 
 
+def _tone_mp3(path):
+    import subprocess
+
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "sine=d=1", "-y", str(path)],
+        check=True,
+    )
+
+
+@needs_ffmpeg
+def test_decode_refuses_an_hls_playlist_naming_another_file(tmp_path):
+    """df4b5f8af2: an upload that is a playlist must not make ffmpeg open the files it names."""
+    secret = tmp_path / "secret.mp3"
+    _tone_mp3(secret)
+    p = tmp_path / "upload.m3u8"
+    p.write_text(f"#EXTM3U\n#EXT-X-TARGETDURATION:10\n#EXTINF:1,\n{secret}\n#EXT-X-ENDLIST\n")
+    with pytest.raises(ws.AudioDecodeError):
+        ws._decode_audio(str(p))
+
+
+@needs_ffmpeg
+def test_decode_refuses_a_concat_list_naming_another_file(tmp_path):
+    _tone_wav(tmp_path / "secret.wav")
+    p = tmp_path / "upload.wav"
+    p.write_text("ffconcat version 1.0\nfile 'secret.wav'\n")
+    with pytest.raises(ws.AudioDecodeError):
+        ws._decode_audio(str(p))
+
+
+@needs_ffmpeg
+@pytest.mark.parametrize("ext", ["mp3", "ogg", "webm", "m4a", "flac", "aac", "wav"])
+def test_decode_still_reads_common_audio_formats(tmp_path, ext):
+    import subprocess
+
+    p = tmp_path / f"tone.{ext}"
+    subprocess.run(
+        ["ffmpeg", "-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "sine=d=1", "-y", str(p)],
+        check=True,
+    )
+    assert abs(len(ws._decode_audio(str(p))) - 16000) < 1600
+
+
 def test_transcribe_passes_decoded_samples_not_path(tmp_path, monkeypatch):
     samples = np.zeros(16000, dtype=np.float32)
     monkeypatch.setattr(ws, "_decode_audio", lambda path: samples)

@@ -264,6 +264,83 @@ class EvictCpuStageTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(mgr._evict_task)
 
 
+def _blocking_move(mgr: TTSModelManager):
+    """Replace ``mgr._move_to_device`` with one that blocks its worker thread until released."""
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+    real = mgr._move_to_device
+
+    def move(device):
+        started.set()
+        release.wait(5)
+        real(device)
+
+    mgr._move_to_device = move
+    return started, release
+
+
+@mock.patch.object(tts_server, "DEVICE", "cuda:0")
+class MoveCancelTests(unittest.IsolatedAsyncioTestCase):
+    """202b6e1e0f: a caller cancelled mid-move must not leave _state naming the old device."""
+
+    async def test_cancelled_demote_still_lands_on_cpu(self):
+        mgr = _manager(gpu=-1, cpu=-1)
+        started, release = _blocking_move(mgr)
+        t = asyncio.create_task(mgr.demote_to_cpu())
+        await _until(started.is_set)
+        t.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await t
+        release.set()
+        await _until(lambda: str(mgr.base_model.model.device) == "cpu")
+        await _until(lambda: mgr.state == TTSState.CPU)
+
+    async def test_cancelled_promote_still_lands_on_gpu(self):
+        mgr = _manager(gpu=-1, cpu=-1)
+        mgr._move_to_device("cpu")
+        mgr._state = TTSState.CPU
+        started, release = _blocking_move(mgr)
+
+        async def gen():
+            async with mgr.use():
+                pass
+
+        t = asyncio.create_task(gen())
+        await _until(started.is_set)
+        t.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await t
+        release.set()
+        await _until(lambda: str(mgr.base_model.model.device) == "cuda:0")
+        await _until(lambda: mgr.state == TTSState.GPU)
+
+    async def test_request_after_cancelled_demote_promotes_again(self):
+        mgr = _manager(gpu=-1, cpu=-1)
+        started, release = _blocking_move(mgr)
+        t = asyncio.create_task(mgr.demote_to_cpu())
+        await _until(started.is_set)
+        t.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await t
+        release.set()
+        await _until(lambda: str(mgr.base_model.model.device) == "cpu")
+        async with mgr.use():
+            self.assertEqual(mgr.state, TTSState.GPU)
+            self.assertEqual(str(mgr.base_model.model.device), "cuda:0")
+
+    async def test_cancelled_demote_still_runs_the_cpu_stage(self):
+        mgr = _manager(gpu=-1, cpu=0.05)
+        started, release = _blocking_move(mgr)
+        t = asyncio.create_task(mgr.demote_to_cpu())
+        await _until(started.is_set)
+        t.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await t
+        release.set()
+        await _until(lambda: mgr.state == TTSState.UNLOADED)
+
+
 class CloneVoiceTests(unittest.TestCase):
     def setUp(self):
         from fastapi.testclient import TestClient

@@ -53,6 +53,7 @@ import io
 import json
 import math
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -106,6 +107,10 @@ GPT_COND_CHUNK_LEN: int = int(os.getenv("XTTS_GPT_COND_CHUNK_LEN", "4"))
 MAX_REF_LEN: int = int(os.getenv("XTTS_MAX_REF_LEN", "30"))
 # Score (0–100) below which a clip is excluded from the default selection.
 ANALYZE_SCORE_THRESHOLD: float = float(os.getenv("XTTS_ANALYZE_THRESHOLD", "60"))
+# Upload bounds for /clone-voice and /analyze-clips (413 past either), the same
+# defaults as rag-chat's VOICE_MAX_CLIPS / VOICE_CLIP_MAX_BYTES.
+MAX_CLIPS: int = int(os.getenv("XTTS_MAX_CLIPS", "16"))
+CLIP_MAX_BYTES: int = int(os.getenv("XTTS_CLIP_MAX_BYTES", str(16 * 1024 * 1024)))
 
 S3_ENDPOINT_URL = os.getenv("S3_ENDPOINT_URL", "http://localhost:9000")
 S3_ACCESS_KEY_ID = os.getenv("S3_ACCESS_KEY_ID", "minioadmin")
@@ -158,6 +163,10 @@ class XTTSModelManager:
         self._active = 0  # leases held by in-flight work (see lease())
         self._lock = asyncio.Lock()
         self._evict_task: Optional[asyncio.Task] = None
+        # A load or GPU<->CPU move runs as its own task that sets the resulting
+        # state itself, awaited through asyncio.shield: a cancelled caller (client
+        # gone, timeout) can't strand the state in LOADING or naming the old device.
+        self._transition: Optional[asyncio.Task] = None
 
     @property
     def state(self) -> TTSState:
@@ -217,31 +226,68 @@ class XTTSModelManager:
         else:
             self._model.to(torch.device(device))
 
+    async def _do_load(self) -> None:
+        try:
+            await asyncio.to_thread(self._load_to_cpu)
+        except BaseException as exc:
+            self._state = TTSState.ERROR
+            self._error = str(exc) or type(exc).__name__
+            logger.error("xtts_load_failed", error=self._error)
+            raise
+        self._state = TTSState.CPU
+        self._error = None
+
+    async def _do_move(self, device: str, state: TTSState) -> None:
+        await asyncio.to_thread(self._move_to_device, device)
+        self._state = state
+
+    async def _run_transition(self, coro) -> None:
+        """Run a load/move as a task and await it shielded. Cancelling the caller
+        leaves it to finish and set the state; with nobody left holding the lock
+        or a lease, it arms the idle timer so the weights don't stay resident."""
+
+        async def run() -> None:
+            await coro
+            if self._active == 0 and not self._lock.locked():
+                self._last_used = time.time()
+                self._arm_evict()
+
+        task = asyncio.create_task(run())
+        task.add_done_callback(lambda t: t.cancelled() or t.exception())
+        self._transition = task
+        await asyncio.shield(task)
+
+    async def _await_transition(self) -> None:
+        """Let an orphaned load/move finish before the state is read or the model
+        freed. Its failure is not ours: the state it left (ERROR) says so."""
+        task = self._transition
+        if task is not None and not task.done():
+            try:
+                await asyncio.shield(task)
+            except Exception:
+                pass
+
     async def _ensure_gpu_locked(self) -> None:
-        """Promote to GPU (loading first if needed). Caller holds ``_lock``."""
-        if self._state == TTSState.GPU:
+        """Promote to GPU (loading first if needed). Caller holds ``_lock``.
+        Raises unless the model is then resident, so a lease never gets None."""
+        await self._await_transition()
+        if self._state == TTSState.GPU and self._model is not None:
             return
 
         if self._state in (TTSState.UNLOADED, TTSState.ERROR):
             self._state = TTSState.LOADING
-            try:
-                await asyncio.to_thread(self._load_to_cpu)
-                self._state = TTSState.CPU
-                self._error = None
-            except Exception as exc:
-                self._state = TTSState.ERROR
-                self._error = str(exc)
-                logger.error("xtts_load_failed", error=str(exc))
-                raise
+            await self._run_transition(self._do_load())
 
         if self._state == TTSState.CPU:
             if DEVICE.startswith("cuda"):
                 logger.info("xtts_promoting_to_gpu", device=DEVICE)
-                await asyncio.to_thread(self._move_to_device, DEVICE)
-                self._state = TTSState.GPU
+                await self._run_transition(self._do_move(DEVICE, TTSState.GPU))
                 logger.info("xtts_on_gpu")
             else:
                 self._state = TTSState.GPU  # CPU-only: treat as ready
+
+        if self._state != TTSState.GPU or self._model is None:
+            raise RuntimeError(f"xtts model not ready (state {self._state.value})")
 
     async def ensure_gpu(self) -> None:
         """Guarantee the model is on GPU and reset the idle timer.
@@ -289,13 +335,13 @@ class XTTSModelManager:
             if self._active > 0:
                 logger.info("xtts_demote_deferred", active=self._active)
                 return False
+            await self._await_transition()
             if self._state != TTSState.GPU:
                 return False
             if DEVICE == "cpu":
                 return False
             logger.info("xtts_demoting_to_cpu")
-            await asyncio.to_thread(self._move_to_device, "cpu")
-            self._state = TTSState.CPU
+            await self._run_transition(self._do_move("cpu", TTSState.CPU))
             logger.info("xtts_on_cpu")
             return True
 
@@ -316,6 +362,8 @@ class XTTSModelManager:
             if self._active > 0 and not force:
                 logger.info("xtts_unload_deferred", active=self._active)
                 return False
+            # An orphaned load's thread would otherwise assign the model after this frees it.
+            await self._await_transition()
             self._cancel_evict()
             if self._model is not None:
                 del self._model
@@ -411,6 +459,19 @@ def _upload_to_s3(data: bytes, key: str, content_type: str = "audio/wav") -> str
     client = _get_s3_client()
     client.put_object(Bucket=S3_BUCKET_NAME, Key=key, Body=data, ContentType=content_type)
     return f"{S3_PUBLIC_URL}/{key}"
+
+
+def _s3_object_exists(key: str) -> bool:
+    from botocore.exceptions import ClientError
+
+    try:
+        _get_s3_client().head_object(Bucket=S3_BUCKET_NAME, Key=key)
+    except ClientError as exc:
+        code = str(exc.response.get("Error", {}).get("Code", ""))
+        if code in ("404", "NoSuchKey", "NotFound"):
+            return False
+        raise
+    return True
 
 
 def _device_tensor(value, device):
@@ -815,6 +876,21 @@ async def synthesise_stream(req: SynthesiseRequest):
 # ── Reference-clip preprocessing ──────────────────────────────────────────────
 
 
+def _padded_spans(ts: list[dict], pad: float, sr: int, total_len: int) -> list[tuple[int, int]]:
+    """Sample ranges of the VAD speech timestamps (seconds), each widened by
+    ``pad`` on both sides. Padded ranges that would overlap are clamped to
+    start where the previous one ended, so no sample is emitted twice."""
+    spans: list[tuple[int, int]] = []
+    last_b = 0
+    for t in ts:
+        a = max(0, int((t["start"] - pad) * sr), last_b)
+        b = min(total_len, int((t["end"] + pad) * sr))
+        if b > a:
+            spans.append((a, b))
+            last_b = b
+    return spans
+
+
 def _preprocess_clip(in_path: str) -> tuple[str, dict]:
     """Standardise a reference clip for cloning and report what changed.
 
@@ -872,11 +948,9 @@ def _preprocess_clip(in_path: str) -> tuple[str, dict]:
                 min_gap = int(0.05 * sr)
                 speech_segs, noise_segs = [], []
                 prev_end = 0
+                for a, b in _padded_spans(ts, pad, sr, total_len):
+                    speech_segs.append(samples[a:b])
                 for t in ts:
-                    a = max(0, int((t["start"] - pad) * sr))
-                    b = min(total_len, int((t["end"] + pad) * sr))
-                    if b > a:
-                        speech_segs.append(samples[a:b])
                     g0, g1 = prev_end + inset, int(t["start"] * sr) - inset
                     if g1 - g0 > min_gap:
                         noise_segs.append(samples[g0:g1])
@@ -1017,6 +1091,9 @@ def _quick_clip_metrics(path: str) -> dict:
 
         ts = get_speech_timestamps(s16, _get_vad_model(), sampling_rate=16000, return_seconds=True)
         if not ts:
+            # VAD ran and found no speech: none of the clip is usable. (The
+            # raw_seconds fallback above stands only when VAD fails to run.)
+            m["speech_seconds"] = 0.0
             m["flags"].append("vad_no_speech")
             return m
 
@@ -1102,8 +1179,38 @@ def _analyze_clips(raw_paths: list[str], names: list[str]) -> dict:
             if (emb is not None and centroid is not None) else None
         )
 
-    # Score each clip (0–100) and build flags.
+    _score_clips(items)
+
+    # Optimal sequence: best anchor first (drives the GPT conditioning window).
+    # Unreadable clips (anchor -1) sort last.
+    order = sorted(range(len(items)), key=lambda i: items[i]["_anchor"], reverse=True)
+    for rank, idx in enumerate(order):
+        items[idx]["rank"] = rank
     for item in items:
+        item.pop("_anchor", None)
+
+    return {
+        "clips": items,
+        "order": order,
+        "threshold": ANALYZE_SCORE_THRESHOLD,
+        "gpt_cond_len": GPT_COND_LEN,
+    }
+
+
+def _score_clips(items: list[dict]) -> None:
+    """Score each clip (0–100), set ``recommended``, flags and the ``_anchor`` sort key.
+
+    A clip that couldn't be read scores 0, is never recommended and sorts last.
+    A clip whose speaker embedding failed has no consistency evidence, so it
+    gets none (0) rather than a neutral half."""
+    for item in items:
+        if any(f.startswith("unreadable") for f in item["flags"]):
+            item["consistency"] = None
+            item["score"] = 0
+            item["_anchor"] = -1.0
+            item["recommended"] = False
+            item["flags"] = sorted(set(item["flags"]))
+            continue
         snr = item.get("snr_db")
         q_snr = _clamp01((snr - 10.0) / 25.0) if snr is not None else 0.7
         speech = item.get("speech_seconds") or 0.0
@@ -1112,7 +1219,7 @@ def _analyze_clips(raw_paths: list[str], names: list[str]) -> dict:
         quality = 0.4 * q_snr + 0.35 * q_dur + 0.25 * q_clip
 
         cons = item.get("consistency")
-        cons_norm = _clamp01((cons - 0.5) / 0.45) if cons is not None else 0.5
+        cons_norm = _clamp01((cons - 0.5) / 0.45) if cons is not None else 0.0
 
         score = round((0.65 * quality + 0.35 * cons_norm) * 100)
         item["score"] = score
@@ -1129,19 +1236,28 @@ def _analyze_clips(raw_paths: list[str], names: list[str]) -> dict:
         item["recommended"] = score >= ANALYZE_SCORE_THRESHOLD
         item["flags"] = sorted(set(item["flags"]))
 
-    # Optimal sequence: best anchor first (drives the GPT conditioning window).
-    order = sorted(range(len(items)), key=lambda i: items[i]["_anchor"], reverse=True)
-    for rank, idx in enumerate(order):
-        items[idx]["rank"] = rank
-    for item in items:
-        item.pop("_anchor", None)
 
-    return {
-        "clips": items,
-        "order": order,
-        "threshold": ANALYZE_SCORE_THRESHOLD,
-        "gpt_cond_len": GPT_COND_LEN,
-    }
+class _ClipTooLarge(Exception):
+    pass
+
+
+async def _save_clips(clips: list[UploadFile], raw_paths: list[str]) -> None:
+    """Copy each upload to a temp file in 1 MiB chunks, refusing one past
+    CLIP_MAX_BYTES before it is all read. Paths are appended to ``raw_paths``
+    as they are created, so the caller's cleanup also covers a refused clip."""
+    for i, clip in enumerate(clips):
+        label = clip.filename or f"clip {i + 1}"
+        if clip.size is not None and clip.size > CLIP_MAX_BYTES:
+            raise _ClipTooLarge(f"{label} is larger than {CLIP_MAX_BYTES} bytes")
+        suffix = os.path.splitext(clip.filename or "")[1] or ".wav"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+            raw_paths.append(f.name)
+            total = 0
+            while chunk := await clip.read(1024 * 1024):
+                total += len(chunk)
+                if total > CLIP_MAX_BYTES:
+                    raise _ClipTooLarge(f"{label} is larger than {CLIP_MAX_BYTES} bytes")
+                f.write(chunk)
 
 
 @app.post("/analyze-clips")
@@ -1153,17 +1269,17 @@ async def analyze_clips(audio: list[UploadFile] = File(...)):
     clips = audio if isinstance(audio, list) else [audio]
     if not clips:
         return JSONResponse(status_code=422, content={"error": "No clips provided"})
+    if len(clips) > MAX_CLIPS:
+        return JSONResponse(status_code=413, content={"error": f"At most {MAX_CLIPS} clips per request"})
 
     raw_paths: list[str] = []
     names: list[str] = []
     try:
-        for clip in clips:
-            data = await clip.read()
-            suffix = os.path.splitext(clip.filename or "")[1] or ".wav"
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-                f.write(data)
-                raw_paths.append(f.name)
-            names.append(clip.filename or f"clip-{len(names) + 1}")
+        try:
+            await _save_clips(clips, raw_paths)
+        except _ClipTooLarge as exc:
+            return JSONResponse(status_code=413, content={"error": str(exc)})
+        names = [clip.filename or f"clip-{i + 1}" for i, clip in enumerate(clips)]
         async with _mgr.lease():
             result = await asyncio.to_thread(_analyze_clips, raw_paths, names)
     except RuntimeError as exc:
@@ -1182,6 +1298,12 @@ async def analyze_clips(audio: list[UploadFile] = File(...)):
 
 
 # ── POST /clone-voice ─────────────────────────────────────────────────────────
+
+
+# A clone's id is its S3 prefix (voice_clones/<id>/): one plain path segment,
+# the same rule as tts_server and rag-chat's gateway.
+_COMPANION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_COMPANION_ID_ERROR = "companion_id must be 1-64 characters of A-Z, a-z, 0-9, '_' or '-'"
 
 
 @app.post("/clone-voice")
@@ -1205,29 +1327,34 @@ async def clone_voice(
 
     `reference_text` is accepted for API parity with the Qwen sidecar but XTTS
     does not require a transcript to clone.
+
+    ``companion_id`` must match ``^[A-Za-z0-9_-]{1,64}$`` (422 otherwise): it is
+    the clone's S3 prefix. At most XTTS_MAX_CLIPS clips of XTTS_CLIP_MAX_BYTES each (413).
     """
+    if not _COMPANION_ID_RE.fullmatch(companion_id):
+        return JSONResponse(status_code=422, content={"error": _COMPANION_ID_ERROR})
     if _mgr.state == TTSState.LOADING:
         return JSONResponse(status_code=503, content={"error": "Model still loading"})
 
     clips = audio if isinstance(audio, list) else [audio]
     if not clips:
         return JSONResponse(status_code=422, content={"error": "At least one reference clip is required"})
+    if len(clips) > MAX_CLIPS:
+        return JSONResponse(status_code=413, content={"error": f"At most {MAX_CLIPS} clips per request"})
 
     raw_paths: list[str] = []
     latent_paths: list[str] = []  # what we feed to XTTS (preprocessed when enabled)
     reports: list[dict] = []
     try:
+        try:
+            await _save_clips(clips, raw_paths)
+        except _ClipTooLarge as exc:
+            return JSONResponse(status_code=413, content={"error": str(exc)})
         total_duration = 0.0
-        for clip in clips:
-            clip_bytes = await clip.read()
-            suffix = os.path.splitext(clip.filename or "")[1] or ".wav"
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-                f.write(clip_bytes)
-                raw_paths.append(f.name)
-
+        for clip, raw_path in zip(clips, raw_paths):
             if PREPROCESS:
                 try:
-                    proc_path, report = await asyncio.to_thread(_preprocess_clip, raw_paths[-1])
+                    proc_path, report = await asyncio.to_thread(_preprocess_clip, raw_path)
                     report["name"] = clip.filename
                     latent_paths.append(proc_path)
                     reports.append(report)
@@ -1238,8 +1365,8 @@ async def clone_voice(
                     reports.append({"name": clip.filename, "warnings": [f"preprocess_failed:{exc}"], "applied": []})
                     # fall through to use the raw clip
 
-            latent_paths.append(raw_paths[-1])
-            dur = await asyncio.to_thread(_audio_duration, raw_paths[-1])
+            latent_paths.append(raw_path)
+            dur = await asyncio.to_thread(_audio_duration, raw_path)
             total_duration += dur or 0.0
 
         # total_duration stays 0 only when no clip could be probed (e.g. exotic
@@ -1384,6 +1511,8 @@ def _build_clone_zip(companion_id: str) -> bytes:
 @app.get("/clones/{companion_id}/download")
 async def download_clone(companion_id: str):
     """Download a clone's latents + metadata sidecar as a zip."""
+    if not _COMPANION_ID_RE.fullmatch(companion_id):
+        return JSONResponse(status_code=422, content={"error": _COMPANION_ID_ERROR})
     try:
         data = await asyncio.to_thread(_build_clone_zip, companion_id)
     except FileNotFoundError as exc:
@@ -1416,21 +1545,29 @@ def _delete_clone(companion_id: str) -> int:
         raise FileNotFoundError(f"Voice clone not found: {companion_id}")
 
     deleted = 0
-    for i in range(0, len(keys), 1000):  # S3 delete_objects caps at 1000/call
-        batch = keys[i : i + 1000]
-        client.delete_objects(Bucket=S3_BUCKET_NAME, Delete={"Objects": batch})
-        deleted += len(batch)
-
-    with _clone_cache_lock:
-        _clone_cache.pop(f"{prefix}prompt.pt", None)
+    failed: list[str] = []
+    try:
+        for i in range(0, len(keys), 1000):  # S3 delete_objects caps at 1000/call
+            batch = keys[i : i + 1000]
+            # A per-key failure is not an exception: it comes back in "Errors".
+            resp = client.delete_objects(Bucket=S3_BUCKET_NAME, Delete={"Objects": batch}) or {}
+            deleted += len(resp.get("Deleted") or [])
+            failed += [f"{e.get('Key')}: {e.get('Code')}" for e in resp.get("Errors") or []]
+    finally:
+        with _clone_cache_lock:
+            _clone_cache.pop(f"{prefix}prompt.pt", None)
+    if failed:
+        logger.error("clone_delete_partial", companion_id=companion_id, deleted=deleted, failed=failed)
+        raise RuntimeError(f"{len(failed)} of {len(keys)} objects were not deleted ({'; '.join(failed[:5])})")
     return deleted
 
 
 @app.delete("/clones/{companion_id}")
 async def delete_clone(companion_id: str):
-    """Permanently delete a stored voice clone (prompt.pt + meta.json) from S3."""
-    if not companion_id.strip():
-        return JSONResponse(status_code=422, content={"error": "companion_id required"})
+    """Permanently delete a stored voice clone (prompt.pt + meta.json) from S3.
+    A partial delete (some objects refused by S3) is a 500, never ``deleted``."""
+    if not _COMPANION_ID_RE.fullmatch(companion_id):
+        return JSONResponse(status_code=422, content={"error": _COMPANION_ID_ERROR})
     try:
         objects = await asyncio.to_thread(_delete_clone, companion_id)
     except FileNotFoundError as exc:
@@ -1443,23 +1580,49 @@ async def delete_clone(companion_id: str):
 
 
 def _slug_id(value: str) -> str:
+    """A valid companion id (``_COMPANION_ID_RE``) from free text."""
     s = (value or "").strip().lower()
-    out = "".join(ch if ch.isalnum() else "-" for ch in s).strip("-")
+    out = "".join(ch if ch.isascii() and ch.isalnum() else "-" for ch in s).strip("-")
     while "--" in out:
         out = out.replace("--", "-")
-    return out or f"imported-{int(time.time())}"
+    return out[:64].strip("-") or f"imported-{int(time.time())}"
 
 
 _MAX_PROMPT_BYTES = 64 * 1024 * 1024
+_MAX_META_BYTES = 64 * 1024
+_MAX_ARCHIVE_ENTRIES = 16
+# The upload itself: a prompt.pt at its cap plus a little for meta.json and zip overhead.
+_MAX_ARCHIVE_BYTES = _MAX_PROMPT_BYTES + 1024 * 1024
 
 
-def _import_clone(zip_bytes: bytes, companion_override: str, name_override: str) -> dict:
+class CloneExistsError(Exception):
+    """The import's target companion_id already has a clone (and replace was not set)."""
+
+
+def _read_member(z, name: str, limit: int) -> bytes:
+    """Read one archive member, refusing it past ``limit`` bytes by its declared
+    size and by what decompression actually yields (a header can lie)."""
+    if z.getinfo(name).file_size > limit:
+        raise ValueError(f"{name} is unexpectedly large")
+    with z.open(name) as f:
+        data = f.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError(f"{name} is unexpectedly large")
+    return data
+
+
+def _import_clone(zip_bytes: bytes, companion_override: str, name_override: str, replace: bool = False) -> dict:
     """Validate and store a clone archive (prompt.pt [+ meta.json]).
 
     The uploaded ``prompt.pt`` is untrusted, so it's loaded with
     ``weights_only=True`` (tensors only — no arbitrary pickle execution) and
     then re-serialised from the validated tensors, guaranteeing the stored file
-    is clean regardless of what the archive contained.
+    is clean regardless of what the archive contained. Members are read with
+    size caps, so a compressed bomb can't exhaust memory.
+
+    The target id comes from the override, else the archive's metadata, so an
+    existing clone under it is never replaced unless ``replace`` is true
+    (``CloneExistsError`` otherwise).
     """
     import zipfile
 
@@ -1471,24 +1634,34 @@ def _import_clone(zip_bytes: bytes, companion_override: str, name_override: str)
         raise ValueError(f"Not a valid zip archive: {exc}") from exc
 
     names = z.namelist()
+    if len(names) > _MAX_ARCHIVE_ENTRIES:
+        raise ValueError(f"Archive has more than {_MAX_ARCHIVE_ENTRIES} entries")
     prompt_name = next((n for n in names if n.rsplit("/", 1)[-1] == "prompt.pt"), None)
     if not prompt_name:
         raise ValueError("Archive does not contain prompt.pt")
-    if z.getinfo(prompt_name).file_size > _MAX_PROMPT_BYTES:
-        raise ValueError("prompt.pt is unexpectedly large")
 
-    prompt = _load_prompt(z.read(prompt_name))
+    prompt = _load_prompt(_read_member(z, prompt_name, _MAX_PROMPT_BYTES))
 
     src_meta: dict = {}
     meta_name = next((n for n in names if n.rsplit("/", 1)[-1] == "meta.json"), None)
     if meta_name:
+        meta_raw = _read_member(z, meta_name, _MAX_META_BYTES)  # oversized: ValueError → 422
         try:
-            src_meta = json.loads(z.read(meta_name).decode("utf-8"))
+            src_meta = json.loads(meta_raw.decode("utf-8"))
         except (ValueError, json.JSONDecodeError):
             src_meta = {}
+        if not isinstance(src_meta, dict):
+            src_meta = {}
 
-    companion_id = (companion_override or src_meta.get("companion_id") or "").strip()
-    companion_id = _slug_id(companion_id or name_override or src_meta.get("name") or "imported-voice")
+    def _text(value) -> str:
+        return value.strip() if isinstance(value, str) else ""
+
+    companion_id = _text(companion_override) or _text(src_meta.get("companion_id"))
+    companion_id = _slug_id(companion_id or _text(name_override) or _text(src_meta.get("name")) or "imported-voice")
+    if not _COMPANION_ID_RE.fullmatch(companion_id):  # _slug_id guarantees it; belt and braces
+        raise ValueError(_COMPANION_ID_ERROR)
+    if not replace and _s3_object_exists(f"voice_clones/{companion_id}/prompt.pt"):
+        raise CloneExistsError(f"Voice clone {companion_id!r} already exists; send replace=true to overwrite")
 
     buf = io.BytesIO()
     torch.save(prompt, buf)
@@ -1520,11 +1693,21 @@ async def import_clone(
     archive: UploadFile = File(...),
     voice_name: str = Form(""),
     companion_id: str = Form(""),
+    replace: bool = Form(False),
 ):
-    """Import a previously downloaded voice archive (prompt.pt + meta.json zip)."""
-    data = await archive.read()
+    """Import a previously downloaded voice archive (prompt.pt + meta.json zip).
+
+    409 when the target id already has a clone, unless ``replace`` is true; 413
+    for an archive over ``_MAX_ARCHIVE_BYTES``."""
+    if archive.size is not None and archive.size > _MAX_ARCHIVE_BYTES:
+        return JSONResponse(status_code=413, content={"error": f"Archive is larger than {_MAX_ARCHIVE_BYTES} bytes"})
+    data = await archive.read(_MAX_ARCHIVE_BYTES + 1)
+    if len(data) > _MAX_ARCHIVE_BYTES:
+        return JSONResponse(status_code=413, content={"error": f"Archive is larger than {_MAX_ARCHIVE_BYTES} bytes"})
     try:
-        meta = await asyncio.to_thread(_import_clone, data, companion_id, voice_name)
+        meta = await asyncio.to_thread(_import_clone, data, companion_id, voice_name, replace)
+    except CloneExistsError as exc:
+        return JSONResponse(status_code=409, content={"error": str(exc)})
     except ValueError as exc:
         return JSONResponse(status_code=422, content={"error": str(exc)})
     except Exception as exc:
@@ -1576,14 +1759,32 @@ async def health():
 # ── Resident contract (argus-iris argus-http adapter) ─────────────────────────
 # /health carries a ``gpu`` block (loaded, model_state, idle_s, free_vram_mb),
 # POST /admin/evict demotes to CPU, /admin/unload frees the model, /admin/wake
-# preloads it. Set ARGUS_ADMIN_TOKEN to require ``Authorization: Bearer <token>``
-# on the admin routes (open when unset).
+# preloads it. The admin routes need ``Authorization: Bearer <ARGUS_ADMIN_TOKEN>``.
+# They fail closed: with the token unset they answer 503, unless
+# ARGUS_ADMIN_INSECURE=1 explicitly opens them (local dev only). Same rule as tts_server.
+
+
+def _admin_insecure() -> bool:
+    return os.environ.get("ARGUS_ADMIN_INSECURE", "").strip().lower() in ("1", "true", "yes")
 
 
 def _require_admin(authorization: Optional[str] = Header(default=None)) -> None:
-    token = os.environ.get("ARGUS_ADMIN_TOKEN", "")
-    if token and not hmac.compare_digest((authorization or "").encode(), f"Bearer {token}".encode()):
+    token = os.environ.get("ARGUS_ADMIN_TOKEN", "").strip()
+    if not token:
+        if _admin_insecure():
+            return
+        logger.warning("admin_refused_no_token", hint="set ARGUS_ADMIN_TOKEN, or ARGUS_ADMIN_INSECURE=1 for dev")
+        raise HTTPException(503, detail="admin token not configured (set ARGUS_ADMIN_TOKEN)")
+    if not hmac.compare_digest((authorization or "").encode(), f"Bearer {token}".encode()):
         raise HTTPException(401, detail="admin token required")
+
+
+if not os.environ.get("ARGUS_ADMIN_TOKEN", "").strip():
+    logger.warning(
+        "admin_token_unset",
+        admin_routes="open (ARGUS_ADMIN_INSECURE)" if _admin_insecure() else "refused with 503",
+        hint="set ARGUS_ADMIN_TOKEN to the suite's shared value",
+    )
 
 
 def _free_vram_mb() -> Optional[int]:

@@ -10,6 +10,7 @@ services:
       - "8030:8030"
     environment:
       - ARGUS_ADMIN_TOKEN=${ARGUS_ADMIN_TOKEN:-}  # argus-iris: Bearer token for /admin/*
+      - ARGUS_ADMIN_INSECURE=${ARGUS_ADMIN_INSECURE:-}  # 1 = open /admin/* with no token (dev only)
       - STT_MODEL=${STT_MODEL:-large-v3-turbo}
       - STT_DEVICE=${STT_DEVICE:-cuda}
       - STT_COMPUTE_TYPE=${STT_COMPUTE_TYPE:-float16}
@@ -89,6 +90,7 @@ services:
       - "8033:8031"
     environment:
       - ARGUS_ADMIN_TOKEN=${ARGUS_ADMIN_TOKEN:-}  # argus-iris: Bearer token for /admin/*
+      - ARGUS_ADMIN_INSECURE=${ARGUS_ADMIN_INSECURE:-}  # 1 = open /admin/* with no token (dev only)
       - XTTS_MODEL=${XTTS_MODEL:-tts_models/multilingual/multi-dataset/xtts_v2}
       - XTTS_DEVICE=${XTTS_DEVICE:-cuda:0}
       - XTTS_KEEP_ALIVE_GPU=${XTTS_KEEP_ALIVE_GPU:-120}
