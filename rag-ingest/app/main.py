@@ -88,7 +88,8 @@ def _redacted(url: str) -> str:
                 netloc = f"{netloc}:{parts.port}"
             return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
     except Exception:
-        pass
+        # Fail closed: a malformed URL (e.g. a bad port) may still carry a password.
+        return "<redacted redis url>"
     return url
 
 
@@ -394,7 +395,7 @@ def ingest_ui():
 
                 function pkcs7Pad(buf) {
                   const block = 16;
-                  const padLen = block - (buf.length % block || block);
+                  const padLen = block - (buf.length % block);  // 1..16: a full block when aligned
                   const out = new Uint8Array(buf.length + padLen);
                   out.set(buf, 0);
                   out.fill(padLen, buf.length);
@@ -523,6 +524,8 @@ async def _signed_json(request: Request, x_timestamp: str, x_nonce: str, x_signa
         payload_json = json.loads(body.decode("utf-8"))
     except Exception:
         raise HTTPException(400, "Body must be JSON")
+    if not isinstance(payload_json, dict):
+        raise HTTPException(400, "Body must be a JSON object")
 
     # Parse body (either plaintext JSON or encrypted envelope)
     if REQUIRE_ENCRYPTION:
@@ -544,6 +547,8 @@ async def _signed_json(request: Request, x_timestamp: str, x_nonce: str, x_signa
         else:
             data = payload_json
 
+    if not isinstance(data, dict):
+        raise HTTPException(400, "Encrypted envelope must hold a JSON object")
     return data
 
 

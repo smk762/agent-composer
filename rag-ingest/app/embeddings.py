@@ -267,17 +267,22 @@ class InfinityEmbeddingClient(EmbeddingClient):
         body = r.json()
         data = body.get("data", [])
         if not isinstance(data, list) or len(data) != len(prepared):
-            raise RuntimeError(
-                f"Infinity embeddings returned unexpected shape: {len(data)} != {len(prepared)}"
-            )
-        # Infinity returns items in input order with an "index" field; sort defensively.
-        try:
-            data = sorted(data, key=lambda d: int(d.get("index", 0)))
-        except Exception:
-            pass
+            got = len(data) if isinstance(data, list) else type(data).__name__
+            raise RuntimeError(f"Infinity embeddings returned unexpected shape: {got} != {len(prepared)}")
+        # Place each item by its "index": a missing, duplicate or out-of-range
+        # index would pair a chunk with another chunk's vector, so it's an error.
+        by_index: List[Optional[dict]] = [None] * len(prepared)
+        for d in data:
+            try:
+                idx = int(d["index"])
+            except (TypeError, KeyError, ValueError):
+                raise RuntimeError("Infinity embeddings returned an item without a valid index") from None
+            if not 0 <= idx < len(prepared) or by_index[idx] is not None:
+                raise RuntimeError(f"Infinity embeddings returned a duplicate or out-of-range index: {idx}")
+            by_index[idx] = d
 
         vectors: List[List[float]] = []
-        for d in data:
+        for d in by_index:
             emb = d.get("embedding")
             if not isinstance(emb, list) or not emb:
                 raise RuntimeError("Infinity embeddings returned empty embedding")
@@ -319,4 +324,20 @@ async def rerank(query: str, docs: Sequence[str], *, top_k: int) -> List[int]:
     if r.status_code != 200:
         raise RuntimeError(f"Infinity rerank failed: {r.status_code} {r.text}")
     results = r.json().get("results", [])
-    return [int(item["index"]) for item in results]
+    if not isinstance(results, list):
+        raise RuntimeError(f"Infinity rerank returned unexpected shape: {type(results).__name__}")
+    # Don't trust the backend to sort, honour top_n or stay in range.
+    scored = []
+    for item in results:
+        try:
+            idx, score = int(item["index"]), float(item["relevance_score"])
+        except (TypeError, KeyError, ValueError):
+            raise RuntimeError("Infinity rerank returned a malformed result") from None
+        if 0 <= idx < len(docs):
+            scored.append((score, idx))
+    scored.sort(key=lambda s: s[0], reverse=True)
+    out: List[int] = []
+    for _, idx in scored:
+        if idx not in out:
+            out.append(idx)
+    return out[: max(0, top_k)]

@@ -137,7 +137,9 @@ class IngestCollectionTests(unittest.TestCase):
     def test_default_collection_unchanged_without_a_request(self) -> None:
         res = self._ingest()
         self.assertEqual(res["collection"], ip.QDRANT_COLLECTION)
-        self.assertTrue(all(c == ip.QDRANT_COLLECTION for c, _ in FakeQdrant.instances[-1].upserts))
+        q = FakeQdrant.instances[-1]
+        self.assertEqual(q.created, [ip.QDRANT_COLLECTION])
+        self.assertTrue(q.upserts and all(c == ip.QDRANT_COLLECTION for c, _ in q.upserts))
 
     def test_disallowed_collection_is_refused_not_redirected(self) -> None:
         with self.assertRaises(ValueError):

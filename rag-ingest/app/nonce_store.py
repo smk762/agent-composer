@@ -5,6 +5,7 @@ import os
 import random
 import sqlite3
 import time
+from contextlib import closing
 from dataclasses import dataclass
 
 import redis
@@ -44,7 +45,8 @@ class NonceStore:
         return conn
 
     def _init_db(self) -> None:
-        with self._connect() as conn:
+        # ``with conn`` only commits/rolls back; closing() actually releases the connection.
+        with closing(self._connect()) as conn, conn:
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS nonces (
@@ -55,6 +57,8 @@ class NonceStore:
                 """
             )
             conn.execute("CREATE INDEX IF NOT EXISTS idx_nonces_ts ON nonces(ts)")
+            # cleanup() filters on created_at (and ts): index it so eviction isn't a full scan.
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_nonces_created_at ON nonces(created_at)")
 
     def claim_or_reject(self, nonce: str, ts: int) -> None:
         """
@@ -64,7 +68,7 @@ class NonceStore:
         created_at = now
 
         try:
-            with self._connect() as conn:
+            with closing(self._connect()) as conn, conn:
                 conn.execute("BEGIN IMMEDIATE")
                 conn.execute(
                     "INSERT INTO nonces (nonce, ts, created_at) VALUES (?, ?, ?)",
@@ -87,7 +91,7 @@ class NonceStore:
     def cleanup(self, now: int | None = None) -> int:
         now_i = int(time.time()) if now is None else int(now)
         cutoff = now_i - int(self._cfg.nonce_ttl_s)
-        with self._connect() as conn:
+        with closing(self._connect()) as conn, conn:
             # Both clocks must be past the TTL: a future-dated ``ts`` keeps validating
             # until ts + skew, so evicting on created_at alone would reopen the replay.
             cur = conn.execute("DELETE FROM nonces WHERE created_at < ? AND ts < ?", (cutoff, cutoff))

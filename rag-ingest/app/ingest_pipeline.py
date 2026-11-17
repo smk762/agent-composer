@@ -108,6 +108,8 @@ def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVE
         chunk = t[i : i + chunk_size].strip()
         if chunk:
             chunks.append(chunk)
+        if i + chunk_size >= n:
+            break  # this window reached the end: a further one would be a suffix of it
         i += step
     return chunks
 
@@ -142,7 +144,14 @@ class EmbedderMismatchError(RuntimeError):
 
 
 def _point_id(source: Optional[str], doc_id: Optional[str], chunk_index: int, chunk_text: str) -> str:
-    base = f"{source or ''}|{doc_id or ''}|{chunk_index}|{hashlib.sha256(chunk_text.encode('utf-8')).hexdigest()}"
+    digest = hashlib.sha256(chunk_text.encode('utf-8')).hexdigest()
+    if "|" in (source or ""):
+        # "a|b" + "c" and "a" + "b|c" would both read "a|b|c|...": encode the fields instead.
+        # A '|'-free source keeps the original string, so existing point ids don't change.
+        # (The JSON form ends in '"]', never a hex digest, so it can't equal a legacy string.)
+        base = json.dumps([source, doc_id or "", chunk_index, digest])
+    else:
+        base = f"{source or ''}|{doc_id or ''}|{chunk_index}|{digest}"
     return str(uuid.uuid5(uuid.NAMESPACE_URL, base))
 
 

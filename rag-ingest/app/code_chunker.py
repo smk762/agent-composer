@@ -11,6 +11,7 @@ silently drop a document.
 from __future__ import annotations
 
 import os
+from bisect import bisect_left
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -193,17 +194,16 @@ def chunk_code(text: str, language: str) -> List[CodeChunk]:
     # (imports, constants, class fields, an oversized body) can be indexed too.
     covered: List[Tuple[int, int]] = []
 
-    def walk(node) -> None:
-        if node.type in splits:
-            if _emit(node, source, language, chunks):
-                covered.append((node.start_byte, node.end_byte))
-                return  # don't recurse into already-emitted nodes
-            # Too big: recurse to find finer-grained splits inside (e.g. the
-            # methods of a giant class). A big node with nothing splittable
-            # inside (a long function) is windowed whole instead of dropped.
-            before = len(chunks)
-            for child in node.children:
-                walk(child)
+    # Iterative depth-first walk: tree-sitter nests long expression chains
+    # (``a + b + c ...``, deeply nested literals) one level per term, deep
+    # enough to blow Python's recursion limit. A ``(node, before)`` entry is
+    # the post-visit of an oversized split node, run once its subtree is done.
+    stack: List[Tuple[object, Optional[int]]] = [(tree.root_node, None)]
+    while stack:
+        node, before = stack.pop()
+        if before is not None:
+            # A big node with nothing splittable inside (a long function) is
+            # windowed whole instead of dropped.
             if len(chunks) == before:
                 chunks.extend(
                     _window_bytes(
@@ -211,11 +211,15 @@ def chunk_code(text: str, language: str) -> List[CodeChunk]:
                     )
                 )
                 covered.append((node.start_byte, node.end_byte))
-            return
-        for child in node.children:
-            walk(child)
-
-    walk(tree.root_node)
+            continue
+        if node.type in splits:
+            if _emit(node, source, language, chunks):
+                covered.append((node.start_byte, node.end_byte))
+                continue  # don't descend into already-emitted nodes
+            # Too big: descend to find finer-grained splits inside (e.g. the
+            # methods of a giant class), then check in the post-visit.
+            stack.append((node, len(chunks)))
+        stack.extend((child, None) for child in reversed(node.children))
 
     if not chunks:
         return _fallback_window(text, language)
@@ -263,6 +267,13 @@ def _fallback_window(text: str, language: str, *, line_offset: int = 0) -> List[
     # A small overlap helps avoid splitting an identifier between chunks.
     overlap = min(200, max(0, CODE_CHUNK_MAX_CHARS // 10))
     step = max(1, CODE_CHUNK_MAX_CHARS - overlap)
+    # Newline offsets, found once: line numbers are then a bisect per window
+    # rather than a rescan from the start of ``text`` (quadratic on big files).
+    newlines: List[int] = []
+    pos = text.find("\n")
+    while pos != -1:
+        newlines.append(pos)
+        pos = text.find("\n", pos + 1)
     i = 0
     while i < n:
         slice_text = text[i : i + CODE_CHUNK_MAX_CHARS]
@@ -280,8 +291,10 @@ def _fallback_window(text: str, language: str, *, line_offset: int = 0) -> List[
                 language=language,
                 node_type="window",
                 symbol=None,
-                start_line=line_offset + text.count("\n", 0, i) + 1,
-                end_line=line_offset + text.count("\n", 0, i + len(slice_text)) + 1,
+                start_line=line_offset + bisect_left(newlines, i) + 1,
+                # Newlines before the window's last char: one it ends on
+                # closes its last line rather than starting another.
+                end_line=line_offset + bisect_left(newlines, i + len(slice_text) - 1) + 1,
             )
         )
         if i + len(slice_text) >= n:

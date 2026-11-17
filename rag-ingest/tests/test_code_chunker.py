@@ -67,8 +67,41 @@ class FallbackWindowTests(unittest.TestCase):
                 mock.patch.object(code_chunker, "CODE_CHUNK_MIN_CHARS", 500):
             chunks = _fallback_window(text, "text")
         self.assertTrue(chunks[-1].text.endswith("0439\n"))
-        self.assertEqual(chunks[-1].end_line, text.count("\n") + 1)
+        self.assertEqual(chunks[-1].end_line, text.count("\n"))  # the 440th line ends on the last \n
         self.assertEqual(_covered(text, chunks), "")
+
+    def test_window_ending_on_a_newline_ends_on_that_line(self) -> None:
+        chunks = _fallback_window("a\nb\n", "text")
+        self.assertEqual([(c.start_line, c.end_line) for c in chunks], [(1, 2)])
+
+    def test_line_numbers_match_a_recount(self) -> None:
+        text = "".join(f"line {i}\n" * (i % 3) + "x" * (i % 7) for i in range(400))
+        with mock.patch.object(code_chunker, "CODE_CHUNK_MAX_CHARS", 300), \
+                mock.patch.object(code_chunker, "CODE_CHUNK_MIN_CHARS", 50):
+            chunks = _fallback_window(text, "text", line_offset=5)
+        self.assertGreater(len(chunks), 5)
+        pos = 0
+        for c in chunks:
+            i = text.index(c.text, max(0, pos - 300))
+            pos = i + len(c.text)
+            self.assertEqual(c.start_line, 5 + text.count("\n", 0, i) + 1)
+            self.assertEqual(c.end_line, 5 + text.count("\n", 0, pos - 1) + 1)
+
+    def test_line_numbers_are_not_rescanned_from_the_start(self) -> None:
+        scanned = [0]
+
+        class CountingStr(str):
+            def count(self, sub, start=0, end=None):  # noqa: A003
+                stop = len(self) if end is None else end
+                scanned[0] += max(0, stop - start)
+                return str.count(self, sub, start, end)
+
+        text = CountingStr("abcdefghi\n" * 20_000)  # 200k chars, ~1100 windows at MAX=200
+        with mock.patch.object(code_chunker, "CODE_CHUNK_MAX_CHARS", 200), \
+                mock.patch.object(code_chunker, "CODE_CHUNK_MIN_CHARS", 20):
+            chunks = _fallback_window(text, "text")
+        self.assertEqual(chunks[-1].end_line, 20_000)
+        self.assertLessEqual(scanned[0], 2 * len(text))  # linear, not O(n^2 / step)
 
     def test_fully_covered_tail_is_not_repeated(self) -> None:
         text = "x" * 2000
@@ -165,6 +198,16 @@ class Greeter:
             chunks = chunk_code(source, "python")
         self.assertIn("m0", {c.symbol for c in chunks})
         self.assertTrue(any("LIMIT = 10" in c.text for c in chunks))
+        self.assertEqual(_covered(source, chunks), "")
+
+    def test_deeply_nested_expression_does_not_hit_the_recursion_limit(self) -> None:
+        import sys
+
+        # ``x = 1 + 1 + ...`` parses as a left-nested chain one node deep per term.
+        depth = sys.getrecursionlimit() * 3
+        source = "def f():\n    return 1\n\nx = " + " + ".join(["1"] * depth) + "\n"
+        chunks = chunk_code(source, "python")
+        self.assertTrue(any(c.symbol == "f" for c in chunks))
         self.assertEqual(_covered(source, chunks), "")
 
 
