@@ -51,7 +51,7 @@ async def serve_media(
     if not asset:
         raise HTTPException(404, "Media asset not found")
 
-    path = media_store.resolve_path(asset.file_path)
+    path = media_store.resolve_path(asset.file_path, user_id=auth.user_id)
     if path is not None:
         return FileResponse(
             path,
@@ -59,7 +59,7 @@ async def serve_media(
             filename=asset.filename,
         )
 
-    blob = await media_store.read_bytes(asset.file_path)
+    blob = await media_store.read_bytes(asset.file_path, user_id=auth.user_id)
     if blob is None:
         raise HTTPException(404, "Media file missing from storage")
     return Response(content=blob, media_type=asset.mime_type)

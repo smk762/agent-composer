@@ -1,5 +1,6 @@
 """Image / video generation endpoints."""
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -67,7 +68,7 @@ async def _store_results(db: AsyncSession, gen: Generation, result, *, user_id: 
     gen_id = gen.id  # read before a rollback expires ``gen``
     saved: list[str] = []
     try:
-        media_store.ensure_dirs()
+        await asyncio.to_thread(media_store.ensure_dirs)  # blocking on MinIO (first call only)
         assets = []
         for gm in result.media:
             rel_path = await media_store.save_bytes(
