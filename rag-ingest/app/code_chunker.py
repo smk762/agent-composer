@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 # Soft caps to keep chunks within the embedder's reasonable input window.
 CODE_CHUNK_MAX_CHARS = int(os.getenv("CODE_CHUNK_MAX_CHARS", "3000"))
@@ -163,7 +163,10 @@ def chunk_code(text: str, language: str) -> List[CodeChunk]:
     * Files with no splittable nodes (or in unsupported languages) fall back to
       a sliding character window.
     * Splittable nodes that exceed ``CODE_CHUNK_MAX_CHARS`` are recursed into so
-      large classes still produce per-method chunks instead of being dropped.
+      large classes still produce per-method chunks; one with nothing
+      splittable inside is windowed whole instead of being dropped.
+    * Code outside every emitted chunk (imports, constants, class fields) is
+      emitted as ``"module"`` windows, so no non-blank part of a file is lost.
     """
     if not text:
         return []
@@ -186,17 +189,28 @@ def chunk_code(text: str, language: str) -> List[CodeChunk]:
     tree = parser.parse(source)
     splits = SPLIT_TYPES[language]
     chunks: List[CodeChunk] = []
+    # Byte ranges [start, end) already inside some chunk, so whatever is left
+    # (imports, constants, class fields, an oversized body) can be indexed too.
+    covered: List[Tuple[int, int]] = []
 
     def walk(node) -> None:
         if node.type in splits:
             if _emit(node, source, language, chunks):
+                covered.append((node.start_byte, node.end_byte))
                 return  # don't recurse into already-emitted nodes
-            # Too big or too small. If too big, recurse to find finer-grained
-            # splits inside (e.g. methods of a giant class). If too small, just
-            # skip — the parent walk will still consider sibling nodes.
-            if (node.end_byte - node.start_byte) > CODE_CHUNK_MAX_CHARS:
-                for child in node.children:
-                    walk(child)
+            # Too big: recurse to find finer-grained splits inside (e.g. the
+            # methods of a giant class). A big node with nothing splittable
+            # inside (a long function) is windowed whole instead of dropped.
+            before = len(chunks)
+            for child in node.children:
+                walk(child)
+            if len(chunks) == before:
+                chunks.extend(
+                    _window_bytes(
+                        source, node.start_byte, node.end_byte, language, node.type, _node_symbol(node, source)
+                    )
+                )
+                covered.append((node.start_byte, node.end_byte))
             return
         for child in node.children:
             walk(child)
@@ -205,10 +219,43 @@ def chunk_code(text: str, language: str) -> List[CodeChunk]:
 
     if not chunks:
         return _fallback_window(text, language)
+
+    # Whatever sits outside every emitted chunk (module-level statements,
+    # imports, class bodies between methods) goes in as "module" windows, so
+    # every non-blank byte of the file lands in some chunk.
+    pos = 0
+    for start, end in sorted(covered):
+        if start > pos:
+            chunks.extend(_window_bytes(source, pos, start, language, "module", None))
+        pos = max(pos, end)
+    if pos < len(source):
+        chunks.extend(_window_bytes(source, pos, len(source), language, "module", None))
+    chunks.sort(key=lambda c: (c.start_line, c.end_line))
     return chunks
 
 
-def _fallback_window(text: str, language: str) -> List[CodeChunk]:
+def _window_bytes(
+    source: bytes, start: int, end: int, language: str, node_type: str, symbol: Optional[str]
+) -> List[CodeChunk]:
+    """Window ``source[start:end]``, with line numbers relative to the whole file.
+
+    Leading/trailing blank lines are trimmed; a blank range yields nothing.
+    """
+    raw = source[start:end]
+    stripped = raw.strip()
+    if not stripped:
+        return []
+    start += raw.index(stripped)
+    end = start + len(stripped)
+    first_line = source.count(b"\n", 0, start)
+    out = _fallback_window(_safe_decode(source, start, end), language, line_offset=first_line)
+    for chunk in out:
+        chunk.node_type = node_type
+        chunk.symbol = symbol
+    return out
+
+
+def _fallback_window(text: str, language: str, *, line_offset: int = 0) -> List[CodeChunk]:
     out: List[CodeChunk] = []
     n = len(text)
     if n == 0:
@@ -219,16 +266,25 @@ def _fallback_window(text: str, language: str) -> List[CodeChunk]:
     i = 0
     while i < n:
         slice_text = text[i : i + CODE_CHUNK_MAX_CHARS]
-        if len(slice_text) >= CODE_CHUNK_MIN_CHARS or i == 0:
-            out.append(
-                CodeChunk(
-                    text=slice_text,
-                    language=language,
-                    node_type="window",
-                    symbol=None,
-                    start_line=text.count("\n", 0, i) + 1,
-                    end_line=text.count("\n", 0, i + len(slice_text)) + 1,
-                )
+        if i > 0 and len(slice_text) < CODE_CHUNK_MIN_CHARS:
+            # A short tail is never dropped: unless the previous window already
+            # reaches the end, pull this last one back so it ends at ``n`` and
+            # is at least MIN chars long.
+            if i - step + CODE_CHUNK_MAX_CHARS >= n:
+                break
+            i = max(0, n - CODE_CHUNK_MIN_CHARS)
+            slice_text = text[i:]
+        out.append(
+            CodeChunk(
+                text=slice_text,
+                language=language,
+                node_type="window",
+                symbol=None,
+                start_line=line_offset + text.count("\n", 0, i) + 1,
+                end_line=line_offset + text.count("\n", 0, i + len(slice_text)) + 1,
             )
+        )
+        if i + len(slice_text) >= n:
+            break
         i += step
     return out
