@@ -17,13 +17,19 @@ _MAX_IMAGE_BYTES = 12 * 1024 * 1024
 # Match cortex's send cap so already-downscaled frames pass through.
 _GUARD_MAX_EDGE = 1536
 _GUARD_MAX_BYTES = 4 * 1024 * 1024
+# Decoded-size budget, checked from the header before any pixels are decoded: a small,
+# highly compressed upload can otherwise claim dimensions that take GBs to decode.
+# 64 MP covers full-size phone and camera photos and stays under Pillow's bomb limit.
+_GUARD_MAX_PIXELS = 64 * 1024 * 1024
 
 
 def prepare_guard_image(data: bytes) -> bytes:
     """Re-encode *data* as an RGB JPEG (or PNG with alpha) Ollama will open."""
     try:
         with Image.open(io.BytesIO(data)) as im:
-            im.load()
+            width, height = im.size
+            if width * height > _GUARD_MAX_PIXELS:
+                raise ValueError(f"image is too large for the guard ({width}x{height} pixels)")
             fmt = (im.format or "").upper()
             if (
                 fmt in {"JPEG", "JPG"}
@@ -32,6 +38,10 @@ def prepare_guard_image(data: bytes) -> bytes:
                 and len(data) <= _GUARD_MAX_BYTES
             ):
                 return data
+            if fmt in {"JPEG", "JPG"}:
+                # Let the JPEG decoder scale down by a power of two (never below the edge cap).
+                im.draft(None, (_GUARD_MAX_EDGE, _GUARD_MAX_EDGE))
+            im.load()
             im.thumbnail((_GUARD_MAX_EDGE, _GUARD_MAX_EDGE))
             out = ImageOps.exif_transpose(im)
             alpha = out.mode in ("RGBA", "LA", "PA") or (out.mode == "P" and "transparency" in out.info)
@@ -50,7 +60,7 @@ def prepare_guard_image(data: bytes) -> bytes:
                     raise ValueError("image could not be shrunk under the guard size limit")
                 edge = max(256, edge * 3 // 4)
                 out.thumbnail((edge, edge))
-    except (OSError, UnidentifiedImageError) as exc:
+    except (OSError, UnidentifiedImageError, Image.DecompressionBombError) as exc:
         raise ValueError(f"image could not be decoded for the guard: {exc}") from exc
 
 
