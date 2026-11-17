@@ -252,6 +252,9 @@ class TTSModelManager:
         try:
             await asyncio.to_thread(self._load, DEVICE)
         except Exception as exc:
+            # A partial load (base loaded, custom_voice OOM'd) must not keep the
+            # first model on the GPU: a retry would load a second copy beside it.
+            self._free_models()
             self._state = TTSState.ERROR
             self._error = str(exc)
             logger.error("tts_load_failed", error=str(exc))
@@ -381,7 +384,7 @@ class TTSModelManager:
             if self._state == TTSState.CPU:
                 self._arm_evict()
 
-    def _unload_locked(self) -> None:
+    def _free_models(self) -> None:
         for attr in ("_base_model", "_custom_model"):
             model = getattr(self, attr)
             if model is not None:
@@ -391,6 +394,9 @@ class TTSModelManager:
         import torch
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    def _unload_locked(self) -> None:
+        self._free_models()
         self._state = TTSState.UNLOADED
         logger.info("tts_fully_unloaded")
 
@@ -525,6 +531,14 @@ def _gpu_memory_info() -> dict | None:
     return None
 
 
+def _server_error(status: int, message: str, event: str, exc: Exception, **log) -> JSONResponse:
+    """Log the exception (and any GPU info) server-side; the client gets only a
+    generic message and an id to quote, never paths or CUDA/model internals."""
+    error_id = uuid.uuid4().hex[:12]
+    logger.error(event, error=str(exc), error_id=error_id, **log)
+    return JSONResponse(status_code=status, content={"error": message, "error_id": error_id})
+
+
 def _get_supported_languages() -> list[str]:
     """Return ISO codes for languages the model supports."""
     return sorted(set(_LANGUAGE_TO_ISO.values()) - {"auto"})
@@ -625,8 +639,15 @@ async def _generate_audio_leased(req: SynthesiseRequest):
                     max_new_tokens=max_new_tokens,
                 )
             elif _mgr.custom_model is not None:
-                available = _mgr.custom_model.get_supported_speakers()
-                fallback_speaker = (req.speaker or "").strip() or DEFAULT_SPEAKER or sorted(available)[0]
+                fallback_speaker = (req.speaker or "").strip() or DEFAULT_SPEAKER
+                if not fallback_speaker:
+                    available = sorted(_mgr.custom_model.get_supported_speakers() or [])
+                    if not available:
+                        return JSONResponse(
+                            status_code=503,
+                            content={"error": "Voice design needs the Base model; the CustomVoice fallback reports no speakers"},
+                        )
+                    fallback_speaker = available[0]
                 logger.info("voice_design_fallback_to_speaker", speaker=fallback_speaker)
                 audio_arrays, sample_rate = await asyncio.to_thread(
                     _mgr.custom_model.generate_custom_voice,
@@ -665,16 +686,13 @@ async def _generate_audio_leased(req: SynthesiseRequest):
     except RuntimeError as exc:
         err_str = str(exc).lower()
         if "out of memory" in err_str or "cuda" in err_str:
-            gpu_info = _gpu_memory_info()
-            logger.error("tts_gpu_oom", error=str(exc), gpu=gpu_info)
-            return JSONResponse(status_code=503, content={"error": "GPU OOM", "detail": str(exc), "gpu": gpu_info})
+            return _server_error(503, "GPU OOM", "tts_gpu_oom", exc, gpu=_gpu_memory_info())
         raise
     except ValueError as exc:
         logger.warning("tts_validation_error", error=str(exc))
         return JSONResponse(status_code=422, content={"error": str(exc)})
     except Exception as exc:
-        logger.error("tts_generation_failed", error=str(exc), exc_info=True)
-        return JSONResponse(status_code=500, content={"error": f"TTS generation failed: {exc}"})
+        return _server_error(500, "TTS generation failed", "tts_generation_failed", exc, exc_info=True)
 
     import numpy as np
 
@@ -854,9 +872,7 @@ async def _clone_voice_leased(audio: UploadFile, reference_text: str, companion_
     except RuntimeError as exc:
         err_str = str(exc).lower()
         if "out of memory" in err_str or "cuda" in err_str:
-            gpu_info = _gpu_memory_info()
-            logger.error("tts_clone_gpu_oom", error=str(exc), gpu=gpu_info)
-            return JSONResponse(status_code=503, content={"error": "GPU OOM", "detail": str(exc), "gpu": gpu_info})
+            return _server_error(503, "GPU OOM", "tts_clone_gpu_oom", exc, gpu=_gpu_memory_info())
         raise
     finally:
         os.unlink(tmp_path)

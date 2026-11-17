@@ -55,6 +55,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from typing import Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -286,6 +287,22 @@ def _gpu_memory_info() -> dict | None:
     return None
 
 
+def _is_gpu_oom(exc: BaseException) -> bool:
+    """Only a real out-of-memory is a (retryable) 503. Other CUDA failures --
+    device-side asserts, illegal memory access, launch failures -- are 500s."""
+    try:
+        import torch
+        if isinstance(exc, torch.cuda.OutOfMemoryError):
+            return True
+    except (ImportError, AttributeError):
+        pass
+    return isinstance(exc, (RuntimeError, MemoryError)) and "out of memory" in str(exc).lower()
+
+
+def _error_response(status: int, error: str, request_id: str) -> JSONResponse:
+    return JSONResponse(status_code=status, content={"error": error, "request_id": request_id})
+
+
 async def _run_transcription(tmp_path: str, language: str | None, endpoint: str) -> dict:
     """Shared transcription runner with GPU error handling."""
     global _active, _last_used
@@ -294,32 +311,22 @@ async def _run_transcription(tmp_path: str, language: str | None, endpoint: str)
     _active += 1
     try:
         result = await asyncio.to_thread(_transcribe_sync, tmp_path, language, model)
-    except RuntimeError as exc:
-        err_str = str(exc).lower()
-        if "out of memory" in err_str or "cuda" in err_str:
-            gpu_info = _gpu_memory_info()
-            logger.error("stt_gpu_oom", error=str(exc), gpu=gpu_info, endpoint=endpoint)
-            return JSONResponse(
-                status_code=503,
-                content={"error": "GPU OOM", "detail": str(exc), "gpu": gpu_info},
-            )
-        logger.error("stt_transcription_failed", error=str(exc), exc_info=True, endpoint=endpoint)
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"Transcription failed: {exc}"},
-        )
-    except AudioDecodeError as exc:
-        logger.warning("stt_decode_failed", error=str(exc), endpoint=endpoint)
-        return JSONResponse(
-            status_code=400,
-            content={"error": f"Could not decode audio: {exc}"},
-        )
     except Exception as exc:
-        logger.error("stt_transcription_failed", error=str(exc), exc_info=True, endpoint=endpoint)
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"Transcription failed: {exc}"},
+        # Exception text (CUDA/ffmpeg messages, temp paths) and GPU state stay in
+        # the server log; the client gets a generic message and a request id.
+        request_id = uuid.uuid4().hex[:12]
+        if isinstance(exc, AudioDecodeError):
+            logger.warning("stt_decode_failed", error=str(exc), endpoint=endpoint, request_id=request_id)
+            return _error_response(400, "Could not decode audio", request_id)
+        if _is_gpu_oom(exc):
+            logger.error(
+                "stt_gpu_oom", error=str(exc), gpu=_gpu_memory_info(), endpoint=endpoint, request_id=request_id
+            )
+            return _error_response(503, "GPU OOM", request_id)
+        logger.error(
+            "stt_transcription_failed", error=str(exc), exc_info=True, endpoint=endpoint, request_id=request_id
         )
+        return _error_response(500, "Transcription failed", request_id)
     finally:
         _active -= 1
         _last_used = time.monotonic()  # idle time counts from the end of the work
@@ -544,8 +551,8 @@ async def transcriptions(req: TranscriptionRequest):
             raise HTTPException(413, detail=_AUDIO_TOO_LARGE)
         try:
             audio_bytes = base64.b64decode(raw)
-        except Exception as exc:
-            raise HTTPException(400, detail=f"Invalid base64: {exc}")
+        except Exception:
+            raise HTTPException(400, detail="Invalid base64")
         if len(audio_bytes) > STT_MAX_AUDIO_BYTES:
             raise HTTPException(413, detail=_AUDIO_TOO_LARGE)
 

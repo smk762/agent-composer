@@ -95,6 +95,8 @@ _CLONE_KEYS: dict[str, str] = {}
 # Built-in studio speaker names, cached once (the list is static; fetching it
 # wakes the XTTS GPU, so we only do it when WYOMING_TTS_LIST_SPEAKERS is set).
 _SPEAKER_CACHE: list[str] = []
+# Serialises the first fill so concurrent callers fetch /speakers once.
+_SPEAKER_LOCK = asyncio.Lock()
 
 
 async def _fetch_clones() -> list[dict]:
@@ -108,28 +110,35 @@ async def _fetch_clones() -> list[dict]:
         _LOGGER.warning("could not fetch clones from %s: %s", XTTS_URL, exc)
         return []
 
+    # Replace the cache (only on a successful fetch) so deleted clones drop out.
+    keys: dict[str, str] = {}
     for clone in clones:
         cid = (clone.get("companion_id") or "").strip()
         key = (clone.get("voice_clone_id") or "").strip()
         if cid and key:
-            _CLONE_KEYS[cid] = key
+            keys[cid] = key
+    _CLONE_KEYS.clear()
+    _CLONE_KEYS.update(keys)
     return clones
 
 
 async def _fetch_speakers() -> list[str]:
     """Enumerate built-in studio speakers (cached). Wakes the XTTS GPU once."""
     if _SPEAKER_CACHE:
-        return _SPEAKER_CACHE
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(f"{XTTS_URL}/speakers")
-            resp.raise_for_status()
-            names = [s.get("name") for s in resp.json().get("speakers", []) if s.get("name")]
-    except Exception as exc:  # noqa: BLE001 — model may still be loading
-        _LOGGER.warning("could not fetch speakers from %s: %s", XTTS_URL, exc)
-        return []
-    _SPEAKER_CACHE.extend(names)
-    return names
+        return list(_SPEAKER_CACHE)
+    async with _SPEAKER_LOCK:
+        if _SPEAKER_CACHE:  # filled while we waited
+            return list(_SPEAKER_CACHE)
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.get(f"{XTTS_URL}/speakers")
+                resp.raise_for_status()
+                names = [s.get("name") for s in resp.json().get("speakers", []) if s.get("name")]
+        except Exception as exc:  # noqa: BLE001 — model may still be loading
+            _LOGGER.warning("could not fetch speakers from %s: %s", XTTS_URL, exc)
+            return []
+        _SPEAKER_CACHE[:] = names
+        return list(names)
 
 
 def _clone_key(companion_id: str) -> str:

@@ -82,6 +82,27 @@ async def _until(cond, timeout: float = 2.0) -> None:
 
 
 @mock.patch.object(tts_server, "DEVICE", "cuda:0")
+class PartialLoadFailureTests(unittest.IsolatedAsyncioTestCase):
+    """8a668dd362: a load that fails after the first model loaded must free it."""
+
+    async def test_failed_second_model_frees_the_first(self):
+        mgr = TTSModelManager()
+        mgr.keep_alive_gpu = mgr.keep_alive_cpu = -1
+
+        def load(device):
+            mgr._base_model = FakeWrapper()
+            raise RuntimeError("CUDA out of memory")
+
+        mgr._load = load
+        with self.assertRaises(RuntimeError):
+            async with mgr.use():
+                pass
+        self.assertEqual(mgr.state, TTSState.ERROR)
+        self.assertIsNone(mgr.base_model)
+        self.assertIsNone(mgr.custom_model)
+
+
+@mock.patch.object(tts_server, "DEVICE", "cuda:0")
 class LoadCancelTests(unittest.IsolatedAsyncioTestCase):
     """A caller cancelled during the first load must not strand the manager in LOADING."""
 
@@ -420,3 +441,41 @@ class CloneVoiceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _FakeCustom:
+    def __init__(self, speakers=(), exc=None):
+        self.speakers = list(speakers)
+        self.exc = exc
+
+    def get_supported_speakers(self):
+        return self.speakers
+
+    def generate_custom_voice(self, **kw):
+        raise self.exc
+
+
+class GenerateErrorTests(unittest.TestCase):
+    def _run(self, req, custom):
+        mgr = TTSModelManager()
+        mgr._custom_model = custom
+        with mock.patch.object(tts_server, "_mgr", mgr), \
+                mock.patch.object(tts_server, "DEFAULT_SPEAKER", ""), \
+                mock.patch.object(tts_server, "_gpu_memory_info", return_value={"total_mb": 1.0}):
+            return asyncio.run(tts_server._generate_audio_leased(req))
+
+    def test_voice_design_fallback_with_no_speakers_is_503(self):
+        # 09c88227e2: no IndexError (and no 500) when the fallback model lists no speakers.
+        r = self._run(tts_server.SynthesiseRequest(text="hi", voice_description="calm"), _FakeCustom())
+        self.assertEqual(r.status_code, 503)
+        self.assertIn(b"no speakers", r.body)
+
+    def test_generation_errors_do_not_leak_exception_text(self):
+        # 2e8dbc523a: exception text and GPU info stay in the logs.
+        for exc, code in ((OSError("/srv/secret/clones/x.pt missing"), 500),
+                          (RuntimeError("CUDA out of memory at /srv/secret driver 555"), 503)):
+            r = self._run(tts_server.SynthesiseRequest(text="hi", speaker="ryan"), _FakeCustom(exc=exc))
+            self.assertEqual(r.status_code, code)
+            self.assertNotIn(b"secret", r.body)
+            self.assertNotIn(b"total_mb", r.body)
+            self.assertIn(b"error_id", r.body)
