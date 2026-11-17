@@ -131,7 +131,10 @@ class Classifier:
         )
 
     async def _supervised(self, text: str, top_k: int, threshold: float) -> ClassifyResponse:
-        num_labels = len(self.labels) or 2
+        # Snapshot the label set once: a concurrent update_labels() replaces self.labels, and
+        # the names must be the ones the head size was chosen for.
+        labels = self.labels
+        num_labels = len(labels) or 2
         loop = asyncio.get_event_loop()
 
         def _run():
@@ -148,7 +151,15 @@ class Classifier:
 
         async with self.manager.use(num_labels=num_labels):
             probs = await loop.run_in_executor(None, _run)
-        named = list(zip(self.labels or [f"class_{i}" for i in range(len(probs))], probs))
+        names = labels or [f"class_{i}" for i in range(len(probs))]
+        if len(names) != len(probs):
+            # The loaded head was sized for another label set; zip would silently truncate or
+            # misname the scores.
+            raise RuntimeError(
+                f"model has {len(probs)} outputs but {len(names)} labels are configured; "
+                "unload the model so it reloads with the current label set"
+            )
+        named = list(zip(names, probs))
         ranked = sorted(named, key=lambda x: -x[1])
         top = [(l, s) for l, s in ranked if s >= threshold][:top_k]
 

@@ -231,10 +231,12 @@ async def ollama_lease(model: str, *, kind: str, priority: str, caller: str = ""
         yield OLLAMA_URL
         return
 
-    url = url_for(handle)
-    if url != OLLAMA_URL:
-        log.info("lease %s: %s on ollama:%s placed on %s (%s)", handle.lease_id, kind, model, handle.node, url)
+    # Everything after the grant runs inside the try, so the lease is released even if
+    # resolving the node's URL or logging the placement fails.
     try:
+        url = url_for(handle)
+        if url != OLLAMA_URL:
+            log.info("lease %s: %s on ollama:%s placed on %s (%s)", handle.lease_id, kind, model, handle.node, url)
         yield url
     except BaseException as exc:
         if not await cm.__aexit__(type(exc), exc, exc.__traceback__):

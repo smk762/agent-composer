@@ -105,13 +105,16 @@ class ConversationCreate(BaseModel):
 
 # ---- Generation schemas ----
 
+MAX_IMAGES_PER_REQUEST = 4
+
 class ImageGenerateRequest(BaseModel):
     prompt: str
     negative_prompt: Optional[str] = None
     provider: Optional[str] = None
     model: Optional[str] = None
     size: str = "1024x1024"
-    n: int = 1
+    # Each image is GPU time or a paid provider call: bounded per request (providers cap at 4 too).
+    n: int = Field(1, ge=1, le=MAX_IMAGES_PER_REQUEST)
     style: Optional[str] = None
 
 class ImageEditRequest(BaseModel):

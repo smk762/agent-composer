@@ -1,5 +1,6 @@
 """Image / video generation endpoints."""
 
+import asyncio
 import json
 import logging
 from datetime import datetime
@@ -10,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import require_user
 from app.config import (
+    GENERATION_UPLOAD_MAX_BYTES,
     INFERENCE_WORKER_CONCURRENCY,
     OOM_WAIT_INTERVAL_SECONDS,
     OOM_WAIT_MAX_SECONDS,
@@ -26,6 +28,7 @@ from app.models.schemas import (
 from app.providers.base import Capability
 from app.providers.registry import ProviderRegistry
 from app.storage import media_store
+from app.uploads import read_upload
 
 log = logging.getLogger("rag-chat.generation")
 
@@ -41,6 +44,64 @@ def _asset_out(a: MediaAsset) -> MediaAssetOut:
         width=a.width, height=a.height,
         duration_seconds=a.duration_seconds, created_at=a.created_at,
     )
+
+
+async def _read_upload(upload: UploadFile, field: str, max_bytes: Optional[int] = None) -> bytes:
+    """The upload's bytes, read in chunks: past ``max_bytes`` it is a 413 without reading the rest."""
+    return await read_upload(upload, field, GENERATION_UPLOAD_MAX_BYTES if max_bytes is None else max_bytes)
+
+
+async def _store_results(db: AsyncSession, gen: Generation, result, *, user_id: str, media_type: str,
+                         record_result: bool = True) -> list:
+    """Save the provider's media and mark ``gen`` completed.
+
+    If saving or committing fails, the files written so far are deleted and ``gen`` is marked
+    failed (500), so a generation never stays ``running`` with orphaned files."""
+    gen_id = gen.id  # read before a rollback expires ``gen``
+    saved: list[str] = []
+    try:
+        await asyncio.to_thread(media_store.ensure_dirs)  # blocking on MinIO (first call only)
+        assets = []
+        for gm in result.media:
+            rel_path = await media_store.save_bytes(
+                gm.data, user_id=user_id, generation_id=gen.id, filename=gm.filename,
+            )
+            saved.append(rel_path)
+            if media_type == "video":
+                extra = {"duration_seconds": gm.duration_seconds}
+            else:
+                extra = {"width": gm.width, "height": gm.height}
+            asset = MediaAsset(
+                user_id=user_id, generation_id=gen.id,
+                media_type=media_type, mime_type=gm.mime_type,
+                filename=gm.filename, file_path=rel_path,
+                file_size_bytes=len(gm.data), **extra,
+            )
+            db.add(asset)
+            assets.append(asset)
+
+        gen.status = "completed"
+        gen.provider_name = result.provider
+        gen.completed_at = datetime.now(tz=UTC)
+        if record_result:
+            gen.result_json = json.dumps({"model": result.model, "count": len(assets)})
+        await db.commit()
+        for a in assets:
+            await db.refresh(a)
+        return assets
+    except Exception as e:
+        log.error("generation %s: storing results failed: %s", gen_id, e, exc_info=True)
+        await db.rollback()
+        for rel_path in saved:
+            try:
+                await media_store.delete(rel_path)
+            except Exception as cleanup_err:
+                log.warning("generation %s: could not delete %s: %s", gen_id, rel_path, cleanup_err)
+        gen.status = "failed"
+        gen.error_message = f"storing results failed: {e}"
+        gen.completed_at = datetime.now(tz=UTC)
+        await db.commit()
+        raise HTTPException(500, f"Generation succeeded but storing its results failed: {e}")
 
 
 async def _run_inference_with_oom_retry(operation, *, metric_operation: str):
@@ -107,29 +168,7 @@ async def generate_image(
         log.error("generate_image failed: %s", e, exc_info=True)
         raise HTTPException(502, f"Generation failed: {e}")
 
-    media_store.ensure_dirs()
-    assets = []
-    for gm in result.media:
-        rel_path = await media_store.save_bytes(
-            gm.data, user_id=auth.user_id, generation_id=gen.id, filename=gm.filename,
-        )
-        asset = MediaAsset(
-            user_id=auth.user_id, generation_id=gen.id,
-            media_type="image", mime_type=gm.mime_type,
-            filename=gm.filename, file_path=rel_path,
-            file_size_bytes=len(gm.data), width=gm.width, height=gm.height,
-        )
-        db.add(asset)
-        assets.append(asset)
-
-    gen.status = "completed"
-    gen.provider_name = result.provider
-    gen.completed_at = datetime.now(tz=UTC)
-    gen.result_json = json.dumps({"model": result.model, "count": len(assets)})
-    await db.commit()
-
-    for a in assets:
-        await db.refresh(a)
+    assets = await _store_results(db, gen, result, user_id=auth.user_id, media_type="image")
 
     return GenerationResponse(
         id=gen.id, status="completed",
@@ -152,8 +191,8 @@ async def edit_image(
     db: AsyncSession = Depends(get_db),
 ):
     """Edit an image (inpainting / search-and-replace)."""
-    image_bytes = await image.read()
-    mask_bytes = await mask.read() if mask else None
+    image_bytes = await _read_upload(image, "image")
+    mask_bytes = await _read_upload(mask, "mask") if mask else None
 
     gen = Generation(
         user_id=auth.user_id,
@@ -194,27 +233,8 @@ async def edit_image(
         log.error("edit_image failed: %s", e, exc_info=True)
         raise HTTPException(502, f"Edit failed: {e}")
 
-    media_store.ensure_dirs()
-    assets = []
-    for gm in result.media:
-        rel_path = await media_store.save_bytes(
-            gm.data, user_id=auth.user_id, generation_id=gen.id, filename=gm.filename,
-        )
-        asset = MediaAsset(
-            user_id=auth.user_id, generation_id=gen.id,
-            media_type="image", mime_type=gm.mime_type,
-            filename=gm.filename, file_path=rel_path,
-            file_size_bytes=len(gm.data), width=gm.width, height=gm.height,
-        )
-        db.add(asset)
-        assets.append(asset)
-
-    gen.status = "completed"
-    gen.provider_name = result.provider
-    gen.completed_at = datetime.now(tz=UTC)
-    await db.commit()
-    for a in assets:
-        await db.refresh(a)
+    assets = await _store_results(db, gen, result, user_id=auth.user_id, media_type="image",
+                                  record_result=False)
 
     return GenerationResponse(
         id=gen.id, status="completed",
@@ -237,7 +257,7 @@ async def generate_video(
     db: AsyncSession = Depends(get_db),
 ):
     """Generate a video from a text prompt (optionally with a first-frame image)."""
-    image_bytes = await image.read() if image else None
+    image_bytes = await _read_upload(image, "image") if image else None
 
     gen = Generation(
         user_id=auth.user_id,
@@ -282,29 +302,7 @@ async def generate_video(
         log.error("generate_video failed: %s", e, exc_info=True)
         raise HTTPException(502, f"Video generation failed: {e}")
 
-    media_store.ensure_dirs()
-    assets = []
-    for gm in result.media:
-        rel_path = await media_store.save_bytes(
-            gm.data, user_id=auth.user_id, generation_id=gen.id, filename=gm.filename,
-        )
-        asset = MediaAsset(
-            user_id=auth.user_id, generation_id=gen.id,
-            media_type="video", mime_type=gm.mime_type,
-            filename=gm.filename, file_path=rel_path,
-            file_size_bytes=len(gm.data),
-            duration_seconds=gm.duration_seconds,
-        )
-        db.add(asset)
-        assets.append(asset)
-
-    gen.status = "completed"
-    gen.provider_name = result.provider
-    gen.completed_at = datetime.now(tz=UTC)
-    gen.result_json = json.dumps({"model": result.model, "count": len(assets)})
-    await db.commit()
-    for a in assets:
-        await db.refresh(a)
+    assets = await _store_results(db, gen, result, user_id=auth.user_id, media_type="video")
 
     return GenerationResponse(
         id=gen.id, status="completed",

@@ -230,17 +230,30 @@ def finish_cascade(fast: GuardVerdict, slow: GuardVerdict) -> GuardVerdict:
 # ``<|im_start|>``, ``<|im_end|>``, ``<|endoftext|>`` and friends. Ollama
 # tokenizes special tokens it finds in the rendered prompt (raw or templated),
 # so one in user text would close the user turn and let it forge an assistant
-# verdict or a new system block.
-_SPECIAL_TOKEN_RE = re.compile(r"<\|([^<>|\n]{0,64})\|>")
+# verdict or a new system block. The bars may also be look-alikes: DeepSeek's
+# control tokens use the fullwidth ``｜`` (``<｜User｜>``, ``<｜end▁of▁sentence｜>``).
+_BARS = "|\uff5c\uffe8\u2223"  # | ｜ ￨ ∣
+_SPECIAL_TOKEN_RE = re.compile(rf"<[{_BARS}]([^<>{_BARS}\n]{{0,64}})[{_BARS}]>")
 
 
 def neutralize_special_tokens(text: str) -> str:
     """Make ``<|...|>`` sequences in untrusted text plain characters.
 
-    The bars become fullwidth ``｜`` so the model still reads what was written
-    but the tokenizer no longer sees a control token.
+    They become ``< |...| >``: the model still reads what was written, but no
+    tokenizer sees a control token. (Swapping in fullwidth bars is not inert:
+    that is DeepSeek's own control-token form.)
     """
-    return _SPECIAL_TOKEN_RE.sub(lambda m: f"<｜{m.group(1)}｜>", text)
+    return _SPECIAL_TOKEN_RE.sub(lambda m: f"< |{m.group(1)}| >", text)
+
+
+# A transcript line opening with a role marker reads as a new turn.
+_ROLE_MARKER_RE = re.compile(r"^(\s*)\[\s*(user|assistant|system)\s*\]\s*:", re.IGNORECASE | re.MULTILINE)
+
+
+def neutralize_role_markers(text: str) -> str:
+    """Turn ``[user]:`` / ``[assistant]:`` at the start of a line in untrusted text into
+    ``(user):``, so one message can't forge extra turns in the guard transcript."""
+    return _ROLE_MARKER_RE.sub(lambda m: f"{m.group(1)}({m.group(2)}):", text)
 
 
 def risk_categories_block(policy: str | None) -> str:
@@ -309,7 +322,7 @@ def build_singguard_prompt(
     for role, content in messages:
         if role not in ("user", "assistant"):
             raise ValueError(f"unsupported role: {role}")
-        text = neutralize_special_tokens(content.strip())
+        text = neutralize_role_markers(neutralize_special_tokens(content.strip()))
         if not text:
             continue
         turns.append(f"[{role}]: {text}")
@@ -384,6 +397,12 @@ def max_new_tokens(thinking: str) -> int:
     return 2048
 
 
+# Minimum length of a shortened title ("B. Real" for "B. Real-World Crimes & Public Safety").
+_MIN_SHORT_TITLE = 4
+# What may follow a full title when the answer runs on past it ("B. Crimes, since ...").
+_RUN_ON_RE = re.compile(r"\s*[,;:(\-\u2013\u2014.]")
+
+
 def _lookup_rule(title: str, rules: list[PolicyRule]) -> PolicyRule | None:
     wanted = title.strip().casefold()
     if not wanted:
@@ -391,13 +410,24 @@ def _lookup_rule(title: str, rules: list[PolicyRule]) -> PolicyRule | None:
     for rule in rules:
         if rule.title.casefold() == wanted:
             return rule
-    # Accept a shortened title ("B. Real-World Crimes") for the full heading.
-    # Not Safe: any prose opening with "safe" would match it.
+    # Accept a shortened title ("B. Real-World Crimes") for the full heading, cut at a word
+    # boundary, or a full title the answer runs on past after punctuation ("..., since").
+    # Not Safe: any prose opening with "safe" would match it. More than one candidate is
+    # ambiguous, so no rule rather than whichever comes first.
+    candidates = []
     for rule in rules:
         name = rule.title.casefold()
-        if name != "safe" and (name.startswith(wanted) or wanted.startswith(name)):
-            return rule
-    return None
+        if name == "safe":
+            continue
+        shortened = (
+            len(wanted) >= _MIN_SHORT_TITLE
+            and name.startswith(wanted)
+            and not name[len(wanted)].isalnum()
+        )
+        runs_on = wanted.startswith(name) and _RUN_ON_RE.match(wanted, len(name)) is not None
+        if shortened or runs_on:
+            candidates.append(rule)
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _verdict_token(text: str) -> str | None:

@@ -38,7 +38,7 @@ from app.repair.multi_model import repair_loop
 from app.repair.pack_client import fetch_pack_context, report_pack_status, resolve_repo
 from app.repair.patch_applier import apply_inplace, apply_to_temp
 from app.repair.code_search import code_query, fetch_code_snippets
-from app.repair.url_policy import check_audit_url
+from app.repair.url_policy import check_audit_url, check_resolved
 
 log = logging.getLogger("rag-chat.repair")
 router = APIRouter(prefix="/api/repair", tags=["repair"])
@@ -121,8 +121,10 @@ async def run_repair(
     # only configured or allow-listed audit API origins are accepted (issue #28).
     for field, value in (("audit_api_url", request.audit_api_url), ("audit_api_base", request.audit_api_base)):
         if value:
-            problem = check_audit_url(value, field, allowlist=AUDIT_API_ALLOWED_HOSTS,
-                                      configured=(AUDIT_API_URL, AUDIT_PACK_BASE_URL))
+            configured = (AUDIT_API_URL, AUDIT_PACK_BASE_URL)
+            problem = check_audit_url(value, field, allowlist=AUDIT_API_ALLOWED_HOSTS, configured=configured)
+            if not problem:  # an allow-listed name must not resolve to a link-local address
+                problem = await check_resolved(value, field, configured=configured)
             if problem:
                 raise HTTPException(status_code=422, detail=problem)
 

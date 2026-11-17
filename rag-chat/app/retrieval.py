@@ -82,7 +82,7 @@ async def search(query: str, *, embed: Embed, top_k: int, tags: Sequence[str] = 
 
 # ---- Embedder check ------------------------------------------------------------
 
-_embedder_cache: Dict[tuple, tuple] = {}  # (collection, expected label) -> (monotonic time, status)
+_embedder_cache: Dict[tuple, tuple] = {}  # (collection, expected label, strict) -> (monotonic time, status)
 
 
 def _other_embedders_filter(embedder: str, strict: bool = False) -> qm.Filter:
@@ -93,10 +93,11 @@ def _other_embedders_filter(embedder: str, strict: bool = False) -> qm.Filter:
     return qm.Filter(must_not=must_not)
 
 
-def cached_embedder_status(collection: str = QDRANT_COLLECTION,
-                           expected: str = TEXT_EMBEDDER) -> Optional[Dict[str, Any]]:
+def cached_embedder_status(collection: str = QDRANT_COLLECTION, expected: str = TEXT_EMBEDDER,
+                           strict: Optional[bool] = None) -> Optional[Dict[str, Any]]:
     """The last completed check, without touching Qdrant (for /health)."""
-    cached = _embedder_cache.get((collection, expected))
+    strict = EMBEDDER_STRICT if strict is None else strict
+    cached = _embedder_cache.get((collection, expected, strict))
     return cached[1] if cached else None
 
 
@@ -112,7 +113,8 @@ async def embedder_status(*, collection: str = QDRANT_COLLECTION, client: Any = 
     With ``strict`` (default EMBEDDER_STRICT) unlabelled points count as mismatched."""
     strict = EMBEDDER_STRICT if strict is None else strict
     now = time.monotonic()
-    cached = _embedder_cache.get((collection, expected))
+    # ``strict`` changes what counts as mismatched, so it is part of the key.
+    cached = _embedder_cache.get((collection, expected, strict))
     if cached and not force and now - cached[0] < EMBEDDER_CHECK_TTL_S:
         return cached[1]
     status: Dict[str, Any] = {"collection": collection, "expected": expected, "strict": strict,
@@ -131,7 +133,7 @@ async def embedder_status(*, collection: str = QDRANT_COLLECTION, client: Any = 
                                      with_payload=["embedder"], with_vectors=False)
             found = sorted({str((p.payload or {}).get("embedder") or "(unlabelled)") for p in pts})
         status.update(ok=mismatched == 0, mismatched=mismatched, unlabelled=unlabelled, found=found)
-        _embedder_cache[(collection, expected)] = (now, status)
+        _embedder_cache[(collection, expected, strict)] = (now, status)
         if mismatched:
             log.error("retrieval: %s", mismatch_message(status))
     except Exception as e:

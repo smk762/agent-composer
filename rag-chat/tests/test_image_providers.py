@@ -4,7 +4,7 @@ import asyncio
 import unittest
 from unittest import mock
 
-from app.providers import stability
+from app.providers import openai, replicate, stability
 
 
 class _Resp:
@@ -88,6 +88,106 @@ class StabilityTests(unittest.TestCase):
         self.assertEqual(_Client.calls, [])
         self.assertEqual(_run(self.provider.edit_image("x", b"img", model="sd3-medium")).model, "sd3-medium")
         self.assertEqual(_run(self.provider.edit_image("x", b"img", mask=b"m")).model, "core")
+
+
+class StabilityAspectTests(unittest.TestCase):
+    ALLOWED = {"21:9", "16:9", "3:2", "5:4", "1:1", "4:5", "2:3", "9:16", "9:21"}
+
+    def test_only_supported_aspect_ratios_are_sent(self) -> None:
+        for w, h in ((1024, 768), (800, 600), (768, 1024), (1024, 1024), (1920, 1080), (640, 480)):
+            self.assertIn(stability._closest_aspect(w, h), self.ALLOWED)
+
+    def test_four_by_three_maps_symmetrically(self) -> None:
+        landscape = stability._closest_aspect(1024, 768)
+        portrait = stability._closest_aspect(768, 1024)
+        self.assertEqual(landscape, ":".join(reversed(portrait.split(":"))))
+
+
+class _JsonResp:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+        self.content = b""
+
+    def raise_for_status(self) -> None:
+        pass
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _JsonClient:
+    """Stand-in for httpx.AsyncClient answering every POST with ``payload``."""
+
+    calls: list[tuple[str, dict]] = []
+    payload: dict = {}
+
+    def __init__(self, *a, **kw) -> None:
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, *, headers=None, files=None, json=None, **kw):
+        _JsonClient.calls.append((url, files if files is not None else json))
+        return _JsonResp(_JsonClient.payload)
+
+
+class OpenAITests(unittest.TestCase):
+    def setUp(self) -> None:
+        _JsonClient.calls = []
+        _JsonClient.payload = {"data": [{"b64_json": "cG5n"}]}
+        patcher = mock.patch.object(openai.httpx, "AsyncClient", _JsonClient)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.provider = openai.OpenAIProvider(api_key="k")
+
+    def test_dalle_edit_asks_for_base64(self) -> None:
+        result = _run(self.provider.edit_image("x", b"img", model="dall-e-2"))
+        _, form = _JsonClient.calls[0]
+        self.assertEqual(form["response_format"], (None, "b64_json"))
+        self.assertEqual(result.media[0].data, b"png")
+
+    def test_url_only_items_are_an_error_not_empty_images(self) -> None:
+        _JsonClient.payload = {"data": [{"url": "https://example.invalid/a.png"}]}
+        with self.assertRaises(RuntimeError):
+            _run(self.provider.edit_image("x", b"img", model="dall-e-2"))
+
+    def test_video_with_an_input_image_is_refused(self) -> None:
+        with self.assertRaises(LookupError):
+            _run(self.provider.generate_video("a cat", image=b"frame"))
+        self.assertEqual(_JsonClient.calls, [])
+
+
+class ReplicateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        _JsonClient.calls = []
+        _JsonClient.payload = {"id": "pred-1"}
+        patcher = mock.patch.object(replicate.httpx, "AsyncClient", _JsonClient)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.provider = replicate.ReplicateProvider(api_key="k")
+
+    def test_malformed_model_never_reaches_the_api_url(self) -> None:
+        for model in ("a/b/../../account", "owner/name?x=1", "x", "owner/name:not-a-version", "../predictions"):
+            with self.assertRaises(LookupError, msg=f'model={model!r}'):
+                _run(self.provider.generate_image("a cat", model=model))
+            with self.assertRaises(LookupError, msg=f'video={model!r}'):
+                _run(self.provider.generate_video("a cat", model=model))
+        self.assertEqual(_JsonClient.calls, [])
+
+    def test_known_and_well_formed_models_are_used(self) -> None:
+        self.assertEqual(
+            replicate._resolve_model("flux-schnell", replicate._IMAGE_MODELS), "black-forest-labs/flux-schnell"
+        )
+        self.assertEqual(replicate._resolve_model("owner/my-model", replicate._IMAGE_MODELS), "owner/my-model")
+
+    def test_video_with_an_input_image_is_refused(self) -> None:
+        with self.assertRaises(LookupError):
+            _run(self.provider.generate_video("a cat", image=b"frame"))
+        self.assertEqual(_JsonClient.calls, [])
 
 
 if __name__ == "__main__":

@@ -141,6 +141,18 @@ class OllamaLeaseTest(unittest.IsolatedAsyncioTestCase):
             async with ollama_lease("qwen3:8b", kind="chat", priority="interactive") as url:
                 self.assertEqual(url, LOCAL)
 
+    async def test_a_failure_resolving_the_url_releases_the_lease(self) -> None:
+        coord = self._use(_FakeCoordinator())
+
+        def broken(handle):
+            raise KeyError(handle.node)
+
+        with patch.object(gpu_lease, "url_for", broken):
+            with self.assertRaises(KeyError):
+                async with ollama_lease("qwen3:8b", kind="chat", priority="interactive"):
+                    self.fail("body must not run")
+        self.assertEqual(coord.exits, ["KeyError"])
+
     async def test_body_errors_propagate_and_release_the_lease(self) -> None:
         coord = self._use(_FakeCoordinator())
         with self.assertRaises(httpx.ConnectError):

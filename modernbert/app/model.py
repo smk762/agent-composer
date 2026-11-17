@@ -93,32 +93,44 @@ class ModelManager:
 
     # ------------------------------------------------------------------ load
 
-    def _load_sync(self, num_labels: int) -> None:
-        logger.info("Loading %s (task=%s, fp16)", self.model_id, self.task)
+    def _load_dtype(self):
+        """fp16 on CUDA; fp32 on CPU, where many kernels have no Half implementation."""
+        return torch.float16 if self.effective_device().startswith("cuda") else torch.float32
+
+    def _load_sync(self, num_labels: int):
+        """Load and return ``(tokenizer, model)``; the caller installs them, so a load whose
+        caller was cancelled leaves nothing behind."""
+        dtype = self._load_dtype()
+        logger.info("Loading %s (task=%s, %s)", self.model_id, self.task, dtype)
         tok = AutoTokenizer.from_pretrained(self.model_id)
         if self.task == "classify":
             model = AutoModelForSequenceClassification.from_pretrained(
-                self.model_id, num_labels=num_labels, torch_dtype=torch.float16
+                self.model_id, num_labels=num_labels, torch_dtype=dtype
             )
         else:
-            model = AutoModel.from_pretrained(self.model_id, torch_dtype=torch.float16)
+            model = AutoModel.from_pretrained(self.model_id, torch_dtype=dtype)
         model.eval()
-        self._tokenizer = tok
-        self._model = model  # stays on CPU until _promote
+        return tok, model  # stays on CPU until _promote
 
     async def _do_load(self, num_labels: int) -> None:
         self._state = ModelState.LOADING
         loop = asyncio.get_event_loop()
         try:
-            await loop.run_in_executor(None, lambda: self._load_sync(num_labels))
-            self._state = ModelState.CPU
-            self._error = None
-            logger.info("Model on CPU — %s", self.model_id)
+            tok, model = await loop.run_in_executor(None, lambda: self._load_sync(num_labels))
+        except asyncio.CancelledError:
+            # The load thread can't be stopped; its result is dropped. Never stay in LOADING:
+            # nothing would ever move the manager out of it again.
+            self._state = ModelState.UNLOADED
+            raise
         except Exception as exc:
             self._state = ModelState.ERROR
             self._error = str(exc)
             logger.error("Load failed: %s", exc)
             raise
+        self._tokenizer, self._model = tok, model
+        self._state = ModelState.CPU
+        self._error = None
+        logger.info("Model on CPU — %s", self.model_id)
 
     # ------------------------------------------------------------------ move
 
@@ -127,7 +139,21 @@ class ModelManager:
         if device == "cpu":
             return  # CPU-only config; CPU counts as ready
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, lambda: self._model.to(device))
+        fut = loop.run_in_executor(None, lambda: self._model.to(device))
+        try:
+            await asyncio.shield(fut)
+        except asyncio.CancelledError:
+            # The move carries on in its thread whatever happens here. Wait for it with the
+            # lock still held, so the state says where the weights really are (else a model
+            # the manager thinks is on CPU would hold VRAM that evict() never frees).
+            while not fut.done():
+                try:
+                    await asyncio.wait({fut})
+                except asyncio.CancelledError:
+                    pass
+            if not fut.cancelled() and fut.exception() is None:
+                self._state = ModelState.GPU
+            raise
         self._state = ModelState.GPU
         logger.debug("Model → GPU")
 
@@ -148,10 +174,23 @@ class ModelManager:
             pass
         elif self._state == ModelState.CPU:
             await self._promote()
-        elif self._state in (ModelState.UNLOADED, ModelState.ERROR):
+        else:
+            # UNLOADED / ERROR. LOADING too: a load only runs under the lock and never ends
+            # in LOADING, so seeing it here means a stale state; load again rather than hand
+            # out a lease on a model that isn't there.
             await self._do_load(num_labels)
             await self._promote()
-        # LOADING is serialised by the lock — can't reach here from outside
+
+    async def _make_ready_or_arm(self, num_labels: int) -> None:
+        # Caller holds self._lock. A failed or cancelled make-ready can still leave a model
+        # resident (e.g. a promote that finished after its caller was cancelled): give it an
+        # idle timer, or nothing would ever evict it.
+        try:
+            await self._make_ready(num_labels)
+        except BaseException:
+            if self._in_use == 0 and self._state in (ModelState.CPU, ModelState.GPU):
+                self._arm_evict()
+            raise
 
     async def ensure_ready(self, num_labels: int = 2) -> None:
         """Guarantee model is on GPU (or CPU if MODERNBERT_DEVICE=cpu) and reset keep-alive.
@@ -159,7 +198,7 @@ class ModelManager:
         Does not protect a following inference; use ``use()`` for that.
         """
         async with self._lock:
-            await self._make_ready(num_labels)
+            await self._make_ready_or_arm(num_labels)
             self._last_used = time.time()
             if self._in_use == 0:
                 self._arm_evict()
@@ -173,7 +212,7 @@ class ModelManager:
         waiting demote/unload holds, which would deadlock.
         """
         async with self._lock:
-            await self._make_ready(num_labels)
+            await self._make_ready_or_arm(num_labels)
             self._in_use += 1
             self._idle.clear()
             if self._evict_task and not self._evict_task.done():

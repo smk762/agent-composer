@@ -170,6 +170,19 @@ class EmbedderCheckTests(unittest.TestCase):
         st = self._status(strict=True)
         self.assertEqual((st["ok"], st["mismatched"], st["found"], st["strict"]), (False, 1, ["(unlabelled)"], True))
 
+    def test_strict_check_does_not_reuse_a_lenient_cached_result(self):
+        self._put(retrieval.TEXT_EMBEDDER, None)
+        lenient = asyncio.run(retrieval.embedder_status(collection="c", client=self.q, strict=False))
+        strict = asyncio.run(retrieval.embedder_status(collection="c", client=self.q, strict=True))
+        self.assertTrue(lenient["ok"])
+        self.assertEqual((strict["ok"], strict["strict"]), (False, True))
+
+    def test_lenient_check_does_not_reuse_a_strict_cached_result(self):
+        self._put(retrieval.TEXT_EMBEDDER, None)
+        asyncio.run(retrieval.embedder_status(collection="c", client=self.q, strict=True))
+        lenient = asyncio.run(retrieval.embedder_status(collection="c", client=self.q, strict=False))
+        self.assertEqual((lenient["ok"], lenient["strict"]), (True, False))
+
     def test_query_prefix(self):
         from app.routers import chat
 

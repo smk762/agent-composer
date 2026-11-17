@@ -5,6 +5,7 @@ Uses the Replicate HTTP API (predictions endpoint) with polling.
 
 import asyncio
 import logging
+import re
 from typing import List, Optional
 from uuid import uuid4
 
@@ -31,6 +32,21 @@ _VIDEO_MODELS = {
     "minimax-video": "minimax/video-01",
     "luma-ray2": "luma/ray",
 }
+
+# A model named outright: ``owner/name`` or ``owner/name:<64-hex version>``. Anything else
+# (extra path segments, query characters) never reaches the authenticated API URL.
+_MODEL_REF_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,99}/[a-z0-9][a-z0-9_.-]{0,99}(:[0-9a-f]{64})?", re.IGNORECASE)
+
+
+def _resolve_model(model_key: str, known: dict) -> str:
+    """A known alias, or a well-formed ``owner/name[:version]``; LookupError (400) otherwise."""
+    if model_key in known:
+        return known[model_key]
+    if _MODEL_REF_RE.fullmatch(model_key):
+        return model_key
+    raise LookupError(
+        f"Unknown Replicate model {model_key!r}: use one of {sorted(known)} or owner/name[:version]"
+    )
 
 
 class ReplicateProvider(ImageProvider, VideoProvider):
@@ -113,7 +129,7 @@ class ReplicateProvider(ImageProvider, VideoProvider):
         style: Optional[str] = None,
     ) -> GenerationResult:
         model_key = model or "flux-schnell"
-        version = _IMAGE_MODELS.get(model_key, model_key)
+        version = _resolve_model(model_key, _IMAGE_MODELS)
 
         parts = size.split("x")
         w = int(parts[0]) if len(parts) >= 1 else 1024
@@ -155,8 +171,11 @@ class ReplicateProvider(ImageProvider, VideoProvider):
         duration: Optional[float] = None,
         aspect_ratio: Optional[str] = None,
     ) -> GenerationResult:
+        if image is not None:
+            # No input-image mapping per model yet; refuse rather than bill a text-only video.
+            raise LookupError("Replicate video generation here does not take an input image; send the prompt alone")
         model_key = model or "minimax-video"
-        version = _VIDEO_MODELS.get(model_key, model_key)
+        version = _resolve_model(model_key, _VIDEO_MODELS)
 
         input_data: dict = {"prompt": prompt}
         if aspect_ratio:

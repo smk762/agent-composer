@@ -4,6 +4,7 @@ message, and persists conversations/messages to Postgres. Also exposes /health, 
 and conversation list/create/get/delete routes.
 """
 
+import asyncio
 import json
 import logging
 import secrets
@@ -147,6 +148,20 @@ def last_user_message(msgs: List[Msg]) -> Optional[str]:
     return None
 
 
+def _tool_arguments(raw: Any) -> Dict[str, Any]:
+    """Ollama wants ``function.arguments`` as an object. History echoes back whatever the model
+    produced, which can be truncated or non-object JSON: that is kept as ``{"_raw": ...}``."""
+    if isinstance(raw, dict):
+        return raw
+    try:
+        value = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        value = None
+    if isinstance(value, dict):
+        return value
+    return {"_raw": raw} if raw not in (None, "") else {}
+
+
 def _msg_to_ollama_format(msg: Msg) -> Dict[str, Any]:
     result: Dict[str, Any] = {"role": msg.role}
     if msg.content is not None:
@@ -158,9 +173,7 @@ def _msg_to_ollama_format(msg: Msg) -> Dict[str, Any]:
                 "type": tc.type,
                 "function": {
                     "name": tc.function.name,
-                    "arguments": json.loads(tc.function.arguments)
-                    if isinstance(tc.function.arguments, str)
-                    else tc.function.arguments
+                    "arguments": _tool_arguments(tc.function.arguments),
                 }
             }
             for tc in msg.tool_calls
@@ -230,6 +243,11 @@ async def _conversation_messages(db: AsyncSession, conversation_id: str) -> List
 
 
 async def _next_seq(db: AsyncSession, conversation_id: str) -> int:
+    """The next free ``seq`` in a conversation.
+
+    Locks the conversation row first (``SELECT ... FOR UPDATE``; Postgres holds it until the
+    caller's commit), so two requests on one conversation can't both read the same MAX(seq)."""
+    await db.execute(select(Conversation.id).where(Conversation.id == conversation_id).with_for_update())
     res = await db.execute(select(func.max(Message.seq)).where(Message.conversation_id == conversation_id))
     mx = res.scalar_one_or_none()
     return int(mx or 0) + 1
@@ -272,6 +290,39 @@ async def _prune_messages(db: AsyncSession, conversation_id: str):
     if ids:
         await db.execute(delete(Message).where(Message.id.in_(ids)))
         await db.commit()
+
+
+_persist_tasks: set = set()  # in-flight stream saves (a reference keeps each task alive)
+
+
+async def _save_stream_turn(db: AsyncSession, conv: Conversation, user_msg: str,
+                            content: str, tool_calls: List[Any]) -> None:
+    """Store a streamed turn (user message + assistant reply). Errors are logged, not raised."""
+    try:
+        next_seq = await _next_seq(db, conv.id)
+        db.add_all([
+            Message(conversation_id=conv.id, role="user", content=user_msg, seq=next_seq),
+            Message(
+                conversation_id=conv.id, role="assistant",
+                content=content or None,
+                tool_calls=_tool_calls_json(tool_calls),
+                seq=next_seq + 1,
+            ),
+        ])
+        await db.flush()
+        if not conv.title:
+            conv.title = _derive_title(user_msg)
+        with db.no_autoflush:
+            tail_res = await db.execute(
+                select(Message).where(Message.conversation_id == conv.id)
+                .order_by(Message.seq.desc()).limit(6)
+            )
+        conv.summary = _derive_summary(list(reversed(tail_res.scalars().all())))
+        conv.updated_at = datetime.now(tz=UTC)
+        await db.commit()
+        await _prune_messages(db, conv.id)
+    except Exception as e:
+        log.error("chat: stream persist error: %s", e, exc_info=True)
 
 
 def _conv_out(c: Conversation) -> ConversationOut:
@@ -375,21 +426,26 @@ async def chat(
     log.info("chat: user=%s stream=%s model=%r msgs=%d conv=%s",
              auth.user_id, req.stream, req.model, msg_count, req.conversation_id or "new")
 
+    # Resolve the conversation and check the request before any response starts, so a bad
+    # conversation_id is a 404 and a missing user message a 400 in both modes.
+    last_user_msg = last_user_message(req.messages)
+    if not last_user_msg:
+        raise HTTPException(400, "User message required")
+    if req.conversation_id:
+        conv = await _conversation_for_user(db, req.conversation_id, auth.user_id)
+        requested_model = conv.model or req.model or CHAT_MODEL
+    else:
+        requested_model = req.model or CHAT_MODEL
+        conv = Conversation(user_id=auth.user_id, model=None)
+        db.add(conv)
+        await db.commit()
+        await db.refresh(conv)
+
     # STREAMING PATH
     if req.stream:
         from app.streaming import stream_ollama_chat, StreamError
 
         async def stream_gen():
-            if req.conversation_id:
-                conv = await _conversation_for_user(db, req.conversation_id, auth.user_id)
-                requested_model = conv.model or req.model or CHAT_MODEL
-            else:
-                requested_model = req.model or CHAT_MODEL
-                conv = Conversation(user_id=auth.user_id, model=None)
-                db.add(conv)
-                await db.commit()
-                await db.refresh(conv)
-
             model = await _resolve_model(requested_model)
             if not conv.model:
                 conv.model = model
@@ -411,12 +467,6 @@ async def chat(
                 return
 
             msgs = req.messages
-            last_user_msg = last_user_message(msgs)
-            if not last_user_msg:
-                yield f'data: {json.dumps({"error": "User message required"})}\n\n'
-                yield 'data: [DONE]\n\n'
-                return
-
             if not msgs or msgs[0].role != "system":
                 msgs = [Msg(role="system", content=SYSTEM_PROMPT)] + msgs
             ctx = await rag_context_for(msgs)
@@ -443,56 +493,49 @@ async def chat(
             acc_content = ""
             acc_tools: list = []
             chunk_count = 0
-            try:
-                async with ollama_lease(model, kind="chat", priority="interactive", caller=f"chat:{auth.user_id}") as base_url:
-                    async for chunk in stream_ollama_chat(base_url, payload, model, conv.id):
-                        yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
-                        chunk_count += 1
-                        if chunk.choices:
-                            delta = chunk.choices[0].delta
-                            if delta.content:
-                                acc_content += delta.content
-                            if delta.tool_calls:
-                                acc_tools.extend(delta.tool_calls)
-            except StreamError as e:
-                log.error("chat: stream error after %.1fs (%d chunks): %s",
-                          time.monotonic() - t0, chunk_count, e)
-                yield f'data: {json.dumps({"error": str(e)})}\n\n'
-            except OllamaLeaseUnavailable as e:
-                # The response has started, so this is an SSE error, not a 503.
-                log.warning("chat: %s", e.detail)
-                yield f'data: {json.dumps({"error": e.detail, "retry_after": e.retry_after})}\n\n'
+            save: Optional[asyncio.Future] = None
 
-            stream_elapsed = time.monotonic() - t0
-            log.info("chat: stream complete in %.1fs, %d chunks, %d chars, tool_calls=%s",
-                      stream_elapsed, chunk_count, len(acc_content), bool(acc_tools))
-            yield 'data: [DONE]\n\n'
+            def save_turn() -> asyncio.Future:
+                # A task, so a client that disconnects (cancelling this generator) can't stop it halfway.
+                nonlocal save
+                if save is None:
+                    save = asyncio.ensure_future(
+                        _save_stream_turn(db, conv, last_user_msg, acc_content, list(acc_tools)))
+                    _persist_tasks.add(save)
+                    save.add_done_callback(_persist_tasks.discard)
+                return save
 
             try:
-                next_seq = await _next_seq(db, conv.id)
-                db.add_all([
-                    Message(conversation_id=conv.id, role="user", content=last_user_msg, seq=next_seq),
-                    Message(
-                        conversation_id=conv.id, role="assistant",
-                        content=acc_content or None,
-                        tool_calls=_tool_calls_json(acc_tools),
-                        seq=next_seq + 1,
-                    ),
-                ])
-                await db.flush()
-                if not conv.title:
-                    conv.title = _derive_title(last_user_msg)
-                with db.no_autoflush:
-                    tail_res = await db.execute(
-                        select(Message).where(Message.conversation_id == conv.id)
-                        .order_by(Message.seq.desc()).limit(6)
-                    )
-                conv.summary = _derive_summary(list(reversed(tail_res.scalars().all())))
-                conv.updated_at = datetime.now(tz=UTC)
-                await db.commit()
-                await _prune_messages(db, conv.id)
-            except Exception as e:
-                log.error("chat: stream persist error: %s", e, exc_info=True)
+                try:
+                    async with ollama_lease(model, kind="chat", priority="interactive", caller=f"chat:{auth.user_id}") as base_url:
+                        async for chunk in stream_ollama_chat(base_url, payload, model, conv.id):
+                            chunk_count += 1
+                            if chunk.choices:
+                                delta = chunk.choices[0].delta
+                                if delta.content:
+                                    acc_content += delta.content
+                                if delta.tool_calls:
+                                    acc_tools.extend(delta.tool_calls)
+                            yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+                except StreamError as e:
+                    log.error("chat: stream error after %.1fs (%d chunks): %s",
+                              time.monotonic() - t0, chunk_count, e)
+                    yield f'data: {json.dumps({"error": str(e)})}\n\n'
+                except OllamaLeaseUnavailable as e:
+                    # The response has started, so this is an SSE error, not a 503.
+                    log.warning("chat: %s", e.detail)
+                    yield f'data: {json.dumps({"error": e.detail, "retry_after": e.retry_after})}\n\n'
+
+                stream_elapsed = time.monotonic() - t0
+                log.info("chat: stream complete in %.1fs, %d chunks, %d chars, tool_calls=%s",
+                          stream_elapsed, chunk_count, len(acc_content), bool(acc_tools))
+                # Saved before [DONE]: clients close the stream as soon as they see it.
+                await asyncio.shield(save_turn())
+                yield 'data: [DONE]\n\n'
+            finally:
+                if save is None and (acc_content or acc_tools):
+                    # The client went away mid-stream: keep the part of the reply it was shown.
+                    await asyncio.shield(save_turn())
 
         return StreamingResponse(
             stream_gen(),
@@ -501,24 +544,11 @@ async def chat(
         )
 
     # NON-STREAMING PATH
-    if req.conversation_id:
-        conv = await _conversation_for_user(db, req.conversation_id, auth.user_id)
-        requested_model = conv.model or req.model or CHAT_MODEL
-    else:
-        requested_model = req.model or CHAT_MODEL
-        conv = Conversation(user_id=auth.user_id, model=None)
-        db.add(conv)
-        await db.commit()
-        await db.refresh(conv)
-
     model = await _resolve_model(requested_model)
     if not conv.model:
         conv.model = model
 
     msgs = req.messages
-    last_user_msg = last_user_message(msgs)
-    if not last_user_msg:
-        raise HTTPException(400, "User message required")
 
     if not msgs or msgs[0].role != "system":
         msgs = [Msg(role="system", content=SYSTEM_PROMPT)] + msgs

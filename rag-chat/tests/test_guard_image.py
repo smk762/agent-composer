@@ -49,6 +49,30 @@ class PrepareImageTests(unittest.TestCase):
             prepare_guard_image(b"not-an-image")
         self.assertIn("decoded", str(ctx.exception))
 
+    def _huge_png(self, width: int, height: int) -> bytes:
+        # A 1-bit blank PNG: tiny on the wire, huge once decoded.
+        buf = io.BytesIO()
+        Image.new("1", (width, height)).save(buf, "PNG")
+        return buf.getvalue()
+
+    def test_claimed_dimensions_over_budget_are_refused_before_decoding(self) -> None:
+        data = self._huge_png(10_000, 10_000)  # 100 MP: only a warning to Pillow
+        self.assertLess(len(data), 1024 * 1024)
+        with self.assertRaises(ValueError):
+            prepare_guard_image(data)
+
+    def test_a_decompression_bomb_is_a_value_error(self) -> None:
+        data = self._huge_png(20_000, 10_000)  # 200 MP: Pillow's DecompressionBombError
+        with self.assertRaises(ValueError):
+            prepare_guard_image(data)
+
+    def test_a_large_jpeg_is_shrunk_to_the_edge_cap(self) -> None:
+        buf = io.BytesIO()
+        Image.new("RGB", (4000, 3000), (10, 120, 200)).save(buf, "JPEG")
+        with Image.open(io.BytesIO(prepare_guard_image(buf.getvalue()))) as out:
+            self.assertEqual(out.format, "JPEG")
+            self.assertLessEqual(max(out.size), 1536)
+
     def test_image_b64_reencodes_a_data_url(self) -> None:
         raw = _webp()
         payload = "data:image/webp;base64," + base64.b64encode(raw).decode("ascii")

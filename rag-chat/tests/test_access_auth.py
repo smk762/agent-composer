@@ -95,6 +95,18 @@ class AccessAuthTest(unittest.TestCase):
     def test_no_credentials_is_401(self) -> None:
         self.assertEqual(self._get().status_code, 401)
 
+    def test_dev_bypass_does_not_trust_an_arbitrary_x_dev_user(self) -> None:
+        with patch.object(auth, "DEV_AUTH_BYPASS", True), patch.object(auth, "DEV_DEFAULT_USER", "dev@x"), \
+                patch.object(auth, "DEV_AUTH_USERS", frozenset({"tester@x"}), create=True):
+            self.assertEqual(self._get().json(), {"user": "dev@x", "via": "dev"})
+            self.assertEqual(self._get(**{"X-Dev-User": "tester@x"}).json(), {"user": "tester@x", "via": "dev"})
+            # Naming any other (e.g. a real) user is refused, not honoured.
+            r = self._get(**{"X-Dev-User": "alice@example.com"})
+            self.assertEqual(r.status_code, 403)
+
+    def test_x_dev_user_is_ignored_without_the_bypass(self) -> None:
+        self.assertEqual(self._get(**{"X-Dev-User": "dev@example.com"}).status_code, 401)
+
     def test_dev_bypass_ignores_unverifiable_access_credentials(self) -> None:
         with patch.object(auth, "DEV_AUTH_BYPASS", True), patch.object(auth, "CF_ACCESS_AUD", ""):
             self.client.cookies.set("CF_Authorization", _token())

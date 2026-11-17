@@ -10,7 +10,7 @@ Routes marked **auth** below resolve a user in this order (`rag-chat/app/auth.py
 
 1. `Authorization: Bearer <key>`: an API key created at `/ui/api-keys` or via `POST /api-keys`. An unknown or revoked key returns `401 Invalid API key`.
 2. A Cloudflare Access JWT: the `Cf-Access-Jwt-Assertion` header, else the `CF_Authorization` cookie. rag-chat checks its signature against `https://<CF_ACCESS_TEAM_DOMAIN>/cdn-cgi/access/certs`, its audience (`CF_ACCESS_AUD`, the Access app's AUD tag), issuer and expiry, and the token's `email` claim becomes the user id. A bad token returns 401. The `Cf-Access-Authenticated-User-Email` header is never trusted alone: sent without a token it returns 401. If either setting is unset, Access tokens are refused.
-3. `DEV_AUTH_BYPASS=1`: no credentials needed. The user id is the `X-Dev-User` header, else `DEV_DEFAULT_USER` (default `dev@example.com`). **Use this for local development only.** With it on, anyone who can reach the port is authenticated.
+3. `DEV_AUTH_BYPASS=1`: no credentials needed. The user id is `DEV_DEFAULT_USER` (default `dev@example.com`), or the `X-Dev-User` header when it names a user listed in `DEV_AUTH_USERS` (any other value is a 403). **Use this for local development only.** With it on, anyone who can reach the port is authenticated.
 
 Otherwise the route returns `401 Authentication required`. `GET /health` reports which mode is active (`"auth": "dev-bypass"` or `"access/api-key"`).
 
@@ -132,7 +132,7 @@ It prints the secret once (only the hash is stored). The key acts as `--user`.
 
 ### Media generation (`routers/generation.py`, `routers/media.py`, `routers/providers.py`)
 
-Image and video generation go through pluggable providers (`app/providers/`: `openai`, `stability`, `replicate`, `together`, `comfyui`). Each user configures their own provider API keys. Keys are encrypted at rest only when `PROVIDER_ENCRYPTION_KEY` is set (see [configuration.md](configuration.md#security-relevant)).
+Image and video generation go through pluggable providers (`app/providers/`: `openai`, `stability`, `replicate`, `together`, `comfyui`). Each user configures their own provider API keys. Keys are encrypted at rest with `PROVIDER_ENCRYPTION_KEY`; without it, saving a key is a 503 unless `ALLOW_PLAINTEXT_PROVIDER_KEYS=1` (see [configuration.md](configuration.md#security-relevant)).
 
 | Method | Path | Auth | Key fields |
 |---|---|---|---|
@@ -174,7 +174,7 @@ Proxies to the Whisper STT sidecar and a registry of TTS engines (`xtts`, `miso`
 | POST | `/api/voice/synthesise/pcm` | open | Raw 24 kHz float32 PCM stream (XTTS only) |
 | GET | `/api/voice/speakers` | open | Built-in speakers |
 | POST | `/api/voice/analyze` | open | multipart `audio` (one or more clips) → per-clip scores and a recommended subset |
-| POST | `/api/voice/clone` | open | multipart `audio` (one or more), `voice_name`, `companion_id?`, `reference_text?` |
+| POST | `/api/voice/clone` | open | multipart `audio` (one or more), `voice_name`, `companion_id?`, `reference_text?`, `replace?`. An id the engine already lists is a 409 unless `replace=true`, which needs auth (as does any clone while the engine's list can't be read). `companion_id` is `[A-Za-z0-9_-]{1,64}`, else 400 (also on download/delete). At most `VOICE_MAX_CLIPS` clips of `VOICE_CLIP_MAX_BYTES` each (413) |
 | GET | `/api/voice/clones` | open | Stored clones |
 | POST | `/api/voice/clones/import` | open | multipart `archive`, `voice_name?`, `companion_id?` |
 | GET | `/api/voice/clones/{companion_id}/download` | open | Clone archive |

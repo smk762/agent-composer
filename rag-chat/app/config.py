@@ -88,6 +88,9 @@ RAG_TOP_K = int(os.getenv("RAG_TOP_K", "5"))
 RAG_MAX_CONTEXT_CHARS = int(os.getenv("RAG_MAX_CONTEXT_CHARS", "4000"))
 DEV_AUTH_BYPASS = os.getenv("DEV_AUTH_BYPASS", "0") == "1"
 DEV_DEFAULT_USER = os.getenv("DEV_DEFAULT_USER", "dev@example.com")
+# Other users the dev bypass may act as via X-Dev-User (comma-separated). Empty: only DEV_DEFAULT_USER,
+# so a caller can't name an arbitrary (real) user just by sending the header.
+DEV_AUTH_USERS = frozenset(u.strip() for u in os.getenv("DEV_AUTH_USERS", "").split(",") if u.strip())
 # Cloudflare Access: identity comes only from a verified Cf-Access-Jwt-Assertion
 # (or CF_Authorization cookie). Both must be set or Access identity is refused.
 CF_ACCESS_TEAM_DOMAIN = os.getenv("CF_ACCESS_TEAM_DOMAIN", "").strip().removeprefix("https://").rstrip("/")
@@ -97,6 +100,8 @@ OLLAMA_TIMEOUT = int(os.getenv("OLLAMA_TIMEOUT", "300"))
 OOM_WAIT_MAX_SECONDS = _env_int("OOM_WAIT_MAX_SECONDS", 180)
 OOM_WAIT_INTERVAL_SECONDS = _env_int("OOM_WAIT_INTERVAL_SECONDS", 5)
 INFERENCE_WORKER_CONCURRENCY = _env_int("INFERENCE_WORKER_CONCURRENCY", 1)
+# Largest image (or mask) /api/edit/image and /api/generate/video accept; bigger is a 413.
+GENERATION_UPLOAD_MAX_BYTES = _env_int("GENERATION_UPLOAD_MAX_BYTES", 25 * 1024 * 1024)
 # One SingGuard pass at a time: cull scans and darkroom pre-flights share Ollama.
 GUARD_WORKER_CONCURRENCY = _env_int("GUARD_WORKER_CONCURRENCY", 1)
 
@@ -150,6 +155,10 @@ RUNTIME_EXTRA_RESIDENTS = _parse_residents(os.getenv("RUNTIME_EXTRA_RESIDENTS", 
 # the API, or the Wyoming/Home Assistant bridges.
 WHISPER_URL = os.getenv("WHISPER_URL", "http://whisper:8030").rstrip("/")
 VOICE_TIMEOUT = _env_int("VOICE_TIMEOUT", 30)
+# Reference clips /api/voice/clone and /api/voice/analyze accept per request, and the size of each
+# (bytes): they are buffered in memory before forwarding, so more is a 413.
+VOICE_MAX_CLIPS = _env_int("VOICE_MAX_CLIPS", 16)
+VOICE_CLIP_MAX_BYTES = _env_int("VOICE_CLIP_MAX_BYTES", 16 * 1024 * 1024)
 
 
 def _clean_url(value: str) -> str:

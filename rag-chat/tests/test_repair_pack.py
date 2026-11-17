@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import httpx
 
-from app.repair import multi_model
+from app.repair import multi_model, url_policy
 from app.repair.context_builder import build_repair_context
 from app.repair.models import RepairRequest
 from app.repair.pack_client import (
@@ -37,6 +37,13 @@ PACK = {
 BRIEF = "# Agent Work Pack: Extract shared retry helper\n\nDo not auto-merge."
 
 real_async_client = httpx.AsyncClient
+
+
+async def _fake_resolve(host: str, port: int) -> list[str]:
+    """Allow-listed test names resolve to a documentation address; nothing else resolves."""
+    if host.endswith(".test"):
+        return ["192.0.2.10"]
+    raise OSError("no such host")
 
 
 def _patch_http(handler):
@@ -228,6 +235,7 @@ class RepairEndpointTests(unittest.TestCase):
             patch.object(repair_router, "QDRANT_URL", ""),
             patch.object(repair_router, "require_user", fake_user),
             patch.object(repair_router, "AUDIT_API_ALLOWED_HOSTS", "audit.test:8765"),
+            patch.object(url_policy, "_resolve", _fake_resolve),
         ]
         for p in self._patches:
             p.start()

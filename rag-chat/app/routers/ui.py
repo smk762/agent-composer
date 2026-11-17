@@ -242,6 +242,14 @@ th { background: #0d1322; }
 """
 
 
+# The one HTML escaper every render_page() page gets (as a global ``esc``): safe for element text
+# and for quoted attribute values, since it also escapes both quote characters.
+ESC_JS = """function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => (
+    {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+}"""
+
+
 def nav_html() -> str:
     bypass = "DEV_AUTH_BYPASS active; using dev user." if DEV_AUTH_BYPASS else ""
     return (
@@ -277,6 +285,7 @@ def render_page(title: str, body_html: str, extra_css: str = "") -> HTMLResponse
             <head>
               <meta charset="utf-8" />
               <title>{title}</title>
+              <script>{ESC_JS}</script>
               <style>
                 {BASE_CSS}
                 {extra_css}
@@ -353,7 +362,7 @@ def api_keys_ui():
         function setBanner() {{
           if (DEV_BYPASS) {{
             bannerEl.style.display = "block";
-            bannerEl.textContent = "DEV_AUTH_BYPASS is ON. Requests use X-Dev-User / DEV_DEFAULT_USER when no API key is provided.";
+            bannerEl.textContent = "DEV_AUTH_BYPASS is ON. Requests without an API key run as DEV_DEFAULT_USER (or an X-Dev-User listed in DEV_AUTH_USERS).";
           }}
         }}
 
@@ -396,15 +405,28 @@ def api_keys_ui():
               return;
             }}
             data.forEach(k => {{
+              // Key metadata is user-set text: build cells with textContent, never markup.
               const tr = document.createElement("tr");
-              tr.innerHTML = `
-                <td>${{k.name || "\u2014"}}</td>
-                <td><code>${{k.prefix}}</code></td>
-                <td>${{k.created_at || "\u2014"}}</td>
-                <td>${{k.last_used_at || "\u2014"}}</td>
-                <td>${{k.revoked_at ? '<span class="pill danger">revoked</span>' : '<span class="pill">active</span>'}}</td>
-                <td>${{k.revoked_at ? "" : '<button data-id="' + k.id + '" class="revoke">Revoke</button>'}}</td>
-              `;
+              const cell = (text, wrapTag) => {{
+                const td = document.createElement("td");
+                const node = wrapTag ? td.appendChild(document.createElement(wrapTag)) : td;
+                node.textContent = text;
+                return tr.appendChild(td);
+              }};
+              cell(k.name || "\u2014");
+              cell(k.prefix || "", "code");
+              cell(k.created_at || "\u2014");
+              cell(k.last_used_at || "\u2014");
+              const pill = cell(k.revoked_at ? "revoked" : "active", "span").firstChild;
+              pill.className = k.revoked_at ? "pill danger" : "pill";
+              const actionTd = cell("");
+              if (!k.revoked_at) {{
+                const btn = document.createElement("button");
+                btn.className = "revoke";
+                btn.dataset.id = k.id;
+                btn.textContent = "Revoke";
+                actionTd.appendChild(btn);
+              }}
               rowsEl.appendChild(tr);
             }});
             tableEl.style.display = "table";
@@ -504,7 +526,7 @@ def history_ui():
         function setBanner() {{
           if (DEV_BYPASS) {{
             bannerEl.style.display = "block";
-            bannerEl.textContent = "DEV_AUTH_BYPASS is ON. Requests use X-Dev-User / DEV_DEFAULT_USER when no API key is provided.";
+            bannerEl.textContent = "DEV_AUTH_BYPASS is ON. Requests without an API key run as DEV_DEFAULT_USER (or an X-Dev-User listed in DEV_AUTH_USERS).";
           }}
         }}
 
@@ -848,15 +870,37 @@ def generate_ui():
         setupUpload("edit-mask-area", "edit-mask-input");
 
         // ---- Rendering ----
+        // Only same-origin paths or http(s) URLs may become a src (no javascript:/data: etc.).
+        function safeMediaUrl(raw) {{
+          if (typeof raw !== "string" || !raw) return "";
+          try {{
+            const u = new URL(raw, window.location.href);
+            return (u.protocol === "http:" || u.protocol === "https:") ? u.href : "";
+          }} catch (e) {{
+            return "";
+          }}
+        }}
+
         function renderMedia(galleryId, media, prompt) {{
           const gal = document.getElementById(galleryId);
           media.forEach(m => {{
             const item = document.createElement("div");
             item.className = "gallery-item";
+            // url/filename come from responses and stored history: set as properties, never markup.
+            const url = safeMediaUrl(m.url);
+            const meta = document.createElement("div");
+            meta.className = "meta";
+            meta.textContent = m.filename || "";
             if (m.media_type === "video") {{
-              item.innerHTML = `<video src="${{m.url}}" controls></video><div class="meta">${{m.filename}}</div>`;
+              const video = document.createElement("video");
+              video.controls = true;
+              if (url) video.src = url;
+              item.append(video, meta);
             }} else {{
-              item.innerHTML = `<img src="${{m.url}}" alt="${{m.filename}}" /><div class="meta">${{m.filename}}</div>`;
+              const img = document.createElement("img");
+              if (url) img.src = url;
+              img.alt = m.filename || "";
+              item.append(img, meta);
               const btn = document.createElement("button");
               btn.type = "button";
               btn.textContent = "Check image";
@@ -870,7 +914,7 @@ def generate_ui():
               item.appendChild(btn);
               item.appendChild(note);
             }}
-            item.addEventListener("click", () => window.open(m.url, "_blank"));
+            item.addEventListener("click", () => {{ if (url) window.open(url, "_blank", "noopener"); }});
             gal.appendChild(item);
           }});
         }}
@@ -1132,8 +1176,8 @@ def index_ui():
         a.href = window.location.protocol + "//" + host + ":" + s.port + s.path;
         a.target = "_blank";
         a.rel = "noopener";
-        a.innerHTML = '<div class="idx-name">' + s.name + ' <span class="ext">:' + s.port + ' &#8599;</span></div>'
-          + '<div class="idx-desc">' + s.desc + '</div>';
+        a.innerHTML = '<div class="idx-name">' + esc(s.name) + ' <span class="ext">:' + esc(s.port) + ' &#8599;</span></div>'
+          + '<div class="idx-desc">' + esc(s.desc) + '</div>';
         grid.appendChild(a);
       }});
     }})();
@@ -1480,7 +1524,7 @@ def chat_ui():
                   if (!convId) return;
                   statusEl.textContent = "Loading conversation...";
                   try {{
-                    const r = await fetch(`/conversations/${{convId}}`, {{ headers: authHeaders() }});
+                    const r = await fetch("/conversations/" + encodeURIComponent(convId), {{ headers: authHeaders() }});
                     if (!r.ok) {{
                       statusEl.textContent = "Load failed (" + r.status + ").";
                       return;
@@ -1704,11 +1748,11 @@ def chat_ui():
                   }}
                 }});
                 resetBtn.addEventListener("click", resetConversation);
-                loadModels();
+                // Models first: loadConversation restores the conversation's model only if it is listed.
                 const q = parseQuery();
-                if (q.cid) {{
-                  loadConversation(q.cid);
-                }}
+                loadModels().finally(() => {{
+                  if (q.cid) loadConversation(q.cid);
+                }});
                 renderHistory();
               </script>
             </body>
@@ -2283,8 +2327,7 @@ def pipeline_ui():
         const list = document.getElementById("turnsList");
         const row = document.createElement("div");
         row.className = "turn-row";
-        const safe = (val||"").replace(/"/g,"&quot;");
-        row.innerHTML = '<input type="text" placeholder="turn '+(list.children.length+1)+'" value="'+safe+'" />' +
+        row.innerHTML = '<input type="text" placeholder="turn '+(list.children.length+1)+'" value="'+esc(val||"")+'" />' +
           '<button class="turn-del" onclick="this.parentElement.remove()" title="remove">&times;</button>';
         list.appendChild(row);
       }}
@@ -2406,7 +2449,7 @@ def pipeline_ui():
         if (target===1||isAll) {{
           const topK = (_stageCfg[1]||{{}}).top_k || 5;
           body.innerHTML += '<div class="cfg-row"><label>Top-K results <span class="help-ico" id="tipTopK">?</span></label>' +
-            '<input type="number" id="cfgTopK" value="'+topK+'" min="1" max="20" style="width:80px;" /></div>';
+            '<input type="number" id="cfgTopK" value="'+esc(topK)+'" min="1" max="20" style="width:80px;" /></div>';
           bindTip("tipTopK","How many top-scoring labels to return from the classifier. Higher values show more of the score distribution.");
         }}
         if (target===2||isAll) body.innerHTML += mkSel(2);
@@ -2616,7 +2659,6 @@ def pipeline_ui():
         }}).join("");
       }}
 
-      function esc(s) {{ return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }}
 
       // ---- init ----
       document.getElementById("charSelect").addEventListener("change", updateCharPreview);
@@ -2828,7 +2870,7 @@ def guard_ui():
         row.innerHTML = `
           <select><option value="user"${role === "user" ? " selected" : ""}>user</option>
                   <option value="assistant"${role === "assistant" ? " selected" : ""}>assistant</option></select>
-          <input value="${(content || "").replace(/"/g, "&quot;")}" placeholder="Turn content..." />
+          <input value="${esc(content || "")}" placeholder="Turn content..." />
           <button type="button" title="Remove">&times;</button>`;
         row.querySelector("button").addEventListener("click", () => row.remove());
         turnsEl.appendChild(row);
@@ -2897,8 +2939,8 @@ def guard_ui():
         if (data.rule) {
           ruleRow.style.display = "block";
           const why = data.rule_text || (data.categories && data.categories[0] && data.categories[0].why) || "";
-          ruleEl.innerHTML = `<span class="cat-pill">${escHtml(data.rule)}</span>`
-            + (why ? `<div class="muted" style="margin-top:6px;">${escHtml(why)}</div>` : "");
+          ruleEl.innerHTML = `<span class="cat-pill">${esc(data.rule)}</span>`
+            + (why ? `<div class="muted" style="margin-top:6px;">${esc(why)}</div>` : "");
         } else {
           ruleRow.style.display = "none";
         }
@@ -2944,11 +2986,11 @@ def guard_ui():
           const ts = new Date(h.ts).toLocaleTimeString();
           return `<div class="history-item" data-idx="${i}">
             <div class="history-header">
-              <span class="${cls}" style="font-size:14px;">${escHtml((h.verdict || "").toUpperCase())}</span>
-              <span class="muted" style="font-size:12px;">${ts} · ${h.elapsed_ms}ms</span>
+              <span class="${cls}" style="font-size:14px;">${esc((h.verdict || "").toUpperCase())}</span>
+              <span class="muted" style="font-size:12px;">${esc(ts)} · ${esc(h.elapsed_ms)}ms</span>
             </div>
-            <div class="history-input">${escHtml(h.input)}</div>
-            ${rule ? '<div style="margin-top:4px;"><span class="cat-pill">' + escHtml(rule) + '</span></div>' : ""}
+            <div class="history-input">${esc(h.input)}</div>
+            ${rule ? '<div style="margin-top:4px;"><span class="cat-pill">' + esc(rule) + '</span></div>' : ""}
           </div>`;
         }).join("");
 
@@ -2961,12 +3003,6 @@ def guard_ui():
             }
           });
         });
-      }
-
-      function escHtml(s) {
-        const d = document.createElement("div");
-        d.textContent = s;
-        return d.innerHTML;
       }
 
       document.getElementById("clearHistBtn").addEventListener("click", () => {
@@ -3150,7 +3186,7 @@ def voice_ui():
           const ok = d.status === "ok";
           healthBanner.innerHTML = '<div style="padding:8px 12px;border-radius:8px;font-size:12px;'
             + 'background:' + (ok ? 'rgba(34,197,94,0.1);color:#22c55e;border:1px solid rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.2)')
-            + ';">' + parts.join(" &middot; ") + '</div>';
+            + ';">' + parts.map(esc).join(" &middot; ") + '</div>';
         })
         .catch(() => {
           healthBanner.innerHTML = '<div style="padding:8px 12px;border-radius:8px;font-size:12px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.2);">Voice services unreachable</div>';
@@ -3225,11 +3261,24 @@ def voice_ui():
       function startRecording() {
         navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
           audioChunks = [];
-          mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
+          // Safari can't record WebM/Opus: use the browser's default there. If the recorder still
+          // can't be built, stop the tracks so the microphone doesn't stay live.
+          const preferred = "audio/webm;codecs=opus";
+          const opts = (window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(preferred))
+            ? { mimeType: preferred } : undefined;
+          try {
+            mediaRecorder = new MediaRecorder(stream, opts);
+          } catch (err) {
+            stream.getTracks().forEach(t => t.stop());
+            mediaRecorder = null;
+            recLabel.textContent = "Recording not supported in this browser: " + err.message;
+            return;
+          }
           mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
           mediaRecorder.onstop = () => {
             stream.getTracks().forEach(t => t.stop());
-            const blob = new Blob(audioChunks, { type: "audio/webm" });
+            const type = (mediaRecorder && mediaRecorder.mimeType) || "audio/webm";
+            const blob = new Blob(audioChunks, { type });
             transcribeAudio(blob);
           };
           mediaRecorder.start();
@@ -3350,14 +3399,28 @@ def voice_ui():
       function addAudioItem(audioUrl, text, idx) {
         const div = document.createElement("div");
         div.className = "audio-item";
-        div.innerHTML = (text ? '<div class="chunk-text">' + text.replace(/</g, "&lt;") + '</div>' : '')
-          + '<audio controls preload="auto" src="' + audioUrl + '"></audio>'
-          + '<div class="dl-row">'
-          + '<button class="dl-btn">Download WAV</button>'
-          + '</div>';
-        div.querySelector(".dl-btn").addEventListener("click", () => downloadAs(audioUrl, "wav"));
+        // text and audioUrl come from the engine: set as text/properties, never markup.
+        if (text) {
+          const t = document.createElement("div");
+          t.className = "chunk-text";
+          t.textContent = text;
+          div.appendChild(t);
+        }
+        const audio = document.createElement("audio");
+        audio.controls = true;
+        audio.preload = "auto";
+        audio.src = audioUrl || "";
+        div.appendChild(audio);
+        const dlRow = document.createElement("div");
+        dlRow.className = "dl-row";
+        const dl = document.createElement("button");
+        dl.className = "dl-btn";
+        dl.textContent = "Download WAV";
+        dl.addEventListener("click", () => downloadAs(audioUrl, "wav"));
+        dlRow.appendChild(dl);
+        div.appendChild(dlRow);
         audioList.prepend(div);
-        return div.querySelector("audio");
+        return audio;
       }
 
       synthBtn.addEventListener("click", () => {
@@ -3505,7 +3568,12 @@ def voice_ui():
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload),
-        }).then(response => {
+        }).then(async response => {
+          if (!response.ok) {
+            let msg = "HTTP " + response.status;
+            try { msg = (await response.text()) || msg; } catch (e) {}
+            throw new Error(msg);
+          }
           const reader = response.body.getReader();
           const decoder = new TextDecoder();
           let buffer = "";
@@ -3538,6 +3606,10 @@ def voice_ui():
                 } catch(e) {}
               });
               read();
+            }).catch(err => {
+              // A dropped connection or aborted upstream rejects the read: report it, re-enable.
+              ttsStatus.textContent = "Error: " + err.message;
+              synthStreamBtn.disabled = false;
             });
           }
           read();
@@ -3791,7 +3863,7 @@ def voice_clone_ui():
         const state = tts.model_state ? (" (" + tts.model_state + ")") : "";
         healthBanner.innerHTML = '<div style="padding:8px 12px;border-radius:8px;font-size:12px;'
           + 'background:' + (ok ? 'rgba(34,197,94,0.1);color:#22c55e;border:1px solid rgba(34,197,94,0.2)' : 'rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.2)')
-          + ';">TTS: ' + (tts.status || "?") + state + '</div>';
+          + ';">TTS: ' + esc(tts.status || "?") + esc(state) + '</div>';
       }).catch(() => {
         healthBanner.innerHTML = '<div style="padding:8px 12px;border-radius:8px;font-size:12px;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid rgba(239,68,68,0.2);">TTS service unreachable</div>';
       });
@@ -3853,10 +3925,10 @@ def voice_clone_ui():
             details.push((c.seconds ? c.seconds.toFixed(1) + "s" : "?"));
           }
           const flags = (c.flags || []).filter(f => ["clipping", "noisy", "very_short", "outlier"].includes(f));
-          let detailHtml = '<span class="clip-detail">' + details.join(" · ");
-          if (flags.length) detailHtml += ' · <span class="flag">⚠ ' + flags.join(", ") + '</span>';
+          let detailHtml = '<span class="clip-detail">' + esc(details.join(" · "));
+          if (flags.length) detailHtml += ' · <span class="flag">⚠ ' + esc(flags.join(", ")) + '</span>';
           detailHtml += '</span>';
-          col.innerHTML = '<span class="clip-name">' + (c.name || "clip").replace(/</g, "&lt;") + '</span>' + detailHtml;
+          col.innerHTML = '<span class="clip-name">' + esc(c.name || "clip") + '</span>' + detailHtml;
           div.appendChild(col);
 
           const audio = document.createElement("audio");
@@ -4017,10 +4089,10 @@ def voice_clone_ui():
           const div = document.createElement("div");
           div.className = "clip-item";
           let html = '<span style="flex:1; font-size:12px;">'
-            + '<strong>' + (rep.name || ("clip-" + (i + 1))).replace(/</g, "&lt;") + '</strong> · '
-            + (parts.join(" · ") || "processed");
+            + '<strong>' + esc(rep.name || ("clip-" + (i + 1))) + '</strong> · '
+            + esc(parts.join(" · ") || "processed");
           if (warns.length) {
-            html += '<br><span style="color:#fbbf24;">⚠ ' + warns.join(", ").replace(/</g, "&lt;") + '</span>';
+            html += '<br><span style="color:#fbbf24;">⚠ ' + esc(warns.join(", ")) + '</span>';
           }
           html += '</span>';
           div.innerHTML = html;
@@ -4091,8 +4163,8 @@ def voice_clone_ui():
           list.forEach(c => {
             const row = document.createElement("div");
             row.className = "clone-row";
-            row.innerHTML = '<div style="flex:1;"><div class="nm">' + (c.name || c.companion_id || "voice").replace(/</g, "&lt;") + '</div>'
-              + '<div class="sub">' + (c.num_clips || 1) + ' clip(s) · ' + (c.total_seconds || 0) + 's</div></div>'
+            row.innerHTML = '<div style="flex:1;"><div class="nm">' + esc(c.name || c.companion_id || "voice") + '</div>'
+              + '<div class="sub">' + esc(c.num_clips || 1) + ' clip(s) · ' + esc(c.total_seconds || 0) + 's</div></div>'
               + '<button class="test-btn">Test</button>'
               + '<button class="dl-btn secondary">Download</button>'
               + '<button class="del-btn">Delete</button>';
@@ -4133,7 +4205,7 @@ def voice_clone_ui():
           });
           if (selectId) testClone.value = selectId;
         } catch (err) {
-          cloneList.innerHTML = '<div class="clip-meta">Failed to load voices: ' + err.message + '</div>';
+          cloneList.innerHTML = '<div class="clip-meta">Failed to load voices: ' + esc(err.message) + '</div>';
         }
       }
 
@@ -4185,7 +4257,11 @@ def voice_clone_ui():
           testStatus.textContent = "Duration: " + (d.duration || 0).toFixed(1) + "s";
           const div = document.createElement("div");
           div.className = "audio-item";
-          div.innerHTML = '<audio controls autoplay src="' + d.audio_url + '"></audio>';
+          const audio = document.createElement("audio");
+          audio.controls = true;
+          audio.autoplay = true;
+          audio.src = d.audio_url || "";
+          div.appendChild(audio);
           testAudio.prepend(div);
         } catch (err) {
           testStatus.textContent = "Error: " + err.message;

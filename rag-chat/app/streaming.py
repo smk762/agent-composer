@@ -94,6 +94,7 @@ async def stream_ollama_chat(
 
             # Stream tokens
             accumulated_tool_calls: List[Dict[str, Any]] = []
+            saw_done = False
             async for line in response.aiter_lines():
                 if not line.strip():
                     continue
@@ -102,6 +103,11 @@ async def stream_ollama_chat(
                     chunk_data = json.loads(line)
                 except json.JSONDecodeError:
                     continue
+
+                # Ollama can answer 200 and then report a failure (OOM, unload, context overflow)
+                # as an {"error": ...} line: surface it rather than ending as a normal completion.
+                if isinstance(chunk_data, dict) and chunk_data.get("error"):
+                    raise StreamError(f"Ollama error mid-stream: {chunk_data['error']}")
 
                 message = chunk_data.get("message", {})
                 content = message.get("content")
@@ -130,7 +136,7 @@ async def stream_ollama_chat(
                 if done:
                     if accumulated_tool_calls:
                         formatted_tool_calls = []
-                        for tc in accumulated_tool_calls:
+                        for i, tc in enumerate(accumulated_tool_calls):
                             func = tc.get("function", {})
                             # Ollama returns arguments as a dict; OpenAI
                             # format requires a JSON string.
@@ -141,6 +147,8 @@ async def stream_ollama_chat(
                                 else str(raw_args)
                             )
                             formatted_tool_calls.append({
+                                # OpenAI streaming deltas key each call by index.
+                                "index": i,
                                 "id": tc.get("id", f"call_{secrets.token_hex(12)}"),
                                 "type": "function",
                                 "function": {
@@ -173,7 +181,11 @@ async def stream_ollama_chat(
                             )],
                             conversation_id=conversation_id,
                         )
+                    saw_done = True
                     break
+
+            if not saw_done:
+                raise StreamError("Ollama stream ended before its final (done) message")
 
     except StreamError:
         raise

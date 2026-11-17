@@ -1,5 +1,6 @@
 """Request authentication for rag-chat: resolves the user from a bearer API key, a verified
-Cloudflare Access JWT, or the DEV_AUTH_BYPASS dev user.
+Cloudflare Access JWT, or the DEV_AUTH_BYPASS dev user (DEV_DEFAULT_USER, or an X-Dev-User
+listed in DEV_AUTH_USERS; the bypass is off unless DEV_AUTH_BYPASS=1).
 
 The ``Cf-Access-Authenticated-User-Email`` header is never trusted on its own: anyone who
 reaches the origin without passing Cloudflare (a LAN port, another container) can set it.
@@ -22,7 +23,14 @@ from fastapi import Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import CF_ACCESS_AUD, CF_ACCESS_TEAM_DOMAIN, DEV_AUTH_BYPASS, DEV_DEFAULT_USER, UTC
+from app.config import (
+    CF_ACCESS_AUD,
+    CF_ACCESS_TEAM_DOMAIN,
+    DEV_AUTH_BYPASS,
+    DEV_AUTH_USERS,
+    DEV_DEFAULT_USER,
+    UTC,
+)
 from app.db import get_db
 from app.models.orm import ApiKey
 from app.models.schemas import AuthContext
@@ -130,6 +138,28 @@ async def _access_identity(request: Request) -> Optional[str]:
         return _refuse_access("Invalid Cloudflare Access token")
 
 
+def warn_if_dev_bypass() -> None:
+    """Called at startup: the bypass authenticates anyone who can reach the port."""
+    if DEV_AUTH_BYPASS:
+        log.warning(
+            "DEV_AUTH_BYPASS=1: requests without credentials run as %s%s. Local development only; "
+            "never enable it on an instance others can reach.",
+            DEV_DEFAULT_USER,
+            f" (or X-Dev-User in {sorted(DEV_AUTH_USERS)})" if DEV_AUTH_USERS else "",
+        )
+
+
+def _dev_user(request: Request) -> str:
+    """The dev-bypass user: DEV_DEFAULT_USER, or an X-Dev-User listed in DEV_AUTH_USERS. Any other
+    X-Dev-User is a 403, so the header can't impersonate an arbitrary user."""
+    wanted = (_get_header(request, "X-Dev-User") or "").strip()
+    if not wanted or wanted == DEV_DEFAULT_USER:
+        return DEV_DEFAULT_USER
+    if wanted in DEV_AUTH_USERS:
+        return wanted
+    raise HTTPException(403, "X-Dev-User is not DEV_DEFAULT_USER or listed in DEV_AUTH_USERS")
+
+
 async def require_user(
     request: Request, db: AsyncSession = Depends(get_db)
 ) -> AuthContext:
@@ -146,7 +176,6 @@ async def require_user(
         return AuthContext(user_id=email, via="access")
 
     if DEV_AUTH_BYPASS:
-        dev_user = _get_header(request, "X-Dev-User") or DEV_DEFAULT_USER
-        return AuthContext(user_id=dev_user, via="dev")
+        return AuthContext(user_id=_dev_user(request), via="dev")
 
     raise HTTPException(401, "Authentication required")
