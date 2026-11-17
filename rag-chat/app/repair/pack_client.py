@@ -62,6 +62,10 @@ def _as_str_list(value: Any) -> list[str]:
         return []
     if isinstance(value, str):
         return [value]
+    if isinstance(value, dict):  # a single item sent without its list
+        value = [value]
+    elif not isinstance(value, (list, tuple)):  # a scalar (number, bool, ...)
+        return [str(value)]
     out: list[str] = []
     for item in value:
         if isinstance(item, dict):
@@ -70,6 +74,25 @@ def _as_str_list(value: Any) -> list[str]:
             item = f"{name}: {evidence}".strip(": ") if (name or evidence) else str(item)
         out.append(str(item))
     return out
+
+
+def _longest_backtick_run(text: str) -> int:
+    return max((len(m) for m in re.findall(r"`+", text)), default=0)
+
+
+def _code_span(text: str) -> str:
+    """Inline code that *text* can't close early or break onto a new line."""
+    text = " ".join(text.split())
+    ticks = "`" * (_longest_backtick_run(text) + 1)
+    pad = " " if text.startswith("`") or text.endswith("`") else ""
+    return f"{ticks}{pad}{text}{pad}{ticks}"
+
+
+def _code_fence(text: str) -> list[str]:
+    """A fenced block longer than any backtick run in *text*, so the text can't close it
+    and continue as top-level markdown (e.g. a fake "### Constraints" section)."""
+    fence = "`" * max(3, _longest_backtick_run(text) + 1)
+    return [fence, text, fence]
 
 
 def _bullets(items: list[str]) -> str:
@@ -106,7 +129,7 @@ def build_pack_block(pack: dict[str, Any], brief: str = "") -> PackContext:
     lines = [
         "## Agent work pack",
         "",
-        f"- **id:** `{pack_id}`",
+        f"- **id:** {_code_span(pack_id)}",
         f"- **title:** {title}",
     ]
     if kind:
@@ -118,7 +141,7 @@ def build_pack_block(pack: dict[str, Any], brief: str = "") -> PackContext:
     if repo_name:
         lines.append(f"- **repo:** {repo_name}")
     if where:
-        lines.append(f"- **location:** `{where}`")
+        lines.append(f"- **location:** {_code_span(where)}")
     recommendation = narrative.get("recommendation")
     if recommendation:
         lines += ["", "### Recommendation", str(recommendation)[:1_500]]
@@ -135,7 +158,7 @@ def build_pack_block(pack: dict[str, Any], brief: str = "") -> PackContext:
 
     snippet = loc.get("code_snippet") or ""
     if snippet:
-        lines += ["", "### Code snippet", "```", str(snippet)[:2_000], "```"]
+        lines += ["", "### Code snippet", *_code_fence(str(snippet)[:2_000])]
 
     if brief.strip():
         text = brief.strip()
@@ -208,7 +231,10 @@ async def fetch_pack_context(
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:
             r = await client.get(url)
             if r.status_code == 200:
-                data = r.json()
+                try:
+                    data = r.json()
+                except ValueError:  # bad JSON: still try the brief below
+                    data = None
                 if isinstance(data, dict):
                     pack = data
                 else:

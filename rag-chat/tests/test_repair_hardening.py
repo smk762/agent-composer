@@ -169,25 +169,47 @@ class RepairLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("sql injection in query()", prompts[2])  # iteration 3 still sees the error
 
 
+    async def test_skipped_critic_does_not_carry_old_notes(self) -> None:
+        fenced = f"```diff\n{DIFF}\n```"
+        request = RepairRequest(
+            repo="r", diff=DIFF, mode="auto_fix", max_iterations=3, audit_api_url="",
+            critique_model="critic",
+        )
+        # iteration 1: fixer patch + critic note; iteration 2: no patch (critic skipped).
+        iterations, prompts = await self._run([fenced, "STALE CRITIC NOTE", "no idea", "nothing"], request)
+        self.assertEqual(iterations[1].patch, "")
+        self.assertIn("STALE CRITIC NOTE", prompts[2])      # iteration 2 sees iteration 1's notes
+        self.assertNotIn("STALE CRITIC NOTE", prompts[3])   # iteration 3 does not
+
+
 # ── extract_patch (8e2687b000, a03eeabf52) ──────────────────────────────────────
 
 
 class ExtractPatchTests(unittest.TestCase):
     def test_diff_block_after_a_non_diff_block(self) -> None:
         response = f"Before:\n```python\nprint(1)\n```\nThen apply this:\n```diff\n{DIFF}\n```\nThat's it."
-        self.assertEqual(extract_patch(response), DIFF)
+        self.assertEqual(extract_patch(response), DIFF + "\n")
 
     def test_inline_diff_stops_at_trailing_fence_and_prose(self) -> None:
         response = f"Fix:\n{DIFF}\n```\n\nThis renames a to b."
-        self.assertEqual(extract_patch(response), DIFF)
+        self.assertEqual(extract_patch(response), DIFF + "\n")
 
     def test_inline_diff_stops_at_prose(self) -> None:
         response = f"{DIFF}\nThis renames a to b."
-        self.assertEqual(extract_patch(response), DIFF)
+        self.assertEqual(extract_patch(response), DIFF + "\n")
 
     def test_plain_fenced_diff(self) -> None:
-        self.assertEqual(extract_patch(f"```diff\n{DIFF}\n```"), DIFF)
+        self.assertEqual(extract_patch(f"```diff\n{DIFF}\n```"), DIFF + "\n")
         self.assertEqual(extract_patch("nothing here"), "")
+
+    def test_crlf_fenced_diff(self) -> None:
+        response = f"```diff\n{DIFF}\n```\nThis renames a to b.".replace("\n", "\r\n")
+        self.assertEqual(extract_patch(response), DIFF + "\n")
+
+    def test_trailing_blank_context_line_is_kept(self) -> None:
+        diff = "--- a/x.py\n+++ b/x.py\n@@ -1,2 +1,2 @@\n-a\n+b\n \n"
+        self.assertEqual(extract_patch(f"```diff\n{diff}```"), diff)
+        self.assertEqual(extract_patch(f"{diff}\n"), diff)
 
 
 # ── apply_inplace (4234183cf8) ──────────────────────────────────────────────────

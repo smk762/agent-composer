@@ -416,13 +416,15 @@ async def _fetch_diff_from_branch(
         data = r.json()
     except Exception:
         return "", f"Audit API returned non-JSON (status {r.status_code})."
+    if not isinstance(data, dict):
+        return "", f"Audit API returned an unexpected JSON shape (status {r.status_code})."
 
     if r.status_code == 404:
-        return "", data.get("error", f"Repo {repo!r} not found in audit API ecosystem config.")
+        return "", str(data.get("error") or f"Repo {repo!r} not found in audit API ecosystem config.")
 
     if r.status_code != 200 or data.get("error"):
-        reason = data.get("reason", "")
-        error  = data.get("error", f"Audit API returned status {r.status_code}.")
+        reason = data.get("reason") or ""
+        error = str(data.get("error") or f"Audit API returned status {r.status_code}.")
         # Append a hint for the most common mistake
         if reason == "branch_not_found":
             error += (
@@ -431,7 +433,9 @@ async def _fetch_diff_from_branch(
             )
         return "", error
 
-    diff_text = data.get("diff", "")
+    diff_text = data.get("diff") or ""
+    if not isinstance(diff_text, str):
+        return "", f"Audit API returned a non-text diff (status {r.status_code})."
     if data.get("is_empty") or not diff_text.strip():
         return "", (
             f"Diff between {compare_branch!r} and HEAD is empty — "
