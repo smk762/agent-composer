@@ -36,6 +36,7 @@ docker compose up -d --build rag-chat
 # Run tests (inside service dir, no container needed)
 cd rag-ingest && python -m pytest tests/ -v
 cd rag-chat   && python -m pytest tests/ -v
+python -m unittest discover -s scripts/tests -v   # from the repo root; stdlib only (CI runs it too)
 
 # Single test
 python -m pytest tests/test_code_chunker.py::test_python_function -v
