@@ -36,6 +36,8 @@ def prepare_guard_image(data: bytes) -> bytes:
                 and im.mode == "RGB"
                 and max(im.size) <= _GUARD_MAX_EDGE
                 and len(data) <= _GUARD_MAX_BYTES
+                # Rotated photos need exif_transpose; re-encoding also drops their EXIF.
+                and not im.getexif()
             ):
                 return data
             if fmt in {"JPEG", "JPG"}:
@@ -47,6 +49,9 @@ def prepare_guard_image(data: bytes) -> bytes:
             alpha = out.mode in ("RGBA", "LA", "PA") or (out.mode == "P" and "transparency" in out.info)
             if not alpha:
                 out = out.convert("RGB")
+            elif out.mode in ("P", "PA"):
+                # The PNG encoder cannot write PA; RGBA keeps the transparency.
+                out = out.convert("RGBA")
             edge = max(out.size)
             while True:
                 buf = io.BytesIO()

@@ -5,11 +5,13 @@ import re
 from typing import AsyncIterator, List, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import require_user
+from app.db import get_db
 from app.gpu_lease import OllamaLeaseUnavailable, ollama_lease
 from app.config import CHAT_MODEL, MODERNBERT_URL, OLLAMA_TIMEOUT, ollama_keep_alive
 
@@ -223,6 +225,19 @@ async def _ollama_stream(model: str, system: str, prompt: str) -> AsyncIterator[
         yield f"\n[{exc.detail}]"
 
 
+async def _stage_model(requested: str, request: Request, db: AsyncSession) -> str:
+    """The stage's model: CHAT_MODEL, or the Pipeline Lab's pick for a signed-in caller.
+
+    Naming another model makes Ollama load it (evicting what is resident), a VRAM action,
+    so like /load and /evict it needs a user; the default model stays open.
+    """
+    model = (requested or "").strip()
+    if not model or model == CHAT_MODEL:
+        return CHAT_MODEL
+    await require_user(request, db)
+    return model
+
+
 # ------------------------------------------------------------------ Stage 2: overlay
 
 class OverlayRequest(BaseModel):
@@ -239,8 +254,8 @@ class OverlayRequest(BaseModel):
 
 
 @router.post("/overlay")
-async def overlay(req: OverlayRequest):
-    model = req.model or CHAT_MODEL
+async def overlay(req: OverlayRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    model = await _stage_model(req.model, request, db)
     signal = ", ".join(
         f"{lbl} ({score:.2f})" for lbl, score in zip(req.labels[:5], req.scores[:5])
     )
@@ -274,8 +289,8 @@ class BrainRequest(BaseModel):
 
 
 @router.post("/brain")
-async def brain(req: BrainRequest):
-    model = req.model or CHAT_MODEL
+async def brain(req: BrainRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    model = await _stage_model(req.model, request, db)
     system = _BRAIN_SYSTEM_TPL.format(name=req.character_name)
     signal = ", ".join(req.labels[:5])
     # One turn per line, so a turn can't add lines of its own (a fake "Plan:").
@@ -305,8 +320,8 @@ class ProseRequest(BaseModel):
 
 
 @router.post("/prose")
-async def prose(req: ProseRequest):
-    model = req.model or CHAT_MODEL
+async def prose(req: ProseRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    model = await _stage_model(req.model, request, db)
     system = _PROSE_SYSTEM_TPL.format(name=req.character_name)
     recent = "\n".join(f"  {t}" for t in req.turns[-3:]) if req.turns else "  (none)"
     prompt = (

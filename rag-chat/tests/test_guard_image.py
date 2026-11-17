@@ -84,3 +84,25 @@ class PrepareImageTests(unittest.TestCase):
         self.assertEqual(image_b64(""), "")
         with self.assertRaises(ValueError):
             image_b64("@@@")
+
+    def test_a_rotated_jpeg_is_transposed_and_its_exif_dropped(self) -> None:
+        exif = Image.Exif()
+        exif[0x0112] = 6  # rotate 90 CW on display
+        buf = io.BytesIO()
+        Image.new("RGB", (40, 20), (12, 80, 160)).save(buf, "JPEG", exif=exif.tobytes())
+        with Image.open(io.BytesIO(prepare_guard_image(buf.getvalue()))) as out:
+            self.assertEqual(out.size, (20, 40))
+            self.assertNotIn(0x0112, out.getexif())
+
+    def test_a_pa_image_is_saved_as_an_rgba_png(self) -> None:
+        im = Image.new("PA", (16, 16))  # TIFF can carry PA; the PNG encoder cannot write it
+        im.putpalette([200, 0, 0] * 256)
+        with Image.open(io.BytesIO(prepare_guard_image(_pa_tiff(im)))) as out:
+            self.assertEqual(out.format, "PNG")
+            self.assertEqual(out.mode, "RGBA")
+
+
+def _pa_tiff(im: Image.Image) -> bytes:
+    buf = io.BytesIO()
+    im.save(buf, "TIFF")
+    return buf.getvalue()

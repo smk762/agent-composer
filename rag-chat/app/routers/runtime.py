@@ -38,7 +38,9 @@ async def _ollama_post(path: str, payload: Dict[str, Any], *, timeout: int = OLL
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(f"{OLLAMA_URL}{path}", json=payload)
-    except httpx.ConnectError:
+    except httpx.TimeoutException:
+        raise HTTPException(504, detail="Ollama timed out")
+    except httpx.TransportError:
         raise HTTPException(503, detail="Ollama unreachable")
     if response.status_code >= 400:
         raise HTTPException(response.status_code, detail=response.text)
@@ -49,7 +51,9 @@ async def _ollama_get(path: str, *, timeout: int = 30) -> Dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.get(f"{OLLAMA_URL}{path}")
-    except httpx.ConnectError:
+    except httpx.TimeoutException:
+        raise HTTPException(504, detail="Ollama timed out")
+    except httpx.TransportError:
         raise HTTPException(503, detail="Ollama unreachable")
     if response.status_code >= 400:
         raise HTTPException(response.status_code, detail=response.text)
@@ -77,7 +81,7 @@ async def ollama_status():
 
 @router.post("/ollama/wake")
 async def ollama_wake(req: RuntimeModelRequest):
-    model = (req.model or CHAT_MODEL).strip()
+    model = (req.model or "").strip() or CHAT_MODEL
     await _ollama_post(
         "/api/generate",
         {"model": model, "prompt": "", "stream": False, **ollama_keep_alive()},
@@ -106,7 +110,11 @@ async def ollama_evict(req: RuntimeModelRequest):
             {"model": model, "prompt": "", "stream": False, "keep_alive": 0},
         )
         evicted.append(model)
-    return {"state": "idle" if evicted else "already_idle", "evicted": evicted}
+    if not evicted:
+        return {"state": "already_idle", "evicted": evicted}
+    # Evicting one model leaves the others resident: report what is still loaded.
+    remaining = [m for m in loaded if m not in evicted]
+    return {"state": "loaded" if remaining else "idle", "evicted": evicted, "loaded": remaining}
 
 
 def _admin_headers() -> Dict[str, str]:
@@ -118,7 +126,9 @@ async def _infinity_get(path: str, *, wake: bool = False) -> Dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
             response = await client.get(f"{INFINITY_URL}{path}", headers=headers)
-    except httpx.ConnectError:
+    except httpx.TimeoutException:
+        raise HTTPException(504, detail="Infinity timed out")
+    except httpx.TransportError:
         raise HTTPException(503, detail="Infinity unreachable")
     if response.status_code >= 400:
         raise HTTPException(response.status_code, detail=response.text)
@@ -129,7 +139,9 @@ async def _infinity_post(path: str) -> Dict[str, Any]:
     try:
         async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
             response = await client.post(f"{INFINITY_URL}{path}", headers=_admin_headers())
-    except httpx.ConnectError:
+    except httpx.TimeoutException:
+        raise HTTPException(504, detail="Infinity timed out")
+    except httpx.TransportError:
         raise HTTPException(503, detail="Infinity unreachable")
     if response.status_code >= 400:
         raise HTTPException(response.status_code, detail=response.text)
