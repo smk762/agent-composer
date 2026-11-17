@@ -174,6 +174,19 @@ class ExtraResidentsTest(unittest.TestCase):
         self.assertEqual(found["tts"], "http://tts:8031")
         self.assertEqual(found["xtts"], "http://xtts:8031")
 
+    def test_an_unset_backend_does_not_drop_an_extra_resident(self) -> None:
+        with patch.object(runtime, "RUNTIME_EXTRA_RESIDENTS", {"modernbert": "http://mb-elsewhere:7998"}), \
+                patch.object(runtime, "MODERNBERT_URL", ""), \
+                patch.object(runtime, "TTS_ENGINES", {"xtts": "http://xtts:8031", "tts": ""}):
+            found = runtime._residents()
+        self.assertEqual(found["modernbert"], "http://mb-elsewhere:7998")
+        self.assertNotIn("tts", found)
+
+    def test_an_empty_engine_does_not_drop_the_extra_tts(self) -> None:
+        with patch.object(runtime, "RUNTIME_EXTRA_RESIDENTS", {"tts": "http://tts:8031"}), \
+                patch.object(runtime, "TTS_ENGINES", {"xtts": "http://xtts:8031", "tts": ""}):
+            self.assertEqual(runtime._residents()["tts"], "http://tts:8031")
+
     def test_env_reaches_the_gateway_but_not_the_engines(self) -> None:
         from app import config
 
@@ -184,3 +197,48 @@ class ExtraResidentsTest(unittest.TestCase):
             reloaded = importlib.reload(config)
         self.assertEqual(reloaded.RUNTIME_EXTRA_RESIDENTS, {"tts": "http://tts:8031"})
         self.assertNotIn("tts", reloaded.TTS_ENGINES)
+
+
+class OllamaEvictTest(unittest.TestCase):
+    """POST /api/runtime/ollama/evict only unloads models Ollama reports as loaded."""
+
+    def setUp(self) -> None:
+        async def no_db():
+            yield None
+
+        app = FastAPI()
+        app.include_router(runtime.router)
+        app.dependency_overrides[get_db] = no_db
+        self.client = TestClient(app)
+        self.generated: list = []
+
+        async def fake_get(path, *, timeout=30):
+            assert path == "/api/ps"
+            return {"models": [{"name": "qwen2.5:7b"}, {"name": "llama3:latest"}]}
+
+        async def fake_post(path, payload, *, timeout=None):
+            self.generated.append(payload)
+            return {}
+
+        for p in (
+            patch.object(auth, "DEV_AUTH_BYPASS", True),
+            patch.object(runtime, "_ollama_get", fake_get),
+            patch.object(runtime, "_ollama_post", fake_post),
+        ):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_a_model_that_is_not_loaded_is_never_loaded_to_evict_it(self) -> None:
+        r = self.client.post("/api/runtime/ollama/evict", json={"model": "mistral:large"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"state": "already_idle", "evicted": []})
+        self.assertEqual(self.generated, [])
+
+    def test_a_loaded_model_is_evicted_by_its_loaded_name(self) -> None:
+        r = self.client.post("/api/runtime/ollama/evict", json={"model": "llama3"})
+        self.assertEqual(r.json()["evicted"], ["llama3:latest"])
+        self.assertEqual(self.generated, [{"model": "llama3:latest", "prompt": "", "stream": False, "keep_alive": 0}])
+
+    def test_no_model_evicts_everything_loaded(self) -> None:
+        r = self.client.post("/api/runtime/ollama/evict", json={})
+        self.assertEqual(r.json()["evicted"], ["qwen2.5:7b", "llama3:latest"])

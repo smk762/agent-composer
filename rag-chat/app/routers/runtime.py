@@ -85,11 +85,20 @@ async def ollama_wake(req: RuntimeModelRequest):
     return {"state": "loaded", "model": model, "keep_alive": OLLAMA_KEEP_ALIVE or "server"}
 
 
+def _same_model(a: str, b: str) -> bool:
+    """Ollama names a model with or without its default ``:latest`` tag."""
+    def full(name: str) -> str:
+        return name if ":" in name else f"{name}:latest"
+    return full(a) == full(b)
+
+
 @router.post("/ollama/evict")
 async def ollama_evict(req: RuntimeModelRequest):
-    models = [req.model.strip()] if req.model and req.model.strip() else []
-    if not models:
-        models = _loaded_ollama_models(await _ollama_get("/api/ps"))
+    # Always look at what is loaded: an empty-prompt generate for a model that isn't
+    # resident would load it (pushing others out) only to drop it again.
+    loaded = _loaded_ollama_models(await _ollama_get("/api/ps"))
+    requested = req.model.strip() if req.model else ""
+    models = [m for m in loaded if _same_model(m, requested)] if requested else loaded
     evicted: List[str] = []
     for model in models:
         await _ollama_post(
@@ -176,14 +185,16 @@ _HEALTH_TIMEOUT = 10.0
 
 
 def _residents() -> Dict[str, str]:
-    found = {
-        **RUNTIME_EXTRA_RESIDENTS,  # e.g. tts (Qwen, used by argus-mask); never TTS engines
-        "modernbert": MODERNBERT_URL,
-        "whisper": WHISPER_URL,
-        "infinity": INFINITY_URL,
-        **TTS_ENGINES,  # xtts, miso (remote), tts (legacy Qwen)
-    }
-    return {name: url.rstrip("/") for name, url in found.items() if url}
+    # Later sources win a name clash: extras < fixed backends < TTS engines. Each source drops its
+    # empty URLs first, so an unset backend never removes a resident another source configured.
+    found: Dict[str, str] = {}
+    for source in (
+        RUNTIME_EXTRA_RESIDENTS,  # e.g. tts (Qwen, used by argus-mask); never TTS engines
+        {"modernbert": MODERNBERT_URL, "whisper": WHISPER_URL, "infinity": INFINITY_URL},
+        TTS_ENGINES,  # xtts, miso (remote), tts (legacy Qwen)
+    ):
+        found.update({name: url.rstrip("/") for name, url in source.items() if url})
+    return found
 
 
 def _resident_url(name: str) -> str:
