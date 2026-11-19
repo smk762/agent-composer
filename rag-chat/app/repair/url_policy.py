@@ -19,8 +19,13 @@ IPv4 inside IPv6) are normalised before the link-local check.
 
 A URL accepted through ``AUDIT_API_ALLOWED_HOSTS`` (not a configured origin) is also
 resolved (``check_resolved``): it is refused when any address it resolves to is
-link-local, or when it does not resolve. The connection is not pinned to the checked
-address, so this is still not a defence against DNS rebinding.
+link-local, or when it does not resolve.
+
+That check runs before the job, so a name could still be re-pointed (DNS rebinding)
+between it and the fetch. Every request to an audit URL therefore goes through
+``audit_client``, whose ``PinnedTransport`` resolves the host again at connect time,
+refuses the request when any address is link-local, and connects to the address it
+checked (``Host`` and TLS SNI/certificate checks keep the name).
 """
 
 from __future__ import annotations
@@ -32,6 +37,8 @@ import socket
 from functools import lru_cache
 from typing import Iterable, Optional
 from urllib.parse import urlsplit
+
+import httpx
 
 log = logging.getLogger("rag-chat.repair")
 
@@ -140,11 +147,67 @@ async def check_resolved(url: str, field: str, *, configured: Iterable[str]) -> 
         return f"{field}: cannot resolve {host} ({exc})"
     if not addresses:
         return f"{field}: {host} resolves to no address"
-    for addr in addresses:
-        ip = _ip_literal(addr.split("%", 1)[0])
-        if ip is None or _address_is_link_local(ip):
-            return f"{field}: {host} resolves to a link-local address ({addr}), which is never allowed"
+    if _vetted_addresses(addresses) is None:
+        return f"{field}: {host} resolves to a link-local address ({', '.join(addresses)}), which is never allowed"
     return None
+
+
+def _vetted_addresses(addresses: Iterable[str]) -> Optional[list[ipaddress._BaseAddress]]:
+    """``addresses`` parsed, or None when one is unparseable or link-local (or there are none)."""
+    ips = [_ip_literal(a.split("%", 1)[0]) for a in addresses]
+    if not ips or any(ip is None or _address_is_link_local(ip) for ip in ips):
+        return None
+    return ips
+
+
+class PinnedTransport(httpx.AsyncBaseTransport):
+    """Resolve each request's host itself, refuse link-local, and connect to the checked address.
+
+    Closes the DNS-rebinding window between ``check_resolved`` and the fetch: the address
+    vetted here is the one the socket connects to. A refusal is an ``httpx.ConnectError``,
+    which the callers already treat as "audit API unreachable" (fail closed / fail soft).
+    """
+
+    def __init__(self, inner: Optional[httpx.AsyncBaseTransport] = None) -> None:
+        self._inner = inner or httpx.AsyncHTTPTransport()
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        host = request.url.host
+        literal = _ip_literal(host)
+        if literal is not None:
+            if _address_is_link_local(literal):
+                raise httpx.ConnectError(f"link-local host {host} is never allowed", request=request)
+            return await self._inner.handle_async_request(request)
+        port = request.url.port or _DEFAULT_PORTS.get(request.url.scheme, 80)
+        try:
+            addresses = await _resolve(host, port)
+        except (OSError, UnicodeError) as exc:
+            raise httpx.ConnectError(f"cannot resolve {host} ({exc})", request=request) from exc
+        vetted = _vetted_addresses(addresses)
+        if vetted is None:
+            raise httpx.ConnectError(
+                f"{host} resolves to a link-local or unusable address ({', '.join(addresses) or 'none'})",
+                request=request,
+            )
+        # The Host header was set from the name when the request was built; SNI and the
+        # certificate check use the name too, so only the socket address changes.
+        request.url = request.url.copy_with(host=str(vetted[0]))
+        request.extensions = {**request.extensions, "sni_hostname": host}
+        return await self._inner.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        await self._inner.aclose()
+
+
+def audit_client(**kwargs) -> httpx.AsyncClient:
+    """An ``httpx.AsyncClient`` for audit API URLs, pinned through ``PinnedTransport``.
+
+    ``trust_env=False``: an environment proxy would make the connection itself and
+    bypass the pinned address.
+    """
+    kwargs.setdefault("transport", PinnedTransport())
+    kwargs.setdefault("trust_env", False)
+    return httpx.AsyncClient(**kwargs)
 
 
 def check_audit_url(url: str, field: str, *, allowlist: str, configured: Iterable[str]) -> Optional[str]:

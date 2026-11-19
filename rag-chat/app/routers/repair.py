@@ -38,7 +38,7 @@ from app.repair.multi_model import repair_loop
 from app.repair.pack_client import fetch_pack_context, report_pack_status, resolve_repo
 from app.repair.patch_applier import apply_inplace, apply_to_temp
 from app.repair.code_search import code_query, fetch_code_snippets
-from app.repair.url_policy import check_audit_url, check_resolved
+from app.repair.url_policy import audit_client, check_audit_url, check_resolved
 
 log = logging.getLogger("rag-chat.repair")
 router = APIRouter(prefix="/api/repair", tags=["repair"])
@@ -401,7 +401,7 @@ async def _fetch_diff_from_branch(
         return "", "No audit_api_url configured — cannot generate diff from branch."
 
     try:
-        async with httpx.AsyncClient(timeout=35) as client:
+        async with audit_client(timeout=35) as client:
             r = await client.post(
                 f"{audit_api_url.rstrip('/')}/audit/git/diff",
                 json={"repo": repo, "compare_branch": compare_branch},
@@ -490,7 +490,7 @@ async def _run_git_ops(
     error_parts: list[str] = []
 
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with audit_client(timeout=60) as client:
             # 1. Create repair branch
             slug = job_id.replace("repair-", "")
             r = await client.post(

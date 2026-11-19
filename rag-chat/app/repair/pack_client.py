@@ -19,6 +19,8 @@ from urllib.parse import quote, urlparse
 
 import httpx
 
+from app.repair.url_policy import audit_client
+
 log = logging.getLogger("rag-chat.repair")
 
 # Pack ids look like ``pack-world-ecosystem`` / ``ext-retry-core-001``.  Keep the
@@ -228,7 +230,7 @@ async def fetch_pack_context(
     brief = ""
     warning = ""
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:
+        async with audit_client(timeout=httpx.Timeout(timeout_s)) as client:
             r = await client.get(url)
             if r.status_code == 200:
                 try:
@@ -295,7 +297,7 @@ async def report_pack_status(
         return "invalid pack id or audit_api_base"
     headers = {"X-API-Token": api_token} if api_token else {}
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:
+        async with audit_client(timeout=httpx.Timeout(timeout_s)) as client:
             r = await client.post(
                 f"{base}/audit/packs/{quote(pack_id, safe='')}/status",
                 json={"status": status, "note": note[:2000]},

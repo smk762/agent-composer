@@ -439,6 +439,43 @@ class CloneVoiceTests(unittest.TestCase):
             tts_server._mgr._idle.set()
 
 
+class SynthesiseFileIoTests(unittest.TestCase):
+    """630f3c112e: the WAV is written and read back off the event loop, not on it."""
+
+    def test_synthesise_does_no_file_io_on_the_event_loop_thread(self):
+        import builtins
+        import threading
+
+        import numpy as np
+
+        loop_thread = threading.get_ident()
+        on_loop = []
+        real_open = builtins.open
+
+        def spy_open(*args, **kwargs):
+            if threading.get_ident() == loop_thread:
+                on_loop.append(args[0] if args else kwargs.get("file"))
+            return real_open(*args, **kwargs)
+
+        async def fake_generate(req):
+            return np.zeros(2400, dtype="<f4"), 24000
+
+        uploaded = {}
+
+        def fake_upload(data, key, *a):
+            uploaded["bytes"] = data
+            return f"s3://bucket/{key}"
+
+        with mock.patch.object(tts_server, "_generate_audio", fake_generate), \
+                mock.patch.object(tts_server, "_upload_to_s3", fake_upload), \
+                mock.patch.object(tts_server, "open", spy_open, create=True):
+            out = asyncio.run(tts_server.synthesise(tts_server.SynthesiseRequest(text="hi", speaker="ryan")))
+
+        self.assertEqual(on_loop, [])
+        self.assertAlmostEqual(out["duration"], 0.1, places=3)
+        self.assertTrue(uploaded["bytes"].startswith(b"RIFF"))
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -701,6 +701,28 @@ async def _generate_audio_leased(req: SynthesiseRequest):
     return audio, int(sample_rate)
 
 
+def _encode_wav(audio, sample_rate: int) -> tuple[bytes, float]:
+    """``(wav_bytes, duration_s)`` for ``audio``. Blocking file I/O: run it in a thread."""
+    import soundfile as sf
+
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        tmp_path = f.name
+    try:
+        sf.write(tmp_path, audio, sample_rate)
+        with open(tmp_path, "rb") as f:
+            wav_bytes = f.read()
+        return wav_bytes, sf.info(tmp_path).duration
+    finally:
+        os.unlink(tmp_path)
+
+
+def _write_temp_wav(data: bytes) -> str:
+    """Write ``data`` to a new temp ``.wav`` and return its path. Blocking: run it in a thread."""
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+        f.write(data)
+        return f.name
+
+
 @app.post("/synthesise")
 async def synthesise(req: SynthesiseRequest):
     """Generate speech from text and store a WAV. Returns ``{audio_url, duration, ...}``."""
@@ -710,19 +732,7 @@ async def synthesise(req: SynthesiseRequest):
         return rendered
     audio, sample_rate = rendered
 
-    import soundfile as sf
-
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        tmp_path = f.name
-
-    try:
-        await asyncio.to_thread(sf.write, tmp_path, audio, sample_rate)
-        with open(tmp_path, "rb") as f:
-            wav_bytes = f.read()
-        info = await asyncio.to_thread(sf.info, tmp_path)
-        duration = info.duration
-    finally:
-        os.unlink(tmp_path)
+    wav_bytes, duration = await asyncio.to_thread(_encode_wav, audio, sample_rate)
 
     job_id = str(uuid.uuid4())
     s3_key = f"generated/voice/{job_id}.wav"
@@ -850,10 +860,7 @@ async def _clone_voice_leased(audio: UploadFile, reference_text: str, companion_
     import soundfile as sf
 
     audio_bytes = await audio.read()
-
-    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-        f.write(audio_bytes)
-        tmp_path = f.name
+    tmp_path = await asyncio.to_thread(_write_temp_wav, audio_bytes)
 
     try:
         info = await asyncio.to_thread(sf.info, tmp_path)
