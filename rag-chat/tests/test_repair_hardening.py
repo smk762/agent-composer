@@ -310,3 +310,50 @@ class ResolvedHostTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PinnedTransportTests(unittest.IsolatedAsyncioTestCase):
+    """The fetch connects to the address it vetted, so a name re-pointed after
+    ``check_resolved`` (DNS rebinding) cannot reach link-local (d881588efb)."""
+
+    async def _get(self, url, answers):
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            return httpx.Response(200, json={})
+
+        async def resolve(host, port):
+            return answers
+
+        with patch.object(url_policy, "_resolve", resolve):
+            client = url_policy.audit_client(transport=url_policy.PinnedTransport(httpx.MockTransport(handler)))
+            async with client:
+                await client.get(url)
+        return seen
+
+    async def test_connects_to_the_vetted_address_keeping_host_and_sni(self) -> None:
+        seen = await self._get("https://audit.example:8765/audit/packs/x", ["192.0.2.10"])
+        self.assertEqual(seen[0].url.host, "192.0.2.10")
+        self.assertEqual(seen[0].headers["host"], "audit.example:8765")
+        self.assertEqual(seen[0].extensions["sni_hostname"], "audit.example")
+
+    async def test_name_rebound_to_metadata_is_refused_at_connect_time(self) -> None:
+        for answers in (["169.254.169.254"], ["192.0.2.10", "fe80::1"], []):
+            with self.assertRaises(httpx.ConnectError, msg=answers):
+                await self._get("http://rebind.example:8765/", answers)
+
+    async def test_link_local_literal_is_refused(self) -> None:
+        with self.assertRaises(httpx.ConnectError):
+            await self._get("http://169.254.169.254/latest/meta-data", [])
+
+    async def test_pack_fetch_through_a_rebound_name_fails_soft_without_reaching_it(self) -> None:
+        from app.repair import pack_client
+
+        async def resolve(host, port):
+            return ["169.254.169.254"]
+
+        with patch.object(url_policy, "_resolve", resolve):
+            ctx = await pack_client.fetch_pack_context("pack-x", "http://rebind.example:8765", timeout_s=2)
+        self.assertFalse(ctx.ok)
+        self.assertIn("link-local", ctx.warning)

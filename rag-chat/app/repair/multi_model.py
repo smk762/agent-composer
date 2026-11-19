@@ -16,6 +16,7 @@ from app.gpu_lease import OllamaLeaseUnavailable, ollama_lease
 from app.repair.context_builder import build_repair_context
 from app.repair.models import RepairIteration, RepairRequest
 from app.repair.patch_applier import extract_patch
+from app.repair.url_policy import audit_client
 
 # The audit API gates every non-GET route on this token. Without it each call got a 401, which
 # the "degrade gracefully" branches below counted as a pass.
@@ -157,7 +158,7 @@ async def _validate_via_api(
     if not audit_api_url or not patch:
         return True, []
     try:
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with audit_client(timeout=60) as client:
             r = await client.post(
                 f"{audit_api_url.rstrip('/')}/audit/diff",
                 json={"repo": repo, "diff": patch},
@@ -217,7 +218,7 @@ async def _validate_via_tests(
     if not audit_api_url or not patch:
         return True, []
     try:
-        async with httpx.AsyncClient(timeout=timeout + _VALIDATE_CLIENT_MARGIN_S) as client:
+        async with audit_client(timeout=timeout + _VALIDATE_CLIENT_MARGIN_S) as client:
             r = await client.post(
                 f"{audit_api_url.rstrip('/')}/audit/validate_patch",
                 json={"repo": repo, "patch": patch, "timeout_s": timeout},
