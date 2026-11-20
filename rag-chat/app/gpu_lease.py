@@ -239,14 +239,19 @@ def url_for(handle) -> str:
 
     A node in ``OLLAMA_NODE_URLS`` uses that URL; any other node's broker-supplied
     ``base_url`` must pass :func:`vet_node_url` (else :class:`OllamaLeaseUnavailable`, a 503).
+    A grant on another node with no URL at all is refused too: running it on local Ollama
+    would load the model where the broker reserved nothing.
     """
     if getattr(handle, "via", "local") != "broker":
         return OLLAMA_URL
     node = handle.node
     if node and node in NODE_URLS:
         return NODE_URLS[node]
-    if not node or node == HOME_NODE or not handle.base_url:
+    if not node or node == HOME_NODE:
         return OLLAMA_URL
+    if not handle.base_url:
+        raise OllamaLeaseUnavailable(
+            f"GPU broker placed the call on node {node!r} without a URL, and OLLAMA_NODE_URLS has none for it")
     return vet_node_url(handle.base_url)
 
 

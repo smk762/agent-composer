@@ -48,6 +48,13 @@ class PrefixTests(unittest.TestCase):
         self.assertEqual(c.prompts, ["search_document: " + "x" * 13])  # 30 - len(prefix)
         self.assertTrue(truncated)
 
+    def test_overflow_at_the_minimum_is_a_typed_error(self):
+        c = _Client(limit=5)  # even EMBED_MIN_CHARS is over the limit
+        client = em.OllamaEmbeddingClient()
+        with mock.patch.object(em, "EMBED_MAX_CHARS", 0), mock.patch.object(em, "EMBED_MIN_CHARS", 10):
+            with self.assertRaises(em.ContextOverflowError):
+                asyncio.run(client._embed_one(c, "y" * 100))
+
     def test_shrinking_on_overflow_keeps_the_prefix(self):
         c = _Client(limit=60)
         client = em.OllamaEmbeddingClient(prefix="search_document: ")

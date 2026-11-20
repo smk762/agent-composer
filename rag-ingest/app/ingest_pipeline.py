@@ -39,6 +39,7 @@ from app.embeddings import (
     EMBEDDER_STRICT,
     TEXT_DOC_PREFIX,
     TEXT_EMBEDDER,
+    ContextOverflowError,
     InfinityEmbeddingClient,
     OllamaEmbeddingClient,
     text_embed_lease,
@@ -499,19 +500,18 @@ async def _ingest_text_doc(
     if not chunks:
         return
 
-    # Embed one-by-one so per-chunk shrink-on-overflow still works, under one GPU lease
+    # Embed one-by-one so the client's per-chunk shrink-on-overflow still works, under one GPU lease
     # for the document (text_embed_lease; nothing when no broker is configured).
     async with text_embed_lease():
         for idx, chunk in enumerate(chunks):
             try:
                 res = await _text_client.embed([chunk], profile="text")
-            except Exception as e:
-                msg = str(e).lower()
-                if "context length" in msg and "exceed" in msg:
-                    state["skipped_chunks"] += 1
-                    _mark_incomplete(state, doc)
-                    continue
-                raise
+            except ContextOverflowError:
+                # Still too long after the client shrank it: skip the chunk and report the doc
+                # as incomplete (skipped_chunks, incomplete_docs). Any other error fails the request.
+                state["skipped_chunks"] += 1
+                _mark_incomplete(state, doc)
+                continue
 
             emb = res.vectors[0]
             was_truncated = bool(res.truncated and res.truncated[0])

@@ -194,7 +194,13 @@ async def _ollama_generate(model: str, system: str, prompt: str) -> str:
         raise HTTPException(exc.response.status_code, detail=exc.response.text)
 
 
+class StreamFailed(Exception):
+    """The prose stream broke: Ollama unreachable, an error line in the stream, or no ``done``."""
+
+
 async def _ollama_stream(model: str, system: str, prompt: str) -> AsyncIterator[str]:
+    """Tokens of one generation. A failure raises :class:`StreamFailed`, never text: an
+    error yielded as a token would read as the character's prose (and be stored as it)."""
     payload = {
         "model": model,
         "system": system,
@@ -202,6 +208,7 @@ async def _ollama_stream(model: str, system: str, prompt: str) -> AsyncIterator[
         "stream": True,
         **ollama_keep_alive(),
     }
+    done = False
     try:
         async with ollama_lease(model, kind="pipeline", priority="interactive") as base_url:
             async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
@@ -212,17 +219,28 @@ async def _ollama_stream(model: str, system: str, prompt: str) -> AsyncIterator[
                             continue
                         try:
                             chunk = json.loads(line)
-                            token = chunk.get("response", "")
-                            if token:
-                                yield token
-                            if chunk.get("done"):
-                                break
                         except json.JSONDecodeError:
                             continue
-    except httpx.ConnectError:
-        yield "\n[Ollama unreachable]"
-    except OllamaLeaseUnavailable as exc:  # mid-stream: report it in the text, as for an unreachable Ollama
-        yield f"\n[{exc.detail}]"
+                        if not isinstance(chunk, dict):
+                            continue
+                        if chunk.get("error"):  # Ollama reports a failure inside a 200 stream
+                            raise StreamFailed(f"Ollama: {chunk['error']}")
+                        token = chunk.get("response", "")
+                        if token:
+                            yield token
+                        if chunk.get("done"):
+                            done = True
+                            break
+    except httpx.ConnectError as exc:
+        raise StreamFailed("Ollama unreachable") from exc
+    except httpx.HTTPStatusError as exc:
+        raise StreamFailed(f"Ollama answered {exc.response.status_code}") from exc
+    except httpx.TimeoutException as exc:
+        raise StreamFailed("Ollama timed out") from exc
+    except OllamaLeaseUnavailable as exc:
+        raise StreamFailed(exc.detail) from exc
+    if not done:
+        raise StreamFailed("Ollama's stream ended before the response was done (truncated)")
 
 
 async def _stage_model(requested: str, request: Request, db: AsyncSession) -> str:
@@ -336,8 +354,11 @@ async def prose(req: ProseRequest, request: Request, db: AsyncSession = Depends(
     )
 
     async def event_stream():
-        async for token in _ollama_stream(model, system, prompt):
-            yield f"data: {json.dumps({'token': token})}\n\n"
+        try:
+            async for token in _ollama_stream(model, system, prompt):
+                yield f"data: {json.dumps({'token': token})}\n\n"
+        except StreamFailed as exc:  # an error event, never prose: the client must not keep a partial answer
+            yield f"data: {json.dumps({'error': str(exc)})}\n\n"
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

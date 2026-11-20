@@ -18,6 +18,14 @@ _DIFF_CAP = 12_000     # chars — cap raw diff to avoid blowing context
 _SNIPPET_CAP = 4_000   # chars — cap qdrant snippets
 _ERROR_CAP = 2_000     # chars — cap error block
 _PACK_CAP = 8_000      # chars — cap agent pack block
+_NOTES_CAP = 2_000     # chars — cap each previous-iteration notes block
+
+
+def _capped(text: str, cap: int, what: str) -> str:
+    """``text`` cut to ``cap`` chars, saying so: the model must know the rest exists."""
+    if len(text) <= cap:
+        return text
+    return text[:cap] + f"\n... ({what} truncated — {len(text) - cap} chars omitted)"
 
 
 def build_repair_context(
@@ -34,7 +42,8 @@ def build_repair_context(
     # 0. Agent pack (when the repair is driven by pack_id) — states the objective,
     #    acceptance criteria and constraints, so it leads the context.
     if pack_context:
-        parts.append(pack_context[:_PACK_CAP])
+        # A pack's acceptance criteria and constraints come last, so a cut must be visible.
+        parts.append(_capped(pack_context, _PACK_CAP, "work pack"))
 
     # 1. Diff
     if diff:
@@ -66,8 +75,9 @@ def build_repair_context(
 
     # 4. Previous iteration notes
     if critic_notes:
-        parts.append("## Critic's notes (previous iteration)\n\n" + critic_notes[:2000])
+        parts.append("## Critic's notes (previous iteration)\n\n" + _capped(critic_notes, _NOTES_CAP, "critic's notes"))
     if adversary_notes:
-        parts.append("## Adversary's objections (previous iteration)\n\n" + adversary_notes[:2000])
+        parts.append("## Adversary's objections (previous iteration)\n\n"
+                     + _capped(adversary_notes, _NOTES_CAP, "adversary's objections"))
 
     return "\n\n".join(parts)

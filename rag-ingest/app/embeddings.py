@@ -107,6 +107,13 @@ def _is_context_len_error(status: int, body_text: str) -> bool:
     )
 
 
+class ContextOverflowError(RuntimeError):
+    """The text is too long for the embedding model even after shrinking to EMBED_MIN_CHARS.
+
+    Typed, so the ingest path can skip such a chunk (and mark the doc incomplete) without
+    matching words in an error message, which would also swallow unrelated failures."""
+
+
 # The Ollama URL of the lease the current task holds, if any (text_embed_lease).
 _lease_url: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("text_embed_lease_url", default=None)
 
@@ -178,11 +185,15 @@ class OllamaEmbeddingClient(EmbeddingClient):
                 return [float(x) for x in emb], len(body) != original_len
 
             err = r.text or ""
-            if _is_context_len_error(r.status_code, err) and len(body) > min_len:
-                body = body[: max(min_len, len(body) // 2)].strip()
-                continue
+            if _is_context_len_error(r.status_code, err):
+                if len(body) > min_len:
+                    body = body[: max(min_len, len(body) // 2)].strip()
+                    continue
+                raise ContextOverflowError(f"Ollama embeddings: still over the context at {len(body)} chars: {err}")
             raise RuntimeError(f"Ollama embeddings failed: {r.status_code} {err}")
 
+        if last_r is not None and _is_context_len_error(last_r.status_code, last_r.text or ""):
+            raise ContextOverflowError(f"Ollama embeddings: still over the context after {tries} tries")
         if last_r is not None:
             raise RuntimeError(
                 f"Ollama embeddings failed after retries: {last_r.status_code} {last_r.text}"

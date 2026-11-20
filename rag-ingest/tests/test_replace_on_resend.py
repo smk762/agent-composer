@@ -148,11 +148,23 @@ class ReplaceOnResendTests(unittest.TestCase):
 
         class Overflow(Embedder):
             async def embed(self, texts, profile="text"):
-                raise RuntimeError("input length exceeds the context length")
+                raise ip.ContextOverflowError("still over the context at 8 chars")
         with mock.patch.object(ip, "_text_client", Overflow()):
             res = self.ingest([{"id": "a", "text": "new"}])
         self.assertEqual((res["skipped_chunks"], res["incomplete_docs"], res["pruned"]), (1, ["a"], 1))
         self.assertEqual(self.points("a"), [])
+
+    def test_an_error_that_merely_mentions_context_length_is_not_swallowed(self):
+        """Only a typed overflow is skipped; any other failure fails the request and writes nothing."""
+        self.ingest([{"id": "a", "text": "old"}])
+
+        class Down(Embedder):
+            async def embed(self, texts, profile="text"):
+                raise RuntimeError("upstream 502: request would exceed the proxy's context length limit")
+        with mock.patch.object(ip, "_text_client", Down()):
+            with self.assertRaisesRegex(RuntimeError, "upstream 502"):
+                self.ingest([{"id": "a", "text": "new"}])
+        self.assertEqual(len(self.points("a")), 1)  # the old version stands
 
     def test_payload_carries_ingested_at_and_indexes_exist(self):
         self.ingest([{"id": "a", "text": "x"}])

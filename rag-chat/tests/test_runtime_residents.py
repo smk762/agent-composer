@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 import httpx
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from app import auth
@@ -102,6 +102,16 @@ class ResidentGatewayTest(unittest.TestCase):
         self.assertIs(by_name["modernbert"]["busy"], True)
         self.assertFalse(by_name["whisper"]["reachable"])
         self.assertEqual(by_name["whisper"]["status_code"], 503)
+
+    def test_a_failing_sidecar_is_reachable_but_not_healthy(self) -> None:
+        _Upstream.answers["http://mb:7998/health"] = (503, {"detail": "model load failed"})
+        _Upstream.answers["http://xtts:8031/health"] = (200, {"model_state": "gpu"})
+        by_name = {r["name"]: r for r in self.client.get("/api/runtime/residents").json()["residents"]}
+        mb = by_name["modernbert"]
+        self.assertEqual((mb["reachable"], mb["healthy"], mb["status_code"]), (True, False, 503))
+        self.assertEqual(mb["detail"], "model load failed")
+        self.assertTrue(by_name["xtts"]["healthy"])
+        self.assertFalse(by_name["whisper"]["healthy"])  # unreachable
 
     def test_unreachable_admin_is_503(self) -> None:
         self.assertEqual(self.client.post("/api/runtime/residents/modernbert/admin/wake").status_code, 503)
@@ -242,6 +252,19 @@ class OllamaEvictTest(unittest.TestCase):
     def test_no_model_evicts_everything_loaded(self) -> None:
         r = self.client.post("/api/runtime/ollama/evict", json={})
         self.assertEqual(r.json()["evicted"], ["qwen2.5:7b", "llama3:latest"])
+
+    def test_a_failure_partway_reports_what_was_already_evicted(self) -> None:
+        async def failing_second(path, payload, *, timeout=None):
+            if payload["model"] == "llama3:latest":
+                raise HTTPException(503, detail="Ollama unreachable")
+            self.generated.append(payload)
+            return {}
+
+        with patch.object(runtime, "_ollama_post", failing_second):
+            r = self.client.post("/api/runtime/ollama/evict", json={})
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.json(), {"state": "partial", "evicted": ["qwen2.5:7b"], "failed": "llama3:latest",
+                                    "detail": "Ollama unreachable", "loaded": ["llama3:latest"]})
 
     def test_evicting_one_model_reports_the_others_still_loaded(self) -> None:
         r = self.client.post("/api/runtime/ollama/evict", json={"model": "llama3"})

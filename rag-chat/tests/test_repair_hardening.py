@@ -182,6 +182,41 @@ class RepairLoopTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("STALE CRITIC NOTE", prompts[3])   # iteration 3 does not
 
 
+class GenerateFailureTests(unittest.IsolatedAsyncioTestCase):
+    """A failed model call raises; it is never the empty string a model can legitimately return."""
+
+    async def _generate_with(self, handler):
+        with _patch_http(handler):
+            return await multi_model._generate("p", "m", "s")
+
+    async def test_failures_raise_and_empty_answers_do_not(self) -> None:
+        def down(request):
+            raise httpx.ConnectError("refused", request=request)
+
+        cases = {
+            "unreachable": down,
+            "answered 500": lambda r: httpx.Response(500, text="boom"),
+            "JSONDecodeError": lambda r: httpx.Response(200, text="not json"),
+        }
+        for why, handler in cases.items():
+            with self.assertRaisesRegex(multi_model.GenerationFailed, why):
+                await self._generate_with(handler)
+        self.assertEqual(await self._generate_with(lambda r: httpx.Response(200, json={"response": ""})), "")
+
+    async def test_a_failed_call_ends_the_loop_instead_of_iterating_on_nothing(self) -> None:
+        calls = []
+
+        async def failing(prompt, model, system):
+            calls.append(prompt)
+            raise multi_model.GenerationFailed("model m: Ollama unreachable")
+
+        request = RepairRequest(repo="r", diff=DIFF, mode="auto_fix", max_iterations=3, audit_api_url="")
+        with patch.object(multi_model, "_generate", failing):
+            with self.assertRaises(multi_model.GenerationFailed):
+                [it async for it in multi_model.repair_loop(request)]
+        self.assertEqual(len(calls), 1)
+
+
 # ── extract_patch (8e2687b000, a03eeabf52) ──────────────────────────────────────
 
 

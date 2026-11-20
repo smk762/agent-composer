@@ -106,6 +106,13 @@ class OllamaLeaseTest(unittest.IsolatedAsyncioTestCase):
             async with ollama_lease("qwen3:8b", kind="chat", priority="interactive") as url:
                 self.assertEqual(url, "http://192.168.1.109:11434")
 
+    async def test_other_node_without_a_url_is_refused_not_run_locally(self) -> None:
+        coord = self._use(_FakeCoordinator(GpuLease(via="broker", lease_id="L5", node="jarrah", base_url="")))
+        with self.assertRaisesRegex(OllamaLeaseUnavailable, "without a URL"):
+            async with ollama_lease("qwen3:8b", kind="chat", priority="interactive"):
+                self.fail("the body must not run on local Ollama for a lease on another node")
+        self.assertEqual(coord.exits, ["OllamaLeaseUnavailable"])
+
     async def test_fallback_handle_means_local(self) -> None:
         self._use(_FakeCoordinator(GpuLease(via="fallback")))
         async with ollama_lease("qwen3:8b", kind="chat", priority="interactive") as url:
