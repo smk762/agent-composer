@@ -102,10 +102,14 @@ class SearchEndpointTests(unittest.TestCase):
             async def close(self):
                 pass
 
-        with patch.object(self.search, "embed_query", _embed), patch("app.retrieval.AsyncQdrantClient", lambda url: Broken([])):
+        with patch.object(self.search, "embed_query", _embed), patch("app.retrieval.AsyncQdrantClient", lambda url: Broken([])), \
+                self.assertLogs("rag-chat.search", "ERROR") as logs:
             r = self.client.post("/search", json={"query": "q"})
         self.assertEqual(r.status_code, 502)
-        self.assertIn("collection not found", r.json()["detail"])
+        # The client gets a fixed message; the exception text (hosts, internals) goes to the log.
+        self.assertNotIn("collection not found", r.json()["detail"])
+        self.assertIn("Search failed", r.json()["detail"])
+        self.assertIn("collection not found", "\n".join(logs.output))
 
     def test_requires_auth(self):
         from app.routers import search

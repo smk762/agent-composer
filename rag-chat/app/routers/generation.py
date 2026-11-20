@@ -148,7 +148,7 @@ async def _run_provider(db: AsyncSession, gen: Generation, operation, *, metric_
         return await _run_inference_with_oom_retry(operation, metric_operation=metric_operation)
     except RetryableOomError as e:
         await _fail(db, gen, _RETRYABLE_OOM_JOB_ERROR)
-        raise HTTPException(503, str(e))
+        raise HTTPException(503, str(e))  # info-leak: RetryableOomError only carries the fixed _OOM_MESSAGE
     except Exception as e:
         raise await _provider_error(db, gen, e, what=what)
 

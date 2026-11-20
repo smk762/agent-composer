@@ -581,14 +581,16 @@ async def ingest(
     except EmbedderMismatchError as e:
         raise HTTPException(409, str(e))
     except RetryableOomError as e:
-        raise HTTPException(503, str(e))
+        raise HTTPException(503, str(e))  # info-leak: RetryableOomError only carries the fixed _OOM_MESSAGE
     except OllamaLeaseUnavailable as e:  # the GPU broker said no or not yet: busy, not an OOM
         headers = {"Retry-After": str(e.retry_after)} if e.retry_after else None
         raise HTTPException(503, e.detail, headers=headers)
     except HTTPException:
         raise
-    except Exception as e:
-        raise HTTPException(502, f"Ingestion pipeline failed: {e}")
+    except Exception:
+        # The exception text can name Qdrant/Ollama hosts and internals: log it, don't send it.
+        log.exception("ingest failed")
+        raise HTTPException(502, "Ingestion pipeline failed (details in the rag-ingest log)")
 
     result.update({"received_docs": len(ingest_doc.docs), "source": ingest_doc.source, "tags": ingest_doc.tags or []})
     return result
@@ -637,5 +639,6 @@ async def delete(
         if paths:
             return await delete_docs(doc_ids, source=req.source, collection=collection, paths=paths, repo=req.repo)
         return await delete_docs(doc_ids, source=req.source, collection=collection)
-    except Exception as e:
-        raise HTTPException(502, f"Delete failed: {e}")
+    except Exception:
+        log.exception("delete failed")
+        raise HTTPException(502, "Delete failed (details in the rag-ingest log)")

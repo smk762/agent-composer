@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import require_user
 from app.db import get_db
 from app.gpu_lease import OllamaLeaseUnavailable, ollama_lease
+from app.upstream_errors import upstream_error
 from app.config import CHAT_MODEL, MODERNBERT_URL, OLLAMA_TIMEOUT, ollama_keep_alive
 
 router = APIRouter(prefix="/api/pipeline", tags=["pipeline"])
@@ -91,7 +92,7 @@ async def _get(path: str, timeout: float = _TIMEOUT_FAST):
     except httpx.ConnectError:
         raise HTTPException(503, detail="ModernBERT service unreachable")
     except httpx.HTTPStatusError as exc:
-        raise HTTPException(exc.response.status_code, detail=exc.response.text)
+        raise upstream_error(exc.response, "ModernBERT")
 
 
 async def _post(path: str, json=None, timeout: float = _TIMEOUT_FAST):
@@ -103,7 +104,7 @@ async def _post(path: str, json=None, timeout: float = _TIMEOUT_FAST):
     except httpx.ConnectError:
         raise HTTPException(503, detail="ModernBERT service unreachable")
     except httpx.HTTPStatusError as exc:
-        raise HTTPException(exc.response.status_code, detail=exc.response.text)
+        raise upstream_error(exc.response, "ModernBERT")
 
 
 # ------------------------------------------------------------------ model ops
@@ -151,7 +152,7 @@ async def update_labels(body: LabelUpdate):
     except httpx.ConnectError:
         raise HTTPException(503, detail="ModernBERT service unreachable")
     except httpx.HTTPStatusError as exc:
-        raise HTTPException(exc.response.status_code, detail=exc.response.text)
+        raise upstream_error(exc.response, "ModernBERT")
 
 
 # ------------------------------------------------------------------ classify
@@ -191,7 +192,7 @@ async def _ollama_generate(model: str, system: str, prompt: str) -> str:
     except httpx.ConnectError:
         raise HTTPException(503, detail="Ollama unreachable")
     except httpx.HTTPStatusError as exc:
-        raise HTTPException(exc.response.status_code, detail=exc.response.text)
+        raise upstream_error(exc.response, "Ollama")
 
 
 class StreamFailed(Exception):

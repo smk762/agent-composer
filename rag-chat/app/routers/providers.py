@@ -81,7 +81,7 @@ async def configure_provider(
         enc_key = encrypt_value(body.api_key) if body.api_key else None
     except ProviderKeyEncryptionError as e:
         # Refused rather than stored as reversible base64 (no PROVIDER_ENCRYPTION_KEY).
-        raise HTTPException(503, str(e))
+        raise HTTPException(503, str(e))  # info-leak: fixed operator guidance (_crypto.py), no key material
     settings_json = json.dumps(body.settings) if body.settings else None
 
     if pc:

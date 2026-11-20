@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app.auth import require_user
+from app.upstream_errors import upstream_error
 from app.config import (
     ARGUS_ADMIN_TOKEN,
     CHAT_MODEL,
@@ -43,7 +44,7 @@ async def _ollama_post(path: str, payload: Dict[str, Any], *, timeout: int = OLL
     except httpx.TransportError:
         raise HTTPException(503, detail="Ollama unreachable")
     if response.status_code >= 400:
-        raise HTTPException(response.status_code, detail=response.text)
+        raise upstream_error(response, "Ollama")
     return response.json() if response.content else {}
 
 
@@ -56,7 +57,7 @@ async def _ollama_get(path: str, *, timeout: int = 30) -> Dict[str, Any]:
     except httpx.TransportError:
         raise HTTPException(503, detail="Ollama unreachable")
     if response.status_code >= 400:
-        raise HTTPException(response.status_code, detail=response.text)
+        raise upstream_error(response, "Ollama")
     return response.json() if response.content else {}
 
 
@@ -139,7 +140,7 @@ async def _infinity_get(path: str, *, wake: bool = False) -> Dict[str, Any]:
     except httpx.TransportError:
         raise HTTPException(503, detail="Infinity unreachable")
     if response.status_code >= 400:
-        raise HTTPException(response.status_code, detail=response.text)
+        raise upstream_error(response, "Infinity")
     return response.json() if response.content else {}
 
 
@@ -152,7 +153,7 @@ async def _infinity_post(path: str) -> Dict[str, Any]:
     except httpx.TransportError:
         raise HTTPException(503, detail="Infinity unreachable")
     if response.status_code >= 400:
-        raise HTTPException(response.status_code, detail=response.text)
+        raise upstream_error(response, "Infinity")
     return response.json() if response.content else {}
 
 
