@@ -702,11 +702,11 @@ async def synthesise(req: SynthesiseRequest):
             if "out of memory" in err_str or "cuda" in err_str:
                 gpu_info = _gpu_memory_info()
                 logger.error("xtts_gpu_oom", error=str(exc), gpu=gpu_info)
-                return JSONResponse(status_code=503, content={"error": "GPU OOM", "detail": str(exc), "gpu": gpu_info})
+                return JSONResponse(status_code=503, content={"error": "GPU OOM", "gpu": gpu_info})
             raise
         except Exception as exc:
             logger.error("xtts_generation_failed", error=str(exc), exc_info=True)
-            return JSONResponse(status_code=500, content={"error": f"TTS generation failed: {exc}"})
+            return JSONResponse(status_code=500, content={"error": "TTS generation failed (details in the xtts log)"})
         t_gen1 = time.monotonic()
 
     import numpy as np
@@ -1316,7 +1316,8 @@ async def analyze_clips(audio: list[UploadFile] = File(...)):
     except RuntimeError as exc:
         err_str = str(exc).lower()
         if "out of memory" in err_str or "cuda" in err_str:
-            return JSONResponse(status_code=503, content={"error": "GPU OOM", "detail": str(exc)})
+            logger.error("xtts_analyze_gpu_oom", error=str(exc))
+            return JSONResponse(status_code=503, content={"error": "GPU OOM"})
         raise
     finally:
         for path in raw_paths:
@@ -1423,7 +1424,7 @@ async def clone_voice(
             if "out of memory" in err_str or "cuda" in err_str:
                 gpu_info = _gpu_memory_info()
                 logger.error("xtts_clone_gpu_oom", error=str(exc), gpu=gpu_info)
-                return JSONResponse(status_code=503, content={"error": "GPU OOM", "detail": str(exc), "gpu": gpu_info})
+                return JSONResponse(status_code=503, content={"error": "GPU OOM", "gpu": gpu_info})
             raise
     finally:
         for path in set(raw_paths + latent_paths):
@@ -1624,9 +1625,13 @@ def _delete_clone(companion_id: str) -> int:
             _clone_cache.pop(f"{prefix}prompt.pt", None)
     if failed:
         logger.error("clone_delete_partial", companion_id=companion_id, deleted=deleted, failed=failed)
-        raise RuntimeError(f"{len(failed)} of {len(keys)} objects were not deleted ({'; '.join(failed[:5])})")
+        raise ClonePartiallyDeleted(f"{len(failed)} of {len(keys)} objects were not deleted ({'; '.join(failed[:5])})")
     return deleted
 
+
+
+class ClonePartiallyDeleted(RuntimeError):
+    """S3 refused some of a clone's objects; the message names them (for the caller)."""
 
 @app.delete("/clones/{companion_id}")
 async def delete_clone(companion_id: str):
@@ -1638,9 +1643,12 @@ async def delete_clone(companion_id: str):
         objects = await asyncio.to_thread(_delete_clone, companion_id)
     except FileNotFoundError as exc:
         return JSONResponse(status_code=404, content={"error": str(exc)})
+    except ClonePartiallyDeleted as exc:
+        # info-leak: our own count and the clone's own object keys with S3's error codes
+        return JSONResponse(status_code=500, content={"error": f"Failed to delete clone: {exc}"})
     except Exception as exc:
         logger.error("clone_delete_error", companion_id=companion_id, error=str(exc))
-        return JSONResponse(status_code=500, content={"error": f"Failed to delete clone: {exc}"})
+        return JSONResponse(status_code=500, content={"error": "Failed to delete clone (details in the xtts log)"})
     logger.info("voice_deleted", companion_id=companion_id, objects=objects)
     return {"status": "deleted", "companion_id": companion_id, "objects": objects}
 

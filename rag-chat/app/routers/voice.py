@@ -42,6 +42,7 @@ from starlette.background import BackgroundTask
 from app.auth import require_user
 from app.db import get_db
 from app.uploads import read_upload
+from app.upstream_errors import upstream_error
 from app.config import (
     MAX_SENTENCE_PAUSE_MS,
     TTS_DEFAULT_ENGINE,
@@ -102,7 +103,7 @@ def _upstream_error(exc: httpx.HTTPError, service: str) -> HTTPException:
     are logged here, not echoed: their text names internal hosts and ports.
     """
     if isinstance(exc, httpx.HTTPStatusError):
-        return HTTPException(exc.response.status_code, detail=exc.response.text)
+        return upstream_error(exc.response, service)
     log.warning("voice: %s request failed: %r", service, exc)
     if isinstance(exc, httpx.TimeoutException):
         return HTTPException(504, detail=f"{service} timed out")
@@ -272,7 +273,7 @@ async def _synthesise_paced(chain, base_payload: dict, sentences: list[str], gap
                     log.warning("voice: paced engine=%s unreachable, trying next: %s", name, exc)
                     continue
                 except httpx.HTTPStatusError as exc:
-                    raise HTTPException(exc.response.status_code, detail=exc.response.text)
+                    raise upstream_error(exc.response, f"TTS engine {name}")
                 data = r.json()
                 url = data.get("audio_url")
                 if not url:
@@ -451,7 +452,7 @@ async def synthesise(req: SynthesiseRequest):
             log.warning("voice: synthesise engine=%s unreachable, trying next: %s", name, exc)
             continue
         except httpx.HTTPStatusError as exc:
-            raise HTTPException(exc.response.status_code, detail=exc.response.text)
+            raise upstream_error(exc.response, f"TTS engine {name}")
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         data = r.json()
@@ -625,7 +626,7 @@ async def speakers(engine: Optional[str] = Query(default=None)):
     except httpx.ConnectError:
         raise HTTPException(503, detail="TTS server unreachable")
     except httpx.HTTPStatusError as exc:
-        raise HTTPException(exc.response.status_code, detail=exc.response.text)
+        raise upstream_error(exc.response, "TTS server")
 
     return r.json()
 
@@ -790,7 +791,7 @@ async def clones(engine: Optional[str] = Query(default=None)):
     except httpx.ConnectError:
         raise HTTPException(503, detail="TTS server unreachable")
     except httpx.HTTPStatusError as exc:
-        raise HTTPException(exc.response.status_code, detail=exc.response.text)
+        raise upstream_error(exc.response, "TTS server")
 
     return r.json()
 
@@ -817,7 +818,7 @@ async def import_clone(
     except httpx.ConnectError:
         raise HTTPException(503, detail="TTS server unreachable")
     except httpx.HTTPStatusError as exc:
-        raise HTTPException(exc.response.status_code, detail=exc.response.text)
+        raise upstream_error(exc.response, "TTS server")
 
     return r.json()
 
@@ -836,7 +837,7 @@ async def download_clone(companion_id: str, engine: Optional[str] = Query(defaul
     except httpx.ConnectError:
         raise HTTPException(503, detail="TTS server unreachable")
     except httpx.HTTPStatusError as exc:
-        raise HTTPException(exc.response.status_code, detail=exc.response.text)
+        raise upstream_error(exc.response, "TTS server")
 
     return Response(
         content=r.content,

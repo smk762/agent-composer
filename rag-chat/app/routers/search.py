@@ -6,6 +6,7 @@ any explicit ``tags``; a hit must carry all of them. Auth is the same as /chat (
 Cloudflare Access, or the dev bypass).
 """
 
+import logging
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -16,6 +17,8 @@ from app.auth import require_user
 from app.config import QDRANT_COLLECTION
 from app.models.schemas import AuthContext
 from app.routers.chat import embed_query
+
+log = logging.getLogger("rag-chat.search")
 
 router = APIRouter()
 
@@ -61,6 +64,7 @@ async def search(req: SearchRequest, auth: AuthContext = Depends(require_user)) 
         hits = await retrieval.search(query, embed=embed_query, top_k=req.top_k, tags=tags)
     except HTTPException:
         raise
-    except Exception as e:  # Qdrant down, collection missing, ...
-        raise HTTPException(502, f"Search failed: {e}")
+    except Exception:  # Qdrant down, collection missing, ...: the text names hosts, so it goes to the log
+        log.exception("search failed")
+        raise HTTPException(502, "Search failed (details in the rag-chat log)")
     return SearchResponse(collection=QDRANT_COLLECTION, tags=tags, hits=hits)

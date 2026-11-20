@@ -151,6 +151,15 @@ def test_partial_delete_is_an_error(client, monkeypatch):
     assert "voice_clones/abc/prompt.pt" not in xs._clone_cache
 
 
+def test_other_delete_failures_do_not_leak_their_text(client, monkeypatch):
+    def broken():
+        raise RuntimeError("EndpointConnectionError: http://10.0.0.9:9000/voice-bucket")
+    monkeypatch.setattr(xs, "_get_s3_client", broken)
+    r = client.delete("/clones/abc")
+    assert r.status_code == 500
+    assert "10.0.0.9" not in r.text and "details in the xtts log" in r.json()["error"]
+
+
 def test_delete_counts_what_s3_deleted(monkeypatch):
     s3 = _S3(KEYS)
     monkeypatch.setattr(xs, "_get_s3_client", lambda: s3)
