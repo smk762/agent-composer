@@ -299,7 +299,7 @@ class TTSModelManager:
         if task is not None and not task.done():
             try:
                 await asyncio.shield(task)
-            except Exception:
+            except Exception:  # noqa: S110 the move task records its own failure in the state read next
                 pass
 
     async def _make_ready(self) -> None:
@@ -416,7 +416,7 @@ class TTSModelManager:
         An orphaned GPU<->CPU move is waited for too."""
         try:
             await self._await_load()
-        except Exception:
+        except Exception:  # noqa: S110 the load's own caller reports its failure; we only wait for it
             pass
         await self._await_move()
 
@@ -985,7 +985,7 @@ def _free_vram_mb() -> Optional[int]:
     try:
         if torch is not None and torch.cuda.is_initialized():
             return int(torch.cuda.mem_get_info()[0] / 1024**2)
-    except Exception:
+    except Exception:  # noqa: S110 best-effort /health probe: None means unknown, never an error
         pass
     return None
 

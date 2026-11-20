@@ -60,7 +60,7 @@ def _resident_gpu() -> dict:
         # Only with a context already open: creating one would cost VRAM itself.
         if torch.cuda.is_initialized():
             free = int(torch.cuda.mem_get_info()[0] / 1024**2)
-    except Exception:
+    except Exception:  # noqa: S110 best-effort /health probe: free stays None (unknown)
         pass
     return {
         "loaded": manager.state in (ModelState.CPU, ModelState.GPU),

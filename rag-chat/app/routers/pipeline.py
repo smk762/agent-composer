@@ -255,9 +255,12 @@ class OverlayRequest(BaseModel):
 
 @router.post("/overlay")
 async def overlay(req: OverlayRequest, request: Request, db: AsyncSession = Depends(get_db)):
+    if len(req.labels) != len(req.scores):
+        # zip would pair the wrong scores with labels, or drop some, without a word
+        raise HTTPException(422, detail=f"labels ({len(req.labels)}) and scores ({len(req.scores)}) must pair up")
     model = await _stage_model(req.model, request, db)
     signal = ", ".join(
-        f"{lbl} ({score:.2f})" for lbl, score in zip(req.labels[:5], req.scores[:5])
+        f"{lbl} ({score:.2f})" for lbl, score in zip(req.labels[:5], req.scores[:5], strict=True)
     )
     ctx = "\n".join(f"  {t}" for t in req.turns[-5:]) if req.turns else "  (none)"
     prompt = (

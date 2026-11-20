@@ -282,7 +282,7 @@ def _gpu_memory_info() -> dict | None:
                 "reserved_mb": round(reserved, 1),
                 "total_mb": round(total, 1),
             }
-    except Exception:
+    except Exception:  # noqa: S110 best-effort /health probe: None means unknown, never an error
         pass
     return None
 
@@ -639,7 +639,7 @@ def _free_vram_mb() -> Optional[int]:
     try:
         if torch is not None and torch.cuda.is_initialized():
             return int(torch.cuda.mem_get_info()[0] / 1024**2)
-    except Exception:
+    except Exception:  # noqa: S110 best-effort /health probe: None means unknown, never an error
         pass
     return None
 

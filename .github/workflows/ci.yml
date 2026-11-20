@@ -16,6 +16,10 @@ jobs:
       - run: python -m pip install --upgrade pip ruff
       - name: ruff (errors only)
         run: ruff check . --select E9,F63,F7,F82
+      - name: ruff (silent-failure guard)
+        # zip() must say strict= or not; an except that only passes or continues needs a
+        # "# noqa: S110 <reason>" (scripts/tests/test_silent_failure_guard.py checks the reasons)
+        run: ruff check . --select B905,S110,S112 --extend-exclude "**/tests/fixtures/**"
 
   tests:
     # Unit tests per service, with the service's own pinned requirements on the same Python as its

@@ -36,7 +36,7 @@ def get_ram_gb() -> float:
         kb = _read_first(r"^MemTotal:\s+(\d+)\s+kB\s*$", data)
         if kb:
             return int(kb) / (1024 * 1024)
-    except Exception:
+    except Exception:  # noqa: S110 no /proc/meminfo (not Linux): 0.0 means unknown RAM
         pass
     return 0.0
 
