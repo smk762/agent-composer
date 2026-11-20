@@ -138,6 +138,12 @@ The `/transcriptions` endpoint accepts either a URL to download or base64-encode
 audio. Exactly one of `audio_url` or `audio_base64` must be present. This replaces
 the tss-stack gateway + Redis + whisper-worker chain with a single synchronous call.
 
+`audio_url` is a server-side fetch, so it is SSRF-guarded (`voice-stack/whisper_server.py`):
+only `http`/`https`; unless the host is in `STT_AUDIO_URL_ALLOWED_HOSTS`, every address it
+resolves to must be public (no loopback, private, link-local/metadata, CGNAT or reserved
+ranges, IPv4-mapped IPv6 included); the fetch is pinned to the vetted address, redirects
+are not followed, and failures return one generic 400/502.
+
 ### Qwen3-TTS
 
 | Endpoint | Format | Consumer | Description |

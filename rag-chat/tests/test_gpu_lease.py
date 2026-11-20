@@ -93,6 +93,19 @@ class OllamaLeaseTest(unittest.IsolatedAsyncioTestCase):
             async with ollama_lease("qwen3:8b", kind="chat", priority="interactive") as url:
                 self.assertEqual(url, "http://192.168.1.109:11434")
 
+    async def test_unsafe_broker_url_is_refused_and_the_lease_released(self) -> None:
+        for bad in ("http://169.254.169.254:80", "http://jarrah:11434/admin", "http://u:p@jarrah:11434"):
+            coord = self._use(_FakeCoordinator(GpuLease(via="broker", lease_id="L3", node="jarrah", base_url=bad)))
+            with self.assertRaises(OllamaLeaseUnavailable, msg=bad):
+                async with ollama_lease("qwen3:8b", kind="chat", priority="interactive"):
+                    self.fail("the body must not run against an unvetted node URL")
+            self.assertEqual(coord.exits, ["OllamaLeaseUnavailable"], bad)
+        # OLLAMA_NODE_URLS is operator config and wins over the broker's URL
+        self._use(_FakeCoordinator(GpuLease(via="broker", lease_id="L4", node="jarrah", base_url="http://169.254.169.254")))
+        with patch.object(gpu_lease, "NODE_URLS", {"jarrah": "http://192.168.1.109:11434"}):
+            async with ollama_lease("qwen3:8b", kind="chat", priority="interactive") as url:
+                self.assertEqual(url, "http://192.168.1.109:11434")
+
     async def test_fallback_handle_means_local(self) -> None:
         self._use(_FakeCoordinator(GpuLease(via="fallback")))
         async with ollama_lease("qwen3:8b", kind="chat", priority="interactive") as url:

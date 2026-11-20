@@ -10,7 +10,11 @@ validation, the pack fetch, git ops, and the resolved callback that carries
   live), whatever the allowlist says, and
 * its ``host:port`` equals a configured audit URL's (``AUDIT_API_URL``,
   ``AI_AUDIT_PUBLIC_BASE_URL``), or matches an ``AUDIT_API_ALLOWED_HOSTS`` entry
-  (``host`` = any port, ``host:port`` = that port), or the list contains ``*``.
+  (``host`` = any port, ``host:port`` = that port).
+
+There is no wildcard. ``*`` used to mean "any host"; with read-only runs unauthenticated it
+let any caller point the server at loopback or LAN services, so it is now ignored with a
+warning: name each extra audit host instead.
 
 Configured origins match on host *and* port: another port on the audit host is another
 service, so it is not implied. Hosts are compared as written. IP literals in any form the
@@ -60,16 +64,15 @@ def _origin(url: str) -> Optional[Origin]:
 
 
 @lru_cache(maxsize=8)
-def parse_allowlist(raw: str) -> tuple[frozenset, bool]:
-    """``AUDIT_API_ALLOWED_HOSTS`` -> ({(host, port or None)}, wildcard). Bad entries are logged once and skipped."""
+def parse_allowlist(raw: str) -> frozenset:
+    """``AUDIT_API_ALLOWED_HOSTS`` -> {(host, port or None)}. Bad entries, and ``*``, are logged once and skipped."""
     entries: set[tuple[str, Optional[int]]] = set()
-    wildcard = False
     for item in (raw or "").split(","):
         item = item.strip().lower()
         if not item:
             continue
-        if item == "*":
-            wildcard = True
+        if "*" in item:
+            log.warning("AUDIT_API_ALLOWED_HOSTS: ignoring %r (wildcards are not supported; list each host)", item)
             continue
         try:
             parts = urlsplit("//" + item)
@@ -80,7 +83,7 @@ def parse_allowlist(raw: str) -> tuple[frozenset, bool]:
             log.warning("AUDIT_API_ALLOWED_HOSTS: ignoring %r (expected host or host:port)", item)
             continue
         entries.add((parts.hostname, port))
-    return frozenset(entries), wildcard
+    return frozenset(entries)
 
 
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
@@ -218,8 +221,8 @@ def check_audit_url(url: str, field: str, *, allowlist: str, configured: Iterabl
     host, port = origin
     if _is_link_local(host):
         return f"{field}: link-local hosts ({host}) are never allowed"
-    entries, wildcard = parse_allowlist(allowlist)
-    if wildcard or (host, port) in entries or (host, None) in entries:
+    entries = parse_allowlist(allowlist)
+    if (host, port) in entries or (host, None) in entries:
         return None
     if any(_origin(c) == origin for c in configured if c):
         return None

@@ -34,9 +34,12 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import ipaddress
 import logging
 import os
+import socket
 from typing import AsyncIterator, Optional
+from urllib.parse import urlsplit
 
 log = logging.getLogger("gpu-lease")
 
@@ -185,8 +188,58 @@ def model_mb(model: str) -> int | None:
     return None if mb is None else min(mb, vram_mb(model))
 
 
+def _link_local(host: str) -> bool:
+    """Is ``host`` a link-local address literal (cloud metadata lives there), in any form the
+    socket layer accepts: decimal or hex IPv4, a trailing dot, IPv4 inside IPv6."""
+    host = host.strip().rstrip(".").strip("[]").split("%", 1)[0]
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        try:
+            ip = ipaddress.IPv4Address(socket.inet_aton(host))
+        except (OSError, ValueError):
+            return False
+    inner = None
+    if isinstance(ip, ipaddress.IPv6Address):
+        packed = int(ip)
+        inner = ip.ipv4_mapped or ip.sixtofour or (
+            ipaddress.IPv4Address(packed & 0xFFFFFFFF)
+            if ip in _NAT64 or (packed >> 32 == 0 and packed > 0xFFFF) else None)
+    return ip.is_link_local or bool(inner and inner.is_link_local)
+
+
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
+def vet_node_url(url: str) -> str:
+    """A broker-supplied node URL, normalised, or :class:`OllamaLeaseUnavailable`.
+
+    The broker names the node and its base URL, and every Ollama call of the lease goes
+    there. It is accepted only as a bare ``http(s)://host[:port]`` origin (no credentials,
+    path, query or fragment) whose host is not link-local, so a compromised or misconfigured
+    broker can't point the service at cloud metadata or smuggle a path into the call.
+    ``OLLAMA_NODE_URLS`` (operator config) is not vetted: it is used as written.
+    """
+    try:
+        parts = urlsplit((url or "").strip())
+        parts.port  # noqa: B018 — raises ValueError on a bad port
+    except ValueError:
+        parts = None
+    if (parts is None or parts.scheme not in ("http", "https") or not parts.hostname
+            or parts.username is not None or parts.password is not None
+            or parts.path not in ("", "/") or parts.query or parts.fragment):
+        raise OllamaLeaseUnavailable(f"GPU broker gave an unusable node URL {url!r}: expected http(s)://host[:port]")
+    if _link_local(parts.hostname):
+        raise OllamaLeaseUnavailable(f"GPU broker gave a link-local node URL {url!r}, which is never allowed")
+    return f"{parts.scheme}://{parts.netloc}"
+
+
 def url_for(handle) -> str:
-    """Where to send the call: local Ollama unless the broker placed it on another node."""
+    """Where to send the call: local Ollama unless the broker placed it on another node.
+
+    A node in ``OLLAMA_NODE_URLS`` uses that URL; any other node's broker-supplied
+    ``base_url`` must pass :func:`vet_node_url` (else :class:`OllamaLeaseUnavailable`, a 503).
+    """
     if getattr(handle, "via", "local") != "broker":
         return OLLAMA_URL
     node = handle.node
@@ -194,7 +247,7 @@ def url_for(handle) -> str:
         return NODE_URLS[node]
     if not node or node == HOME_NODE or not handle.base_url:
         return OLLAMA_URL
-    return handle.base_url.rstrip("/")
+    return vet_node_url(handle.base_url)
 
 
 @contextlib.asynccontextmanager

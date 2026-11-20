@@ -567,14 +567,17 @@ class AuditUrlPolicyTests(unittest.TestCase):
         self.assertIsNotNone(self.check("http://audit.lan:9000", allowlist="audit.lan:8765"))
         self.assertIsNone(self.check("https://other/x", allowlist="audit.lan:8765,other"))  # bare host: any port
         self.assertIsNone(self.check("http://[::1]:8765", allowlist="[::1]:8765"))
-        self.assertIsNone(self.check("http://anything:1", allowlist="*"))
+        # No wildcard: "*" is ignored, so it allows nothing beyond the configured origin.
+        self.assertIn("not allowed", self.check("http://anything:1", allowlist="*"))
+        self.assertIn("not allowed", self.check("http://audit.lan:8765", allowlist="*.lan, audit.lan:8765*"))
         self.assertIsNotNone(self.check("http://audit.lan:8765", allowlist="http://audit.lan/path"))  # bad entry ignored
 
     def test_never_link_local_or_non_http(self) -> None:
         for url in ("http://169.254.169.254/latest", "http://[fe80::1]:80", "http://[::ffff:169.254.169.254]/"):
-            self.assertIn("link-local", self.check(url, allowlist="*"))
+            # even when the operator lists the host
+            self.assertIn("link-local", self.check(url, allowlist="169.254.169.254,[fe80::1],[::ffff:169.254.169.254]"))
         for url in ("file:///etc/passwd", "ftp://audit:21", "http://", "not a url", "http://h:99999"):
-            self.assertIn("http(s)", self.check(url, allowlist="*"))
+            self.assertIn("http(s)", self.check(url, allowlist="audit,h"))
 
 
 class AuditValidationAuthTests(unittest.IsolatedAsyncioTestCase):
