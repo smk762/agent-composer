@@ -2593,7 +2593,7 @@ def pipeline_ui():
           document.getElementById("stage4Model").textContent = "· " + (stageModel(4)||DEFAULT_MODEL);
           const reader = r.body.getReader();
           const dec = new TextDecoder();
-          let buf = "";
+          let buf = "", streamErr = "";
           while (true) {{
             const {{done, value}} = await reader.read();
             if (done) break;
@@ -2604,9 +2604,13 @@ def pipeline_ui():
               if (!t || !t.startsWith("data: ")) continue;
               const pl = t.slice(6);
               if (pl === "[DONE]") continue;
-              try {{ const c = JSON.parse(pl); if (c.token) {{ prose += c.token; textEl.textContent = prose; }} }} catch(_) {{}}
+              let c; try {{ c = JSON.parse(pl); }} catch(_) {{ continue; }}
+              if (c.error) {{ streamErr = c.error; continue; }}
+              if (c.token) {{ prose += c.token; textEl.textContent = prose; }}
             }}
           }}
+          // A broken stream is an error, not a shorter answer: don't keep the partial prose.
+          if (streamErr) {{ setStageState(4, "error"); showErr("stage4Error", streamErr); return; }}
           _runData.stage4 = {{model: stageModel(4)||DEFAULT_MODEL, response: prose}};
           setStageState(4, "complete");
           if (_runData.stage1 && _runData.stage2 && _runData.stage3 && _runData.stage4) {{

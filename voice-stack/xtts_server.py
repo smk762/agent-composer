@@ -792,6 +792,8 @@ async def synthesise_stream(req: SynthesiseRequest):
                 stop.set()
                 return False
 
+        failed = threading.Event()  # generation broke off: the body must not end as if complete
+
         def _put(item: bytes) -> bool:
             deadline = time.monotonic() + _STREAM_STALL_TIMEOUT_S
             while not stop.is_set():
@@ -801,6 +803,7 @@ async def synthesise_stream(req: SynthesiseRequest):
                     # Consumer stalled (or never started): give up rather than
                     # hold the lease forever.
                     logger.warning("xtts_stream_consumer_stalled")
+                    failed.set()
                     stop.set()
                     return False
             return False
@@ -829,7 +832,8 @@ async def synthesise_stream(req: SynthesiseRequest):
                         chunk = chunk.detach().cpu().to(torch.float32).numpy()
                     if not _put(chunk.tobytes()):
                         break  # client went away: stop generating
-            except Exception as exc:  # surface as stream termination
+            except Exception as exc:  # surfaced to the client by aborting the response (event_stream)
+                failed.set()
                 logger.error("xtts_stream_failed", error=str(exc), exc_info=True)
             finally:
                 close = getattr(stream, "close", None)
@@ -860,6 +864,11 @@ async def synthesise_stream(req: SynthesiseRequest):
                     break
                 slots.release()
                 yield item
+            if failed.is_set():
+                # The 200 headers are out, so the status can't change. Raising here makes the
+                # server drop the connection without the final chunk: the client sees an
+                # incomplete body (an error), not shorter audio that looks complete.
+                raise StreamTruncated("xtts generation failed mid-stream; the audio is incomplete")
         finally:
             stop.set()
 
@@ -873,6 +882,10 @@ async def synthesise_stream(req: SynthesiseRequest):
         },
     )
 
+
+
+class StreamTruncated(RuntimeError):
+    """A /tts/stream body cut short after its headers went out (see event_stream)."""
 
 # ── Reference-clip preprocessing ──────────────────────────────────────────────
 
@@ -1890,13 +1903,16 @@ def _idle_s() -> Optional[float]:
 async def admin_evict():
     """Force-demote the model from GPU to CPU, freeing VRAM immediately. The
     CPU-stage timer (XTTS_KEEP_ALIVE_CPU) then decides when it leaves RAM."""
-    if not await _mgr.evict() and _mgr.active:
+    demoted = await _mgr.evict()
+    if not demoted and _mgr.active:
         # In-flight work holds the model; its release re-arms idle eviction.
         return JSONResponse(
             status_code=409,
             content={"status": "busy", "active": _mgr.active, "model_state": _mgr.state.value},
         )
-    return {"status": "evicted", "model_state": _mgr.state.value, "gpu": _resident_gpu()}
+    # "evicted" is the resident contract's end state (off the GPU), which also holds when it
+    # already was; ``demoted`` says whether this call moved it, so a no-op doesn't read as one.
+    return {"status": "evicted", "demoted": demoted, "model_state": _mgr.state.value, "gpu": _resident_gpu()}
 
 
 @app.post("/admin/unload", dependencies=[Depends(_require_admin)])

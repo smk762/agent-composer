@@ -116,8 +116,16 @@ def _adversary_prompt(context: str, patch: str, critic_notes: str) -> str:
 
 # ── Ollama call ───────────────────────────────────────────────────────────────
 
+class GenerationFailed(RuntimeError):
+    """A model call failed. Not an empty answer: the job fails with this reason."""
+
+
 async def _generate(prompt: str, model: str, system: str) -> str:
-    """Call Ollama /api/generate and return the full response text."""
+    """Call Ollama /api/generate and return the full response text.
+
+    A failure raises :class:`GenerationFailed`. Returning "" would look exactly like a model
+    that answered with nothing, and the loop would carry on (and report "completed") on
+    calls that never ran."""
     payload = {
         "model": model or CHAT_MODEL,
         "system": system,
@@ -133,14 +141,13 @@ async def _generate(prompt: str, model: str, system: str) -> str:
         r.raise_for_status()
         return r.json().get("response", "")
     except OllamaLeaseUnavailable as exc:
-        log.warning("repair: %s", exc.detail)
-        return ""
-    except httpx.ConnectError:
-        log.warning("Ollama unreachable at %s", OLLAMA_URL)
-        return ""
-    except Exception as exc:
-        log.warning("Ollama generate error: %s", exc)
-        return ""
+        raise GenerationFailed(f"model {payload['model']}: {exc.detail}") from exc
+    except httpx.ConnectError as exc:
+        raise GenerationFailed(f"model {payload['model']}: Ollama unreachable at {OLLAMA_URL}") from exc
+    except httpx.HTTPStatusError as exc:
+        raise GenerationFailed(f"model {payload['model']}: Ollama answered {exc.response.status_code}") from exc
+    except (httpx.HTTPError, ValueError) as exc:  # timeouts, transport errors, a non-JSON body
+        raise GenerationFailed(f"model {payload['model']}: {type(exc).__name__}: {exc}") from exc
 
 
 # ── Validation via ai-code-auditor audit API ──────────────────────────────────

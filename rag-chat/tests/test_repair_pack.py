@@ -209,6 +209,16 @@ class RepairContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ctx.startswith("## Diff under review"))
         self.assertNotIn("Agent work pack", ctx)
 
+    def test_truncated_pack_and_notes_say_so(self) -> None:
+        ctx = build_repair_context(diff="d", pack_context="P" * 9000 + "ACCEPTANCE",
+                                   critic_notes="c" * 2500, adversary_notes="a" * 2001)
+        self.assertNotIn("ACCEPTANCE", ctx)
+        self.assertIn("(work pack truncated — 1010 chars omitted)", ctx)
+        self.assertIn("(critic's notes truncated — 500 chars omitted)", ctx)
+        self.assertIn("(adversary's objections truncated — 1 chars omitted)", ctx)
+        short = build_repair_context(diff="d", pack_context="pack", critic_notes="c")
+        self.assertNotIn("truncated", short)
+
     def test_context_contains_pack_before_diff(self) -> None:
         block = build_pack_block(PACK, BRIEF).block
         ctx = build_repair_context(diff="--- a\n+++ b\n", pack_context=block)
@@ -373,6 +383,30 @@ class RepairEndpointTests(unittest.TestCase):
         self.assertEqual(posts[0].url.path, f"/audit/packs/{PACK_ID}/status")
         self.assertEqual(json.loads(posts[0].content)["status"], "resolved")
 
+    def test_failed_apply_is_a_failed_job(self) -> None:
+        """A write that fails (or has nowhere to go) is a failed job, never "completed"."""
+        async def fake_generate(prompt: str, model: str, system: str) -> str:
+            return "```diff\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n```"
+
+        def broken_apply(path, patch_text):
+            raise RuntimeError("patch does not apply")
+
+        async def found(repo: str):
+            return "/tmp/repo"
+
+        async def missing(repo: str):
+            return None
+
+        for resolve, apply_fn, why in ((found, broken_apply, "apply failed"), (missing, lambda p, t: None, "no local checkout")):
+            with patch.object(multi_model, "_generate", fake_generate), \
+                    patch.object(self.router_mod, "_resolve_repo_path", resolve), \
+                    patch.object(self.router_mod, "apply_inplace", apply_fn):
+                _, events = self._post({"pack_id": PACK_ID, "diff": "--- a\n+++ b\n", "apply": True, "mode": "auto_fix"})
+            done = events[-1][1]
+            self.assertEqual((events[-1][0], done["applied"], done["status"]), ("complete", False, "failed"), why)
+            self.assertIn(why, done["error"])
+            self.assertEqual(self.router_mod._get_job(done["job_id"])["status"], "failed", why)
+
     def test_rejected_patch_is_never_applied_or_resolved(self) -> None:
         """Iteration 1 proposes a patch the audit rejects; iteration 2 proposes nothing."""
         posts: list[httpx.Request] = []
@@ -409,6 +443,9 @@ class RepairEndpointTests(unittest.TestCase):
         self.assertIn("No patch passed validation", done["error"])
         self.assertEqual(applied, [])
         self.assertFalse(any(p.url.path.endswith("/status") for p in posts))
+        # nothing applied when an apply was asked for: a failed job, not a completed one
+        self.assertEqual(done["status"], "failed")
+        self.assertEqual(self.router_mod._get_job(done["job_id"])["status"], "failed")
 
     def test_job_survives_client_disconnect(self) -> None:
         import asyncio

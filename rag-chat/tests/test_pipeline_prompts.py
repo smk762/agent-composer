@@ -1,8 +1,11 @@
 """Pipeline brain/overlay/prose: request fields can't rewrite the system prompt or forge prompt
 sections. No network (Ollama is a fake)."""
 
+import json
 import unittest
 from unittest.mock import patch
+
+import httpx
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -67,9 +70,6 @@ class PipelinePromptTests(unittest.TestCase):
         self.assertEqual(prompt.count("</user_message>"), 1)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class PipelineModelOverrideTests(unittest.TestCase):
     """Picking a non-default model loads it into Ollama, so it needs a signed-in user."""
@@ -119,3 +119,55 @@ class PipelineModelOverrideTests(unittest.TestCase):
             r = self.client.post("/api/pipeline/brain", json={**BRAIN, "model": "llama3:70b"})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(self.models, ["llama3:70b"])
+
+PROSE = {**BRAIN, "style_directive": "warm", "skeleton": "INTENT: greet"}
+_real_client = httpx.AsyncClient
+
+
+class ProseStreamTests(unittest.TestCase):
+    """A broken generation is an error event, never text in the prose."""
+
+    def _events(self, handler):
+        def factory(*a, **kw):
+            kw["transport"] = httpx.MockTransport(handler)
+            return _real_client(*a, **kw)
+
+        app = FastAPI()
+        app.include_router(pipeline.router)
+        with patch.object(pipeline.httpx, "AsyncClient", factory):
+            r = TestClient(app).post("/api/pipeline/prose", json=PROSE)
+        self.assertEqual(r.status_code, 200)
+        out = []
+        for line in r.text.splitlines():
+            if line.startswith("data: ") and line != "data: [DONE]":
+                out.append(json.loads(line[6:]))
+        return out
+
+    @staticmethod
+    def _lines(*objs):
+        body = "\n".join(json.dumps(o) for o in objs) + "\n"
+        return lambda request: httpx.Response(200, text=body)
+
+    def test_complete_stream_is_tokens_only(self) -> None:
+        ev = self._events(self._lines({"response": "Hi"}, {"response": " there", "done": True}))
+        self.assertEqual(ev, [{"token": "Hi"}, {"token": " there"}])
+
+    def test_in_stream_error_line_is_an_error_event(self) -> None:
+        ev = self._events(self._lines({"response": "Hi"}, {"error": "model runner crashed"}))
+        self.assertEqual(ev, [{"token": "Hi"}, {"error": "Ollama: model runner crashed"}])
+
+    def test_stream_ending_without_done_is_an_error(self) -> None:
+        ev = self._events(self._lines({"response": "Hi"}))
+        self.assertIn("truncated", ev[-1]["error"])
+
+    def test_unreachable_ollama_is_not_prose(self) -> None:
+        def down(request):
+            raise httpx.ConnectError("refused", request=request)
+
+        ev = self._events(down)
+        self.assertEqual(ev, [{"error": "Ollama unreachable"}])
+        self.assertFalse(any("token" in e for e in ev))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -307,6 +307,48 @@ def test_stream_disconnect_stops_producer_and_releases(monkeypatch, mgr):
     asyncio.run(asyncio.wait_for(run(), 30))
 
 
+def test_stream_failing_mid_generation_is_not_a_complete_body(monkeypatch, mgr):
+    """After the 200 headers, a generation failure must abort the body, not end it cleanly."""
+    _install(monkeypatch, mgr)
+    mgr.keep_alive_gpu, mgr.keep_alive_cpu = -1, -1
+
+    def broken_stream(*args, **kwargs):
+        yield np.full(256, 0, dtype=np.float32)
+        raise RuntimeError("CUDA error: device-side assert")
+
+    monkeypatch.setattr(mgr.fake, "inference_stream", broken_stream)
+
+    async def run():
+        resp = await xs.synthesise_stream(xs.SynthesiseRequest(text="hi"))
+        got = []
+        with pytest.raises(xs.StreamTruncated):
+            async for item in resp.body_iterator:
+                got.append(item)
+        assert len(got) == 1  # what was generated still went out first
+        for _ in range(50):
+            if mgr.active == 0:
+                break
+            await asyncio.sleep(0.02)
+        assert mgr.active == 0
+
+    asyncio.run(asyncio.wait_for(run(), 30))
+
+
+def test_evict_says_whether_it_demoted(monkeypatch, mgr):
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(xs, "_mgr", mgr)
+    monkeypatch.setattr(xs, "_resident_gpu", lambda: {})
+    monkeypatch.setenv("ARGUS_ADMIN_TOKEN", "t0k")
+
+    async def nothing_on_gpu():
+        return False
+
+    monkeypatch.setattr(mgr, "evict", nothing_on_gpu)
+    body = TestClient(xs.app).post("/admin/evict", headers={"Authorization": "Bearer t0k"}).json()
+    assert (body["status"], body["demoted"]) == ("evicted", False)  # off the GPU, but this call moved nothing
+
+
 def test_stream_bad_clone_is_422_and_releases(monkeypatch, mgr):
     monkeypatch.setattr(xs, "_mgr", mgr)
 

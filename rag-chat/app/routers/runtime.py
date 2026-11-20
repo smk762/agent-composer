@@ -105,10 +105,18 @@ async def ollama_evict(req: RuntimeModelRequest):
     models = [m for m in loaded if _same_model(m, requested)] if requested else loaded
     evicted: List[str] = []
     for model in models:
-        await _ollama_post(
-            "/api/generate",
-            {"model": model, "prompt": "", "stream": False, "keep_alive": 0},
-        )
+        try:
+            await _ollama_post(
+                "/api/generate",
+                {"model": model, "prompt": "", "stream": False, "keep_alive": 0},
+            )
+        except HTTPException as exc:
+            # Keep Ollama's status, but say what already happened: a bare error would hide
+            # the models this call did unload, and a retry couldn't tell where it stopped.
+            return JSONResponse(status_code=exc.status_code, content={
+                "state": "partial" if evicted else "failed", "evicted": evicted, "failed": model,
+                "detail": exc.detail, "loaded": [m for m in loaded if m not in evicted],
+            })
         evicted.append(model)
     if not evicted:
         return {"state": "already_idle", "evicted": evicted}
@@ -243,17 +251,25 @@ async def _summary(name: str) -> Dict[str, Any]:
     try:
         status, body = await _call(name, "GET", "/health", _HEALTH_TIMEOUT)
     except HTTPException as exc:
-        return {"name": name, "reachable": False, "status_code": exc.status_code, "detail": exc.detail}
+        return {"name": name, "reachable": False, "healthy": False, "status_code": exc.status_code,
+                "detail": exc.detail}
+    healthy = 200 <= status < 300
+    raw = body
     body = body if isinstance(body, dict) else {}
-    return {
+    summary = {
         "name": name,
         "reachable": True,
+        # Reachable is not healthy: a sidecar answering 500/503 is up but failing.
+        "healthy": healthy,
         "status_code": status,
         "model_state": body.get("model_state"),
         "busy": body.get("busy"),
         "idle_s": body.get("idle_s"),
         "gpu": body.get("gpu"),
     }
+    if not healthy:
+        summary["detail"] = (body.get("detail") or body.get("error") or str(raw))[:500] if raw else ""
+    return summary
 
 
 @router.get("/residents")

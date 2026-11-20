@@ -268,6 +268,8 @@ async def run_repair(
                     if repo_path:
                         apply_inplace(repo_path, accepted_patch)
                         applied = True
+                    else:
+                        error_msg = f"Patch generated but not applied: no local checkout for {repo!r}"
                 except Exception as exc:
                     log.warning("apply_inplace failed: %s", exc)
                     error_msg = f"Patch generated but apply failed: {exc}"
@@ -313,9 +315,12 @@ async def run_repair(
                 if status_err:
                     log.info("Repair %s: pack status callback skipped: %s", job_id, status_err)
 
+            # An apply was asked for and nothing was applied: the job failed at its task, whatever
+            # else it produced. "completed" would read as success to anything keying on status.
+            status = "failed" if (request.apply and request.mode == "auto_fix" and not applied) else "completed"
             _update_job(
                 job_id,
-                status="completed",
+                status=status,
                 iterations=iterations,
                 final_patch=final_patch,
                 patch_validated=bool(accepted_patch),
@@ -329,6 +334,7 @@ async def run_repair(
             )
             await emit("complete", {
                 "job_id":      job_id,
+                "status":      status,
                 "final_patch": final_patch,
                 "patch_validated": bool(accepted_patch),
                 "applied":     applied,
