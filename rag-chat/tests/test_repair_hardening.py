@@ -239,7 +239,7 @@ class ApplyInplaceTests(unittest.TestCase):
 
 class NonCanonicalLiteralTests(unittest.TestCase):
     def check(self, url):
-        return url_policy.check_audit_url(url, "audit_api_url", allowlist="*", configured=())
+        return url_policy.check_audit_url(url, "audit_api_url", allowlist="192.168.1.198:8765,[::1]:8765,audit.lan:8765", configured=())
 
     def test_decimal_and_hex_ipv4_are_link_local(self) -> None:
         for url in ("http://2852039166:8765/", "http://0xA9FEA9FE/", "http://0251.0376.0251.0376/"):
@@ -286,7 +286,8 @@ class ResolvedHostTests(unittest.TestCase):
             patch.object(multi_model, "_generate", fake_generate),
             patch.object(repair_router, "AUDIT_API_URL", ""),
             patch.object(repair_router, "QDRANT_URL", ""),
-            patch.object(repair_router, "AUDIT_API_ALLOWED_HOSTS", "*"),
+            patch.object(repair_router, "AUDIT_API_ALLOWED_HOSTS",
+                         "metadata.evil.test:8765,nowhere.evil.test:8765,audit.lan:8765"),
             patch.object(url_policy, "_resolve", resolve, create=True),
         ):
             p.start()

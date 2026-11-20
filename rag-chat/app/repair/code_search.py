@@ -86,6 +86,7 @@ def code_query(diff: str = "", pack_context: str = "", pack_title: str = "") -> 
 
 async def embed_code_query(text: str) -> List[float]:
     """Embed a code-search query the way rag-ingest embedded the code: Infinity + EMBED_MODEL_CODE."""
+    # outbound: INFINITY_URL is operator config, never request data
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(f"{INFINITY_URL}/embeddings",
                               json={"model": EMBED_MODEL_CODE, "input": [CODE_QUERY_PREFIX + text]})

@@ -127,6 +127,7 @@ async def _generate(prompt: str, model: str, system: str) -> str:
     }
     try:
         async with ollama_lease(payload["model"], kind="repair", priority="batch") as base_url:
+            # outbound: base_url is OLLAMA_URL, OLLAMA_NODE_URLS or a broker URL vetted by gpu_lease.vet_node_url
             async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
                 r = await client.post(f"{base_url}/api/generate", json=payload)
         r.raise_for_status()
