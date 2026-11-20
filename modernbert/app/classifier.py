@@ -119,7 +119,7 @@ class Classifier:
             label_embs = label_embs.to(text_emb.device)
             scores = (text_emb @ label_embs.T).squeeze(0).cpu().tolist()
 
-        ranked = sorted(zip(labels, scores), key=lambda x: -x[1])
+        ranked = sorted(zip(labels, scores, strict=True), key=lambda x: -x[1])  # one score per label embedding
         top = [(l, s) for l, s in ranked if s >= threshold][:top_k]
 
         return ClassifyResponse(
@@ -160,7 +160,7 @@ class Classifier:
                 f"model has {len(probs)} outputs but {len(names)} labels are configured; "
                 "unload the model so it reloads with the current label set"
             )
-        named = list(zip(names, probs))
+        named = list(zip(names, probs, strict=True))  # lengths checked above
         ranked = sorted(named, key=lambda x: -x[1])
         top = [(l, s) for l, s in ranked if s >= threshold][:top_k]
 

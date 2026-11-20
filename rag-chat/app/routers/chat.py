@@ -471,8 +471,8 @@ async def chat(
                     if pr.status_code == 200:
                         model = cand
                         break
-                except Exception:
-                    pass
+                except Exception as exc:  # an unreachable probe is one more candidate tried, not silence
+                    log.warning("model probe for %s failed: %s", cand, exc)
             else:
                 yield f'data: {json.dumps({"error": f"Model not found. Tried: {tried}"})}\n\n'
                 yield 'data: [DONE]\n\n'

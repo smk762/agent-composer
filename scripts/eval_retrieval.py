@@ -130,7 +130,7 @@ async def main() -> None:
                     continue
                 row: Dict[str, Any] = {"id": str(p.id), "doc_id": payload.get("doc_id"),
                                        "title": (payload.get("meta") or {}).get("title"), "question": question}
-                for arm, (coll, scheme) in zip(ARMS, arms):
+                for arm, (coll, scheme) in zip(ARMS, arms, strict=True):
                     vec = await embed(http, QUERY_PREFIX[scheme] + question)
                     hits = await q.search(collection_name=coll, query_vector=vec, limit=K, with_payload=["doc_id"])
                     row[arm] = _ranks(hits, p.id, payload.get("doc_id"))

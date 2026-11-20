@@ -577,8 +577,15 @@ async def _ingest_code_doc(
         state["created_collections"][QDRANT_COLLECTION_CODE] = True
 
     truncated_flags = res.truncated or [False] * len(code_chunks)
+    if not len(res.vectors) == len(sparse_vecs) == len(truncated_flags) == len(code_chunks):
+        # Points are only written after the whole request, so refusing here writes nothing;
+        # zip would have silently dropped the chunks past the shortest list.
+        raise RuntimeError(
+            f"code embedding returned {len(res.vectors)} dense, {len(sparse_vecs)} sparse and "
+            f"{len(truncated_flags)} truncation entries for {len(code_chunks)} chunks"
+        )
     for idx, (chunk, dvec, svec, was_trunc) in enumerate(
-        zip(code_chunks, res.vectors, sparse_vecs, truncated_flags)
+        zip(code_chunks, res.vectors, sparse_vecs, truncated_flags, strict=True)
     ):
         if was_trunc:
             state["truncated_chunks"] += 1

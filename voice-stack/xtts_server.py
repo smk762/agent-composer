@@ -264,7 +264,7 @@ class XTTSModelManager:
         if task is not None and not task.done():
             try:
                 await asyncio.shield(task)
-            except Exception:
+            except Exception:  # noqa: S110 the transition sets ERROR state itself, which the caller reads
                 pass
 
     async def _ensure_gpu_locked(self) -> None:
@@ -577,7 +577,7 @@ def _audio_duration(path: str) -> float | None:
         import soundfile as sf
 
         return float(sf.info(path).duration)
-    except Exception:
+    except Exception:  # noqa: S110 soundfile can't read it: fall through to torchaudio
         pass
     try:
         import torchaudio
@@ -586,7 +586,7 @@ def _audio_duration(path: str) -> float | None:
         # num_frames is 0 when the backend can't tell without decoding: unknown, not 0 s.
         if info.sample_rate > 0 and info.num_frames > 0:
             return info.num_frames / info.sample_rate
-    except Exception:
+    except Exception:  # noqa: S110 duration unknown (None): XTTS's own loader decides
         pass
     return None
 
@@ -613,7 +613,7 @@ def _gpu_memory_info() -> dict | None:
                 "reserved_mb": round(reserved, 1),
                 "total_mb": round(total, 1),
             }
-    except Exception:
+    except Exception:  # noqa: S110 best-effort /health probe: None means unknown, never an error
         pass
     return None
 
@@ -836,7 +836,7 @@ async def synthesise_stream(req: SynthesiseRequest):
                 if close is not None:
                     try:
                         close()
-                    except Exception:
+                    except Exception:  # noqa: S110 closing an already-failed stream; the failure is logged above
                         pass
                 # The end-of-stream sentinel bypasses ``slots``: it is always
                 # delivered, so a consumer can never wait forever.
@@ -1161,7 +1161,7 @@ def _analyze_clips(raw_paths: list[str], names: list[str]) -> dict:
     items: list[dict] = []
     embeddings: list[Optional["torch.Tensor"]] = []
 
-    for path, name in zip(raw_paths, names):
+    for path, name in zip(raw_paths, names, strict=True):
         item: dict = {"name": name, "flags": []}
         try:
             item.update(_quick_clip_metrics(path))
@@ -1191,7 +1191,7 @@ def _analyze_clips(raw_paths: list[str], names: list[str]) -> dict:
         centroid = torch.stack(valid).mean(dim=0)
         centroid = centroid / (centroid.norm() + 1e-9)
 
-    for item, emb in zip(items, embeddings):
+    for item, emb in zip(items, embeddings, strict=True):
         item["consistency"] = (
             round(float(torch.dot(emb, centroid).item()), 3)
             if (emb is not None and centroid is not None) else None
@@ -1370,7 +1370,7 @@ async def clone_voice(
             return JSONResponse(status_code=413, content={"error": str(exc)})
         total_duration = 0.0
         measured = False  # any clip's length known (kept_seconds or a probe)
-        for clip, raw_path in zip(clips, raw_paths):
+        for clip, raw_path in zip(clips, raw_paths, strict=True):
             if PREPROCESS:
                 try:
                     proc_path, report = await asyncio.to_thread(_preprocess_clip, raw_path)
@@ -1857,7 +1857,7 @@ def _free_vram_mb() -> Optional[int]:
     try:
         if torch is not None and torch.cuda.is_initialized():
             return int(torch.cuda.mem_get_info()[0] / 1024**2)
-    except Exception:
+    except Exception:  # noqa: S110 best-effort /health probe: None means unknown, never an error
         pass
     return None
 

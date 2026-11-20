@@ -232,6 +232,19 @@ class CodeReplaceTests(ReplaceOnResendTests.__base__):
         self.assertEqual(res["pruned"], 2)
         self.assertEqual(self._symbols(), [("r1", "a"), ("r2", "a")])
 
+    def test_short_embedding_response_writes_nothing(self):
+        """An embedder answering with fewer vectors than chunks is an error, not dropped chunks."""
+        class Short(Embedder):
+            async def embed(self, texts, profile="text"):
+                res = await super().embed(texts, profile)
+                return SimpleNamespace(vectors=res.vectors[:-1], truncated=res.truncated[:-1], dim=4)
+
+        self._code("def a():\n    return 1\n")
+        with mock.patch.object(ip, "_get_code_client", lambda: Short()):
+            with self.assertRaisesRegex(RuntimeError, "1 dense.* for 2 chunks"):
+                self._code("def a():\n    return 1\n\n\ndef b():\n    return 2\n")
+        self.assertEqual(self._symbols(), [("r1", "a")])  # the earlier version stands, nothing half-written
+
     def test_delete_by_path(self):
         self._code("def a():\n    return 1\n")
         self._code("def a():\n    return 1\n", repo="r2")
