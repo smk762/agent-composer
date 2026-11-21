@@ -55,8 +55,9 @@ DEFAULT_SPEAKER = os.getenv("XTTS_DEFAULT_SPEAKER", "Claribel Dervla")
 DEFAULT_VOICE = os.getenv("WYOMING_TTS_DEFAULT_VOICE", "").strip()
 DEFAULT_LANGUAGE = os.getenv("WYOMING_TTS_LANGUAGE", "en").strip() or "en"
 REQUEST_TIMEOUT = float(os.getenv("WYOMING_TTS_TIMEOUT", "300"))
-# Advertise all built-in studio speakers (off by default — fetching them wakes
-# the XTTS GPU; clones + the default speaker are always advertised regardless).
+# Advertise all built-in studio speakers (off by default — on an engine that loads its
+# model to list them, fetching them wakes its GPU; XTTS reads them from disk). Clones +
+# the default speaker are always advertised regardless.
 LIST_SPEAKERS = os.getenv("WYOMING_TTS_LIST_SPEAKERS", "0").strip().lower() in (
     "1", "true", "yes", "on",
 )
@@ -123,7 +124,7 @@ async def _fetch_clones() -> list[dict]:
 
 
 async def _fetch_speakers() -> list[str]:
-    """Enumerate built-in studio speakers (cached). Wakes the XTTS GPU once."""
+    """Enumerate built-in studio speakers (cached, so the engine is asked once)."""
     if _SPEAKER_CACHE:
         return list(_SPEAKER_CACHE)
     async with _SPEAKER_LOCK:

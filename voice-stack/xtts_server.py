@@ -183,23 +183,10 @@ class XTTSModelManager:
     def _load_to_cpu(self) -> None:
         from TTS.tts.configs.xtts_config import XttsConfig
         from TTS.tts.models.xtts import Xtts
-        from TTS.utils.manage import ModelManager
 
         logger.info("loading_xtts", model=XTTS_MODEL, target="cpu")
 
-        # Download (no-op if cached). coqui-tts may return the checkpoint
-        # file itself; load_checkpoint rejects a file passed as checkpoint_dir.
-        model_path, config_path, _ = ModelManager().download_model(XTTS_MODEL)
-        model_path = os.fspath(model_path)
-        if os.path.isfile(model_path):
-            checkpoint_path = model_path
-            checkpoint_dir = os.path.dirname(model_path)
-        else:
-            checkpoint_path = None
-            checkpoint_dir = model_path
-        if config_path is None:
-            config_path = os.path.join(checkpoint_dir, "config.json")
-
+        checkpoint_path, checkpoint_dir, config_path = _checkpoint_paths()
         config = XttsConfig()
         config.load_json(str(config_path))
         model = Xtts.init_from_config(config)
@@ -618,12 +605,59 @@ def _gpu_memory_info() -> dict | None:
     return None
 
 
+def _checkpoint_paths() -> tuple[Optional[str], str, str]:
+    """``(checkpoint_path, checkpoint_dir, config_path)`` for XTTS_MODEL.
+
+    Downloads the model first when it isn't cached (a no-op otherwise). coqui-tts may
+    return the checkpoint file itself; load_checkpoint rejects a file passed as
+    checkpoint_dir, so a file is split into path and directory."""
+    from TTS.utils.manage import ModelManager
+
+    model_path, config_path, _ = ModelManager().download_model(XTTS_MODEL)
+    model_path = os.fspath(model_path)
+    if os.path.isfile(model_path):
+        checkpoint_path: Optional[str] = model_path
+        checkpoint_dir = os.path.dirname(model_path)
+    else:
+        checkpoint_path = None
+        checkpoint_dir = model_path
+    if config_path is None:
+        config_path = os.path.join(checkpoint_dir, "config.json")
+    return checkpoint_path, checkpoint_dir, os.fspath(config_path)
+
+
+# The studio speaker names, which never change for a model: read once, then served
+# from here. Listing them must not load the model: a voice page opening right after
+# argus-iris unloads XTTS would otherwise put ~1.9 GB straight back on the GPU.
+_speaker_names: Optional[list[str]] = None
+
+
+def _speakers_from_disk() -> list[str]:
+    """Speaker names from the checkpoint's speakers_xtts.pth (CPU, no CUDA context)."""
+    import torch
+
+    path = os.path.join(_checkpoint_paths()[1], "speakers_xtts.pth")
+    if not os.path.isfile(path):
+        return []
+    speakers = torch.load(path, map_location="cpu", weights_only=True)
+    return sorted(speakers) if isinstance(speakers, dict) else []
+
+
 def _list_speakers() -> list[str]:
+    """Studio speaker names, without loading the model: from the model when it is
+    already resident, else from disk; cached either way."""
+    global _speaker_names
+    if _speaker_names is not None:
+        return _speaker_names
     model = _mgr.model
     sm = getattr(model, "speaker_manager", None) if model is not None else None
     if sm is not None and getattr(sm, "speakers", None):
-        return sorted(sm.speakers.keys())
-    return []
+        names = sorted(sm.speakers.keys())
+    else:
+        names = _speakers_from_disk()
+    if names:
+        _speaker_names = names
+    return names
 
 
 # ── App lifecycle ─────────────────────────────────────────────────────────────
@@ -1805,12 +1839,8 @@ async def import_clone(
 
 @app.get("/speakers")
 async def list_speakers():
-    """List built-in XTTS studio speakers."""
-    if _mgr.state == TTSState.LOADING:
-        return JSONResponse(status_code=503, content={"error": "Model still loading"})
-
-    async with _mgr.lease():
-        names = _list_speakers()
+    """List built-in XTTS studio speakers. Never loads the model (see _list_speakers)."""
+    names = await asyncio.to_thread(_list_speakers)
     supported_langs = sorted(set(ISO_TO_XTTS.values()))
     speakers = [
         {"id": name, "name": name, "language": "en", "languages": supported_langs}

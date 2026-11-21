@@ -728,3 +728,41 @@ def test_import_of_a_new_id_still_works(importer):
     assert r.status_code == 200, r.text
     assert r.json()["companion_id"] == "fresh-voice"
     assert set(importer.uploads) == {"voice_clones/fresh-voice/prompt.pt", "voice_clones/fresh-voice/meta.json"}
+
+
+# ── /speakers never loads the model ───────────────────────────────────────────
+
+
+def test_speakers_after_unload_does_not_reload(monkeypatch, mgr, tmp_path):
+    # 2026-11-21: iris unloaded XTTS and a voice page's /speakers six seconds later put
+    # ~1.9 GB back on the GPU (the route took a lease). The list now comes from disk.
+    from fastapi.testclient import TestClient
+
+    torch.save({"Zed": {}, "Ana": {}}, tmp_path / "speakers_xtts.pth")
+    monkeypatch.setattr(xs, "_mgr", mgr)
+    monkeypatch.setattr(xs, "_speaker_names", None)
+    monkeypatch.setattr(xs, "_checkpoint_paths", lambda: (None, str(tmp_path), str(tmp_path / "config.json")))
+
+    asyncio.run(mgr.unload())
+    body = TestClient(xs.app).get("/speakers").json()
+
+    assert [s["name"] for s in body["speakers"]] == ["Ana", "Zed"]
+    assert mgr.state == xs.TTSState.UNLOADED and mgr.model is None and mgr.active == 0
+
+
+def test_speakers_prefers_a_resident_model_and_caches(monkeypatch, mgr):
+    class SM:
+        speakers = {"B": 1, "A": 2}
+
+    mgr.fake.speaker_manager = SM()
+    mgr._model, mgr._state = mgr.fake, xs.TTSState.GPU
+    monkeypatch.setattr(xs, "_mgr", mgr)
+    monkeypatch.setattr(xs, "_speaker_names", None)
+
+    def no_disk():
+        raise AssertionError("read disk with the model resident")
+
+    monkeypatch.setattr(xs, "_speakers_from_disk", no_disk)
+    assert xs._list_speakers() == ["A", "B"]
+    asyncio.run(mgr.unload())
+    assert xs._list_speakers() == ["A", "B"]  # cached: no disk read, no load
