@@ -68,10 +68,13 @@ class GpuTenantManifestTest(unittest.TestCase):
                 self.assertEqual(k.get("model_mb"), gpu_lease.model_mb(model))
                 self.assertIsNotNone(k.get("model_mb"), "declare the weights so iris can reuse a loaded model")
 
-    def test_singguard_is_pinned(self) -> None:
+    def test_singguard_may_spill(self) -> None:
+        # SingGuard is on dragon and jarrah: neither the resident nor the guard kind is held to dragon.
         guard = next(r for r in self.manifest["residents"] if r["name"] == "singguard")
         self.assertEqual(guard["adapter"], "ollama")
-        self.assertTrue(guard["pinned"])
+        self.assertFalse(guard["pinned"])
+        kind = next(k for k in self.manifest["kinds"] if k["kind"] == "guard")
+        self.assertNotIn("node", kind.get("constraints") or {})
         self.assertTrue(guard["target"].startswith("ollama:hf.co/inclusionAI/SingGuard-4b-GGUF"))
 
 

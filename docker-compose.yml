@@ -130,7 +130,7 @@ services:
       - OLLAMA_REQUEST_KEEP_ALIVE=${OLLAMA_REQUEST_KEEP_ALIVE:-${OLLAMA_KEEP_ALIVE:-15m}}
       # argus-iris GPU leases around Ollama calls (#48): off unless ARGUS_GPU_COORDINATOR=broker.
       # A grant on ARGUS_GPU_HOME_NODE keeps OLLAMA_URL; one on another node (jarrah) uses
-      # that node's Ollama. Pinned models (default: GUARD_MODEL, EMBED_MODEL) stay home.
+      # that node's Ollama. Pinned models (default: EMBED_MODEL) stay home.
       - ARGUS_GPU_COORDINATOR=${ARGUS_GPU_COORDINATOR:-none}
       - ARGUS_GPU_BROKER_URL=${ARGUS_GPU_BROKER_URL:-}
       - ARGUS_GPU_BROKER_TOKEN=${ARGUS_GPU_BROKER_TOKEN:-}
@@ -200,7 +200,7 @@ services:
       - OLLAMA_REQUEST_KEEP_ALIVE=${OLLAMA_REQUEST_KEEP_ALIVE:-${OLLAMA_KEEP_ALIVE:-15m}}
       # argus-iris GPU leases around Ollama calls (#48): off unless ARGUS_GPU_COORDINATOR=broker.
       # A grant on ARGUS_GPU_HOME_NODE keeps OLLAMA_URL; one on another node (jarrah) uses
-      # that node's Ollama. Pinned models (default: GUARD_MODEL, EMBED_MODEL) stay home.
+      # that node's Ollama. Pinned models (default: EMBED_MODEL) stay home.
       - ARGUS_GPU_COORDINATOR=${ARGUS_GPU_COORDINATOR:-none}
       - ARGUS_GPU_BROKER_URL=${ARGUS_GPU_BROKER_URL:-}
       - ARGUS_GPU_BROKER_TOKEN=${ARGUS_GPU_BROKER_TOKEN:-}

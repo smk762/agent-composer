@@ -18,8 +18,8 @@ to ``none``, not cortex's ``lease``: a host flock would serialise every Ollama c
   outside ``run_with_oom_wait``, so the OOM loop never polls on it. Routes answer 503
   with ``Retry-After``.
 * **Pinned models** (``OLLAMA_LEASE_PINNED_MODELS``) carry a node constraint
-  (``ARGUS_GPU_HOME_NODE``): SingGuard exists only on dragon, and the text embedder must
-  match the vectors ingest wrote.
+  (``ARGUS_GPU_HOME_NODE``). By default that is the text embedder, which must match the
+  vectors ingest wrote. SingGuard is on dragon and jarrah, so it may spill.
 * **Footprint**: ``min_vram_mb`` is the whole footprint (``OLLAMA_LEASE_VRAM_MB``) and
   ``model_mb`` its weights (``OLLAMA_LEASE_MODEL_MB``), so iris asks only for the working
   set when the model is already loaded. ``gpu-tenant.yaml``'s kinds carry the same figures.
@@ -74,11 +74,12 @@ def _mb_table(env: str, defaults: dict[str, int]) -> dict[str, int]:
 # Whole footprint per model: weights plus working set (KV cache, activations).
 _DEFAULT_VRAM_MB = {"nomic-embed-text": 600, "hf.co/inclusionAI/SingGuard-4b-GGUF": 6000}
 # The part of it that is weights and stays loaded after the call (#50): Ollama /api/ps
-# size_vram at the default context, measured 2026-11-16. iris counts a lease as
+# size_vram at the context each call site sends (SingGuard: guard.py's num_ctx 16384,
+# 5290 MiB on dragon 2026-11-21; the others 2026-11-16). iris counts a lease as
 # working + model and skips the model part when the model is already resident, so a
 # check against a loaded SingGuard asks only for its working set. A larger num_ctx grows
 # the KV cache, which is working set: raise OLLAMA_LEASE_VRAM_MB, not this.
-_DEFAULT_MODEL_MB = {"nomic-embed-text": 320, "hf.co/inclusionAI/SingGuard-4b-GGUF": 3900, "qwen3:8b": 5300}
+_DEFAULT_MODEL_MB = {"nomic-embed-text": 320, "hf.co/inclusionAI/SingGuard-4b-GGUF": 5300, "qwen3:8b": 5300}
 
 
 # "jarrah=http://192.168.1.109:11434": the URL to call on a node, when the broker's
@@ -94,15 +95,15 @@ except ValueError:
 
 
 def _pinned_models() -> set[str]:
-    """``OLLAMA_LEASE_PINNED_MODELS``; unset or empty means the guard and text-embed models, ``none`` none."""
+    """``OLLAMA_LEASE_PINNED_MODELS``; unset or empty means the text-embed model, ``none`` none.
+
+    SingGuard used to be pinned too; it now has a copy on jarrah, so iris may place it there.
+    """
     raw = os.getenv("OLLAMA_LEASE_PINNED_MODELS", "").strip()
     if raw.lower() == "none":
         return set()
     if not raw:
-        raw = ",".join((
-            os.getenv("GUARD_MODEL", "hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M"),
-            os.getenv("EMBED_MODEL", "nomic-embed-text"),
-        ))
+        raw = os.getenv("EMBED_MODEL", "nomic-embed-text")
     return {m.strip() for m in raw.split(",") if m.strip()}
 
 
