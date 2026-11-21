@@ -45,7 +45,7 @@ kinds:
     description: A SingGuard content check (cull scans, darkroom pre-flights, the guard tester).
     target: "ollama:hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M"
     vram_mb: 6000
-    model_mb: 3900                 # loaded size_vram 3934 MiB (dragon, 2026-11-16)
+    model_mb: 5300                 # loaded size_vram 5290 MiB at the guard's num_ctx 16384 (dragon, 2026-11-21)
     priority: interactive
     constraints: {node: dragon}
   # rag-chat's RAG query embedding. Pinned to dragon: queries must use the embedder that

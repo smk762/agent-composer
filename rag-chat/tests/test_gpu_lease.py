@@ -231,7 +231,7 @@ class VramAndPinsTest(unittest.TestCase):
             self.assertEqual(gpu_lease.model_mb("small"), 300)  # never more than the footprint
 
     def test_defaults_declare_weights_for_the_known_models(self) -> None:
-        for model, weights in {"hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M": 3900,
+        for model, weights in {"hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M": 5300,
                                "nomic-embed-text": 320, "qwen3:8b": 5300}.items():
             self.assertEqual(gpu_lease._lookup(gpu_lease._DEFAULT_MODEL_MB, model), weights)
 

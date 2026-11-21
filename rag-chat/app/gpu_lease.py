@@ -74,11 +74,12 @@ def _mb_table(env: str, defaults: dict[str, int]) -> dict[str, int]:
 # Whole footprint per model: weights plus working set (KV cache, activations).
 _DEFAULT_VRAM_MB = {"nomic-embed-text": 600, "hf.co/inclusionAI/SingGuard-4b-GGUF": 6000}
 # The part of it that is weights and stays loaded after the call (#50): Ollama /api/ps
-# size_vram at the default context, measured 2026-11-16. iris counts a lease as
+# size_vram at the context each call site sends (SingGuard: guard.py's num_ctx 16384,
+# 5290 MiB on dragon 2026-11-21; the others 2026-11-16). iris counts a lease as
 # working + model and skips the model part when the model is already resident, so a
 # check against a loaded SingGuard asks only for its working set. A larger num_ctx grows
 # the KV cache, which is working set: raise OLLAMA_LEASE_VRAM_MB, not this.
-_DEFAULT_MODEL_MB = {"nomic-embed-text": 320, "hf.co/inclusionAI/SingGuard-4b-GGUF": 3900, "qwen3:8b": 5300}
+_DEFAULT_MODEL_MB = {"nomic-embed-text": 320, "hf.co/inclusionAI/SingGuard-4b-GGUF": 5300, "qwen3:8b": 5300}
 
 
 # "jarrah=http://192.168.1.109:11434": the URL to call on a node, when the broker's
