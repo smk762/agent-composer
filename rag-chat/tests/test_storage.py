@@ -155,6 +155,39 @@ class MinioStoreTests(unittest.TestCase):
             asyncio.run(store.save_bytes(b"x", user_id="u", generation_id="g", filename="a.png"))
         self.assertEqual(fake.head_calls, 1)
 
+    def test_losing_a_bucket_creation_race_is_not_a_failure(self) -> None:
+        from botocore.exceptions import ClientError
+
+        store, fake = _minio()
+
+        def missing(**kw):
+            raise ClientError({"Error": {"Code": "404"}}, "HeadBucket")
+
+        def already_created(**kw):
+            raise ClientError({"Error": {"Code": "BucketAlreadyOwnedByYou"}}, "CreateBucket")
+
+        fake.head_bucket = missing
+        fake.create_bucket = already_created
+        rel = asyncio.run(store.save_bytes(b"x", user_id="u", generation_id="g", filename="a.png"))
+        self.assertTrue(rel)
+        self.assertEqual(len(fake.objects), 1)
+
+    def test_other_bucket_creation_errors_still_raise(self) -> None:
+        from botocore.exceptions import ClientError
+
+        store, fake = _minio()
+
+        def missing(**kw):
+            raise ClientError({"Error": {"Code": "404"}}, "HeadBucket")
+
+        def denied(**kw):
+            raise ClientError({"Error": {"Code": "AccessDenied"}}, "CreateBucket")
+
+        fake.head_bucket = missing
+        fake.create_bucket = denied
+        with self.assertRaises(ClientError):
+            store.ensure_dirs()
+
 
 if __name__ == "__main__":
     unittest.main()

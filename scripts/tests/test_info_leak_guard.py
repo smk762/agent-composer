@@ -51,7 +51,8 @@ def _sink(call: ast.Call) -> tuple[ast.AST | None, ast.AST | None] | None:
         status = kw.get("status_code", call.args[0] if call.args else None)
         return status, kw.get("detail", call.args[1] if len(call.args) > 1 else None)
     if name == "JSONResponse":
-        return kw.get("status_code", ast.Constant(200)), kw.get("content", call.args[0] if call.args else None)
+        status = kw.get("status_code", call.args[1] if len(call.args) > 1 else ast.Constant(200))
+        return status, kw.get("content", call.args[0] if call.args else None)
     return None
 
 
@@ -105,6 +106,13 @@ class InfoLeakGuardTests(unittest.TestCase):
 
     def test_silent_on_the_safe_fixture(self) -> None:
         self.assertEqual(findings(FIXTURES / "safe.py"), [])
+
+    def test_jsonresponse_positional_status_is_read(self) -> None:
+        call = ast.parse('JSONResponse({"error": str(exc)}, 500)').body[0].value
+        status, _ = _sink(call)
+        self.assertTrue(_server_error(status))
+        call = ast.parse('JSONResponse({"ok": 1})').body[0].value
+        self.assertFalse(_server_error(_sink(call)[0]))
 
     def test_services_leak_nothing(self) -> None:
         files = service_files()

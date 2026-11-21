@@ -12,7 +12,7 @@ _REF_RE = re.compile(r"^(?!-)(?!.*\.\.)(?!.*@\{)(?!.*//)[A-Za-z0-9._/@+-]{1,255}
 
 
 def _check_ref(value: str) -> str:
-    if value and (not _REF_RE.match(value) or value.endswith((".", "/", ".lock")) or value.startswith("/")):
+    if value and (not _REF_RE.fullmatch(value) or value.endswith((".", "/", ".lock")) or value.startswith("/")):
         raise ValueError("must be a plain git ref name (no leading '-', whitespace, '..' or ~^:?*[\\)")
     return value
 

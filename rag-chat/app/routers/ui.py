@@ -2980,6 +2980,7 @@ def guard_ui():
           conversation: req.conversation || null,
           policy: req.policy || "",
           req_thinking: req.thinking,
+          req_model: req.model || "",
           had_image: hadImage,
           safe: data.safe,
           verdict: data.verdict,
@@ -3024,10 +3025,15 @@ def guard_ui():
                 roleEl.value = h.input_role || "user";
                 policyEl.value = h.policy || "";
                 if (h.req_thinking) thinkingEl.value = h.req_thinking;
+                modelEl.value = h.req_model || "";
                 turnsEl.innerHTML = "";
                 (h.conversation || []).forEach(t => addTurn(t.role, t.content));
               }
-              if (h.had_image) statusEl.textContent = "That check included an image; attach it again to re-check it.";
+              // An image still attached from another check isn't part of this entry: drop it.
+              imageEl.value = "";
+              previewEl.style.display = "none";
+              previewEl.removeAttribute("src");
+              statusEl.textContent = h.had_image ? "That check included an image; attach it again to re-check it." : "";
             }
           });
         });
@@ -3850,8 +3856,8 @@ def voice_clone_ui():
 
       // ── Engine selection (governs scoring, cloning, listing + the tester) ──
       function currentEngine() { return vcEngine.value || ""; }
-      function engineQuery(extra) {
-        const e = currentEngine();
+      function engineQuery(extra, engine) {
+        const e = engine === undefined ? currentEngine() : engine;
         const parts = [];
         if (e) parts.push("engine=" + encodeURIComponent(e));
         if (extra) parts.push(extra);
@@ -4190,10 +4196,16 @@ def voice_clone_ui():
       });
 
       // ── Saved clones ──
+      // Each call takes a ticket: a response that a later call (an engine switch) has
+      // overtaken is dropped, and every row acts on the engine its list was loaded for.
+      let clonesSeq = 0;
       async function loadClones(selectId) {
+        const seq = ++clonesSeq;
+        const engine = currentEngine();
         try {
-          const r = await fetch("/api/voice/clones" + engineQuery());
+          const r = await fetch("/api/voice/clones" + engineQuery("", engine));
           const d = await r.json();
+          if (seq !== clonesSeq) return;
           const list = d.clones || [];
           cloneList.innerHTML = "";
           testClone.innerHTML = '<option value="">Select a saved voice…</option>';
@@ -4213,7 +4225,7 @@ def voice_clone_ui():
             });
             row.querySelector(".dl-btn").addEventListener("click", () => {
               const a = document.createElement("a");
-              a.href = "/api/voice/clones/" + encodeURIComponent(c.companion_id) + "/download" + engineQuery();
+              a.href = "/api/voice/clones/" + encodeURIComponent(c.companion_id) + "/download" + engineQuery("", engine);
               a.download = (c.companion_id || "voice") + ".zip";
               document.body.appendChild(a);
               a.click();
@@ -4221,11 +4233,11 @@ def voice_clone_ui():
             });
             row.querySelector(".del-btn").addEventListener("click", async () => {
               const label = c.name || c.companion_id;
-              if (!confirm('Delete voice "' + label + '"? This permanently removes it from the ' + (currentEngine() || "default") + ' engine and cannot be undone.')) return;
+              if (!confirm('Delete voice "' + label + '"? This permanently removes it from the ' + (engine || "default") + ' engine and cannot be undone.')) return;
               const btn = row.querySelector(".del-btn");
               btn.disabled = true; btn.textContent = "Deleting…";
               try {
-                const r = await fetch("/api/voice/clones/" + encodeURIComponent(c.companion_id) + engineQuery(), { method: "DELETE", headers: authHeaders() });
+                const r = await fetch("/api/voice/clones/" + encodeURIComponent(c.companion_id) + engineQuery("", engine), { method: "DELETE", headers: authHeaders() });
                 if (r.status === 401) throw new Error("authentication required: save an API key at /ui/api-keys");
                 if (!r.ok) { let m = "HTTP " + r.status; try { m = (await r.text()) || m; } catch (e) {} throw new Error(m); }
                 await loadClones();
@@ -4243,6 +4255,7 @@ def voice_clone_ui():
           });
           if (selectId) testClone.value = selectId;
         } catch (err) {
+          if (seq !== clonesSeq) return;
           cloneList.innerHTML = '<div class="clip-meta">Failed to load voices: ' + esc(err.message) + '</div>';
         }
       }

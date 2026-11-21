@@ -63,12 +63,16 @@ def _innerhtml_operands(html: str) -> set[str]:
     js = _strip_esc_calls(_STR.sub("''", _template_to_concat(html.replace("\\'", ""))))
     found: set[str] = set()
     for m in re.finditer(r"\.innerHTML\s*\+?=", js):
+        # The statement ends at a top-level ';', at the bracket closing its enclosing block
+        # (`{ el.innerHTML = a + b }`), or at the end of the script text, never past it.
         depth, j = 0, m.end()
-        while not (js[j] == ";" and depth == 0):
+        while j < len(js) and not (js[j] == ";" and depth == 0):
             if js[j] in "([{":
                 depth += 1
             elif js[j] in ")]}":
                 depth -= 1
+                if depth < 0:
+                    break
             j += 1
         stmt = js[m.end():j]
         found |= set(re.findall(r"\+\s*\(?\s*(" + _OPERAND + ")", stmt))
@@ -111,6 +115,13 @@ class InnerHtmlAuditTests(unittest.TestCase):
         self.assertEqual(_innerhtml_operands("x.innerHTML = '<b>' + k.name + '</b>';"), {"k.name"})
         self.assertEqual(_innerhtml_operands("x.innerHTML = '<b>' + esc(k.name) + '</b>';"), set())
         self.assertEqual(_innerhtml_operands("x.innerHTML = `<i title=\"${k.name}\"></i>`;"), {"k.name"})
+
+
+class InnerHtmlScannerTests(unittest.TestCase):
+    def test_statement_without_a_semicolon_is_still_audited(self) -> None:
+        self.assertIn("raw", _innerhtml_operands("el.innerHTML = '<b>' + raw"))
+        self.assertIn("raw", _innerhtml_operands("f(() => { el.innerHTML = '<b>' + raw })\nnext();"))
+        self.assertIn("raw", _innerhtml_operands("el.innerHTML = ('<b>' + raw"))  # unbalanced to EOF
 
 
 class EscHelperTests(unittest.TestCase):

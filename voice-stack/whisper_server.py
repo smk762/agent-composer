@@ -469,6 +469,28 @@ async def _fetch_audio_url(url: str) -> bytes:
     raise AudioURLError(502, _AUDIO_URL_FAILED)
 
 
+# Temp-file suffixes taken from a caller's filename or URL. Anything else
+# (unknown, or long enough to hit ENAMETOOLONG) falls back to the default:
+# ffmpeg probes the content, so the suffix is only a hint.
+_SAFE_SUFFIXES = frozenset({
+    ".wav", ".mp3", ".ogg", ".oga", ".opus", ".webm", ".m4a", ".mp4",
+    ".flac", ".aac", ".aiff", ".aif", ".caf", ".amr", ".au", ".mka", ".w64",
+})
+
+
+def _safe_suffix(name: str | None, default: str) -> str:
+    ext = os.path.splitext(name or "")[1].lower()
+    return ext if ext in _SAFE_SUFFIXES else default
+
+
+def _unlink_quietly(path: str | None) -> None:
+    if path:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
 # ── App ───────────────────────────────────────────────────────────────────────
 
 app = FastAPI(title="Voice Stack — Whisper STT", version="1.1.0")
@@ -483,24 +505,25 @@ async def transcribe(
 ):
     if audio.size is not None and audio.size > STT_MAX_AUDIO_BYTES:
         raise HTTPException(413, detail=_AUDIO_TOO_LARGE)
-    suffix = os.path.splitext(audio.filename or "audio.webm")[1] or ".webm"
+    suffix = _safe_suffix(audio.filename, ".webm")
 
     # Copied to disk in chunks, so a large upload is refused without being held in memory.
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-        tmp_path = f.name
-        total = 0
-        while chunk := await audio.read(1024 * 1024):
-            total += len(chunk)
-            if total > STT_MAX_AUDIO_BYTES:
-                f.close()
-                os.unlink(tmp_path)
-                raise HTTPException(413, detail=_AUDIO_TOO_LARGE)
-            f.write(chunk)
-
+    # One try/finally covers the copy too: a failed read/write (client gone, disk
+    # full) must not leave the partial file behind.
+    tmp_path = None
     try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+            tmp_path = f.name
+            total = 0
+            while chunk := await audio.read(1024 * 1024):
+                total += len(chunk)
+                if total > STT_MAX_AUDIO_BYTES:
+                    raise HTTPException(413, detail=_AUDIO_TOO_LARGE)
+                f.write(chunk)
+
         result = await _run_transcription(tmp_path, language, "/transcribe")
     finally:
-        os.unlink(tmp_path)
+        _unlink_quietly(tmp_path)
 
     if isinstance(result, JSONResponse):
         return result
@@ -537,11 +560,8 @@ async def transcriptions(req: TranscriptionRequest):
         except AudioURLError as exc:
             raise HTTPException(exc.status, detail=exc.detail)
 
-        # Infer suffix from URL path or content-type
-        url_path = urlsplit(req.audio_url).path
-        ext = os.path.splitext(url_path)[1]
-        if ext:
-            suffix = ext
+        # Suffix hint from the URL path, only if it is a known audio extension.
+        suffix = _safe_suffix(urlsplit(req.audio_url).path, ".wav")
     else:
         raw = req.audio_base64
         if "," in raw:
@@ -556,14 +576,15 @@ async def transcriptions(req: TranscriptionRequest):
         if len(audio_bytes) > STT_MAX_AUDIO_BYTES:
             raise HTTPException(413, detail=_AUDIO_TOO_LARGE)
 
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
-        f.write(audio_bytes)
-        tmp_path = f.name
-
+    tmp_path = None
     try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
+            tmp_path = f.name
+            f.write(audio_bytes)
+
         result = await _run_transcription(tmp_path, req.language, "/transcriptions")
     finally:
-        os.unlink(tmp_path)
+        _unlink_quietly(tmp_path)
 
     if isinstance(result, JSONResponse):
         return result

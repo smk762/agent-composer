@@ -225,6 +225,8 @@ class FileSizeBigIntTests(unittest.TestCase):
             conn.execute(sa.text("INSERT INTO media_assets VALUES ('a', 5)"))
             with Operations.context(MigrationContext.configure(conn)):
                 mig.upgrade()
+            self.assertEqual(conn.execute(sa.text("SELECT id, file_size_bytes FROM media_assets")).all(),
+                             [("a", 5)])  # the batch table copy kept the row and its value
             cols = {c["name"]: c["type"] for c in sa.inspect(conn).get_columns("media_assets")}
             self.assertIsInstance(cols["file_size_bytes"], sa.BigInteger)
             conn.execute(sa.text("UPDATE media_assets SET file_size_bytes = :n"), {"n": 5 * 2**30})

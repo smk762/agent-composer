@@ -55,6 +55,10 @@ async def _scroll_all(q: AsyncQdrantClient, collection: str) -> Dict[Any, Dict[s
             return out
 
 
+def _embeddable(text: Any) -> bool:
+    return isinstance(text, str) and bool(text.strip())
+
+
 def _without_label(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in payload.items() if k != "embedder"}
 
@@ -79,16 +83,19 @@ async def sync(src: str, dst: str, *, scheme: str, dry_run: bool = False, batch:
         else:
             dst_points = {}
 
-        to_embed = [pid for pid, p in src_points.items()
-                    if pid not in dst_points or dst_points[pid].get("text") != p.get("text")]
+        # A src point with no usable text can't be embedded: it is skipped, and an older copy
+        # in dst is deleted so its stale text and vector aren't served.
+        unembeddable = {pid for pid, p in src_points.items() if not _embeddable(p.get("text"))}
+        to_embed = [pid for pid, p in src_points.items() if pid not in unembeddable
+                    and (pid not in dst_points or dst_points[pid].get("text") != p.get("text"))]
         embed_set = set(to_embed)  # membership below: a list scan would make the plan O(src x embed)
         to_relabel = [pid for pid, p in src_points.items()
-                      if pid in dst_points and pid not in embed_set
+                      if pid in dst_points and pid not in embed_set and pid not in unembeddable
                       and _without_label(dst_points[pid]) != _without_label(p)]
-        to_delete = [pid for pid in dst_points if pid not in src_points]
+        to_delete = [pid for pid in dst_points if pid not in src_points or pid in unembeddable]
         plan = {"src": src, "dst": dst, "embedder": label, "src_points": len(src_points),
                 "dst_points": len(dst_points), "embed": len(to_embed), "payload_only": len(to_relabel),
-                "delete": len(to_delete)}
+                "delete": len(to_delete), "unembeddable": len(unembeddable)}
         log(json.dumps({"plan": plan}))
         if dry_run:
             return {**plan, "dry_run": True}
@@ -107,9 +114,6 @@ async def sync(src: str, dst: str, *, scheme: str, dry_run: bool = False, batch:
         for i, pid in enumerate(to_embed, 1):
             payload = src_points[pid]
             text = payload.get("text")
-            if not isinstance(text, str) or not text.strip():
-                failed.append(pid)
-                continue
             try:
                 res = await emb.embed([text], profile="text")
             except Exception as e:  # keep going; report at the end

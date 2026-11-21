@@ -508,7 +508,15 @@ async def _run_git_ops(
                 },
             )
             if r.status_code == 200:
-                branch = r.json().get("branch", "")
+                try:
+                    body = r.json()
+                except ValueError:
+                    body = None
+                branch = body.get("branch") if isinstance(body, dict) else None
+                if not isinstance(branch, str) or not branch.strip():
+                    # No branch name: committing now would land on whatever is checked out.
+                    error_parts.append("branch creation failed: response named no branch")
+                    return "", commit_sha, push_url, "; ".join(error_parts)
                 log.info("Git ops: created branch %r for job %s", branch, job_id)
             else:
                 error_parts.append(f"branch creation failed ({r.status_code}): {r.text[:200]}")

@@ -29,6 +29,10 @@ _MIN_EDGE, _MAX_EDGE = 256, 2048
 _MAX_IMAGES = 4
 
 
+class _WorkflowFailed(RuntimeError):
+    """ComfyUI finished the prompt with an error (it no longer holds the queue)."""
+
+
 def _parse_size(size: str) -> tuple[int, int]:
     """``WxH`` (or ``N`` for a square) within the supported range, multiples of 8.
     Anything else is a LookupError, which the router answers with a 400."""
@@ -92,7 +96,7 @@ class ComfyUIProvider(ImageProvider, VideoProvider):
             if entry and entry.get("status", {}).get("completed", False):
                 return entry
             if entry and entry.get("status", {}).get("status_str") == "error":
-                raise RuntimeError(f"ComfyUI workflow failed: {entry}")
+                raise _WorkflowFailed(f"ComfyUI workflow failed: {entry}")
         raise TimeoutError("ComfyUI prompt timed out")
 
     async def _cancel_prompt(self, prompt_id: str) -> None:
@@ -169,7 +173,11 @@ class ComfyUIProvider(ImageProvider, VideoProvider):
             prompt_id = await self._queue_prompt(workflow)
             try:
                 result = await self._poll_result(prompt_id)
-            except (TimeoutError, asyncio.CancelledError):
+            except _WorkflowFailed:
+                raise  # the prompt already finished (with an error); nothing to cancel
+            except BaseException:
+                # Timeout, cancellation, a network blip or a bad /history body: drop the
+                # prompt so it doesn't keep the shared GPU queue busy for nobody.
                 await self._cancel_prompt(prompt_id)
                 raise
             outputs = result.get("outputs", {})

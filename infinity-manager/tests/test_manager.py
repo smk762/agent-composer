@@ -29,8 +29,12 @@ class ProxyEncodingTests(unittest.IsolatedAsyncioTestCase):
                 headers={"Content-Encoding": "gzip", "Content-Type": "application/json"},
             )
 
+        async def echo_query(request: web.Request) -> web.Response:
+            return web.json_response({"a": request.query.getall("a", [])})
+
         upstream = web.Application()
         upstream.router.add_post("/embeddings", embeddings)
+        upstream.router.add_get("/echo", echo_query)
         self.server = TestServer(upstream)
         await self.server.start_server()
 
@@ -56,6 +60,13 @@ class ProxyEncodingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("content-encoding", resp.headers)
         self.assertEqual(int(resp.headers["content-length"]), len(PAYLOAD))
         self.assertEqual(resp.content, PAYLOAD)
+
+    async def test_repeated_query_params_are_all_forwarded(self):
+        transport = httpx.ASGITransport(app=manager.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://manager") as client:
+            resp = await client.get("/echo?a=1&a=2")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), {"a": ["1", "2"]})
 
 
 if __name__ == "__main__":
