@@ -39,15 +39,14 @@ kinds:
     vram_mb: 6000                 # 5.2 GB weights plus KV cache
     model_mb: 5300                 # loaded size_vram (jarrah, 2026-11-16)
     priority: interactive
-  # rag-chat /api/guard/check: one lease covers both passes of a cascade. SingGuard is
-  # only on dragon.
+  # rag-chat /api/guard/check: one lease covers both passes of a cascade. SingGuard is on
+  # dragon and jarrah (same digest), so iris may place a check on either.
   - kind: guard
     description: A SingGuard content check (cull scans, darkroom pre-flights, the guard tester).
     target: "ollama:hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M"
     vram_mb: 6000
     model_mb: 5300                 # loaded size_vram 5290 MiB at the guard's num_ctx 16384 (dragon, 2026-11-21)
     priority: interactive
-    constraints: {node: dragon}
   # rag-chat's RAG query embedding. Pinned to dragon: queries must use the embedder that
   # wrote the collection.
   - kind: embed-query
@@ -88,8 +87,8 @@ residents:
     target: "ollama:hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M"   # GUARD_MODEL
     container: ollama
     base_url: http://dragon:11434
-    vram_mb: 3940                 # 3934 MiB loaded at the default context (2026-11-16)
-    pinned: true                  # content checks for cull scans and darkroom pre-flights
+    vram_mb: 5290                 # loaded at the guard's num_ctx 16384 (2026-11-21)
+    pinned: false                 # jarrah has a copy too: iris may free dragon's for the voice sidecars
 
   # The text embedder for ingest and chat queries (EMBED_MODEL).
   - name: nomic-embed-text

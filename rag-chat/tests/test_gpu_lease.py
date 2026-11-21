@@ -242,15 +242,15 @@ class VramAndPinsTest(unittest.TestCase):
         self.assertEqual(table["nomic-embed-text"], 320)
         self.assertNotIn("bad", table)
 
-    def test_pinned_defaults_follow_guard_and_embed_models(self) -> None:
+    def test_pinned_defaults_follow_the_embed_model(self) -> None:
         env = {"GUARD_MODEL": "sg:q8", "EMBED_MODEL": "emb"}
         with patch.dict("os.environ", env, clear=False):
             import os
 
             os.environ.pop("OLLAMA_LEASE_PINNED_MODELS", None)
-            self.assertEqual(gpu_lease._pinned_models(), {"sg:q8", "emb"})
+            self.assertEqual(gpu_lease._pinned_models(), {"emb"})  # SingGuard may spill to jarrah
             with patch.dict("os.environ", {"OLLAMA_LEASE_PINNED_MODELS": ""}):
-                self.assertEqual(gpu_lease._pinned_models(), {"sg:q8", "emb"})
+                self.assertEqual(gpu_lease._pinned_models(), {"emb"})
             with patch.dict("os.environ", {"OLLAMA_LEASE_PINNED_MODELS": "none"}):
                 self.assertEqual(gpu_lease._pinned_models(), set())
             with patch.dict("os.environ", {"OLLAMA_LEASE_PINNED_MODELS": "a, b"}):
