@@ -1,0 +1,5 @@
+# Unit-test env for modernbert, installed on top of requirements.txt (CI and ai-code-auditor's
+# validate_patch install both). The model tests stub torch; nothing here needs a GPU.
+httpx==0.28.1  # test_modernbert_packs drives the app through fastapi's TestClient
+requests==2.34.2  # test_classify (live smoke tests; skipped when no container answers)
+pytest

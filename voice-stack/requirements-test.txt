@@ -1,6 +1,8 @@
 # Unit-test env for voice-stack (CPU, no models). The services have no requirements.txt
 # (each Dockerfile installs its own), so ai-code-auditor's validate_patch builds its venv
-# from this file. Tests stub torch/TTS/faster-whisper; the light deps here are real.
+# from this file. Tests stub TTS/faster-whisper; the light deps here are real.
+# CPU torch (no GPU, ~200 MB) so test_xtts_server's clone-loading tests run; the images pull CUDA torch.
+--extra-index-url https://download.pytorch.org/whl/cpu
 fastapi==0.162.0
 starlette==1.10.0
 pydantic==2.14.3
@@ -11,4 +13,5 @@ numpy>=2.0  # not ==2.5.4 (requirements-whisper): that needs Python 3.12+, and t
 soundfile==0.14.0
 boto3==1.44.4
 wyoming==1.11.0
+torch==2.15.0+cpu
 pytest
