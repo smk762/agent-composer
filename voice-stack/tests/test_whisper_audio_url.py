@@ -2,7 +2,9 @@
 
 import asyncio
 import ipaddress
+import os
 import socket
+import tempfile
 
 import httpx
 import pytest
@@ -268,3 +270,73 @@ def test_multipart_upload_over_the_cap_is_413(client, monkeypatch):
     monkeypatch.setattr(ws, "STT_MAX_AUDIO_BYTES", 1000)
     r = client.post("/transcribe", files={"audio": ("a.wav", b"x" * 5000, "audio/wav")})
     assert r.status_code == 413
+
+
+# ── temp-file suffix and cleanup (02eb633351, ac495ebab9) ───────────────────
+
+
+def _capture_suffix(monkeypatch):
+    seen = {}
+
+    async def fake_run(tmp_path, language, endpoint):
+        seen["suffix"] = os.path.splitext(tmp_path)[1]
+        return {"text": "ok", "language": "en", "duration": 1.0, "duration_seconds": 1.0, "confidence": 1.0}
+
+    monkeypatch.setattr(ws, "_run_transcription", fake_run)
+    return seen
+
+
+def test_long_url_extension_falls_back_to_wav(client, monkeypatch):
+    seen = _capture_suffix(monkeypatch)
+    _mock_upstream(monkeypatch, lambda r: httpx.Response(200, content=b"hello"))
+    r = client.post("/transcriptions", json={"audio_url": "http://public.example/a." + "x" * 300})
+    assert r.status_code == 200, r.text
+    assert seen["suffix"] == ".wav"
+
+
+def test_known_url_extension_is_kept(client, monkeypatch):
+    seen = _capture_suffix(monkeypatch)
+    _mock_upstream(monkeypatch, lambda r: httpx.Response(200, content=b"hello"))
+    r = client.post("/transcriptions", json={"audio_url": "http://public.example/clip.MP3"})
+    assert r.status_code == 200, r.text
+    assert seen["suffix"] == ".mp3"
+
+
+def test_long_upload_filename_extension_falls_back(client, monkeypatch):
+    seen = _capture_suffix(monkeypatch)
+    r = client.post("/transcribe", files={"audio": ("a." + "y" * 300, b"data", "audio/wav")})
+    assert r.status_code == 200, r.text
+    assert seen["suffix"] == ".webm"
+
+
+def _failing_tempfile(monkeypatch):
+    """NamedTemporaryFile whose write fails (disk full) after the file exists."""
+    created = []
+    real = tempfile.NamedTemporaryFile
+
+    def factory(*args, **kwargs):
+        f = real(*args, **kwargs)
+        created.append(f.name)
+
+        def boom(data):
+            raise OSError(28, "No space left on device")
+
+        f.write = boom
+        return f
+
+    monkeypatch.setattr(ws.tempfile, "NamedTemporaryFile", factory)
+    return created
+
+
+@pytest.mark.parametrize("endpoint", ["/transcribe", "/transcriptions"])
+def test_failed_temp_write_leaves_no_file(client, monkeypatch, endpoint):
+    import base64
+
+    created = _failing_tempfile(monkeypatch)
+    c = TestClient(ws.app, raise_server_exceptions=False)
+    if endpoint == "/transcribe":
+        r = c.post(endpoint, files={"audio": ("a.wav", b"data", "audio/wav")})
+    else:
+        r = c.post(endpoint, json={"audio_base64": base64.b64encode(b"data").decode()})
+    assert r.status_code == 500
+    assert created and not any(os.path.exists(p) for p in created)

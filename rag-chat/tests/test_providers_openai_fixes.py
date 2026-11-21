@@ -55,6 +55,19 @@ class OpenAINTests(unittest.TestCase):
         asyncio.run(self.provider.generate_image("a cat", model="dall-e-3", n=1))
         self.assertEqual(_Client.calls[0]["n"], 1)
 
+    def test_more_than_ten_images_is_refused_not_clamped(self):
+        with self.assertRaises(LookupError):
+            asyncio.run(self.provider.generate_image("a cat", model="dall-e-2", n=16))
+        self.assertEqual(_Client.calls, [])
+
+    def test_style_is_sent_only_to_dalle3(self):
+        asyncio.run(self.provider.generate_image("a cat", model="dall-e-2", style="vivid"))
+        asyncio.run(self.provider.generate_image("a cat", model="gpt-image-1", style="vivid"))
+        asyncio.run(self.provider.generate_image("a cat", model="dall-e-3", style="vivid"))
+        self.assertNotIn("style", _Client.calls[0])
+        self.assertNotIn("style", _Client.calls[1])
+        self.assertEqual(_Client.calls[2]["style"], "vivid")
+
 
 if __name__ == "__main__":
     unittest.main()

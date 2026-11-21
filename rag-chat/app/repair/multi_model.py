@@ -163,8 +163,10 @@ async def _validate_via_api(
     timeout, connection error, malformed payload) the patch has not been analysed, so it
     does not pass.
     """
-    if not audit_api_url or not patch:
+    if not patch:
         return True, []
+    if not audit_api_url:
+        return _unavailable("diff audit", "audit API not configured")
     try:
         async with audit_client(timeout=60) as client:
             r = await client.post(
@@ -223,8 +225,10 @@ async def _validate_via_tests(
     - Fails closed: a timeout, an unreachable or missing endpoint, a non-200 answer or a
       malformed payload is (False, [<reason>]), never a pass.
     """
-    if not audit_api_url or not patch:
+    if not patch:
         return True, []
+    if not audit_api_url:
+        return _unavailable("test validation", "audit API not configured")
     try:
         async with audit_client(timeout=timeout + _VALIDATE_CLIENT_MARGIN_S) as client:
             r = await client.post(
@@ -255,7 +259,13 @@ async def _validate_via_tests(
         # Use failure_summary (pre-filtered, LLM-ready) as the canonical error source.
         # Never fall back to raw errors — they may contain infrastructure noise
         # (broken venv symlinks, missing runners) that would mislead the model.
-        failure_summary: list[str] = data.get("failure_summary") or []
+        failure_summary = data.get("failure_summary") or []
+        # A string "false" or a number would read as truthy, and a string summary would be
+        # iterated per character: anything but a real bool / list of strings is no verdict.
+        if not isinstance(passed, bool) or not isinstance(failure_summary, list) or not all(
+            isinstance(line, str) for line in failure_summary
+        ):
+            return _unavailable("test validation", "malformed response")
         if not passed and not failure_summary:
             # Test runner failed but produced no actionable failure lines.
             # This is an infrastructure issue (broken venv, missing runner, bad shebang

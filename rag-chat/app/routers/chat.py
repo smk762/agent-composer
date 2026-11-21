@@ -459,26 +459,9 @@ async def chat(
 
         async def stream_gen():
             model = await _resolve_model(requested_model)
-            if not conv.model:
-                conv.model = model
 
-            tried: List[str] = []
-            for cand in _uniq_keep_order([model] + _model_candidates(model) + _model_candidates(requested_model)):
-                tried.append(cand)
-                try:
-                    async with httpx.AsyncClient(timeout=10) as probe:
-                        pr = await probe.post(f"{OLLAMA_URL}/api/show", json={"name": cand})
-                    if pr.status_code == 200:
-                        model = cand
-                        break
-                except Exception as exc:  # an unreachable probe is one more candidate tried, not silence
-                    log.warning("model probe for %s failed: %s", cand, exc)
-            else:
-                yield f'data: {json.dumps({"error": f"Model not found. Tried: {tried}"})}\n\n'
-                yield 'data: [DONE]\n\n'
-                return
-            await _store_new_conversation(db, conv)
-
+            # RAG context first: its embed takes a lease of its own, so it must not run while
+            # this request holds the chat lease below.
             msgs = req.messages
             if not msgs or msgs[0].role != "system":
                 msgs = [Msg(role="system", content=SYSTEM_PROMPT)] + msgs
@@ -487,7 +470,6 @@ async def chat(
                 msgs = [msgs[0], Msg(role="system", content=ctx)] + msgs[1:]
 
             payload = {
-                "model": model,
                 "messages": [_msg_to_ollama_format(m) for m in msgs],
                 "stream": True,
                 **ollama_keep_alive(),
@@ -501,6 +483,42 @@ async def chat(
             if req.tools:
                 payload["tools"] = [_tool_to_ollama_format(t) for t in req.tools]
 
+            tried: List[str] = []
+            for cand in _uniq_keep_order([model] + _model_candidates(model) + _model_candidates(requested_model)):
+                tried.append(cand)
+                try:
+                    async with ollama_lease(cand, kind="chat", priority="interactive", caller=f"chat:{auth.user_id}") as base_url:
+                        # Probe the backend this chat is leased to, not OLLAMA_URL: with a spill
+                        # node the model can be on one and missing on the other.
+                        try:
+                            async with httpx.AsyncClient(timeout=10) as probe:
+                                pr = await probe.post(f"{base_url}/api/show", json={"name": cand})
+                            present = pr.status_code == 200
+                        except Exception as exc:  # an unreachable probe is one more candidate tried, not silence
+                            log.warning("model probe for %s failed: %s", cand, exc)
+                            present = False
+                        if not present:
+                            continue
+                        model = cand
+                        conv.model = model  # the model that answers, so follow-ups don't re-probe a missing one
+                        await _store_new_conversation(db, conv)
+                        reply = _stream_reply(base_url, {**payload, "model": model}, model)
+                        try:
+                            async for event in reply:
+                                yield event
+                        finally:
+                            await reply.aclose()  # a client disconnect must still run its partial-turn save
+                        return
+                except OllamaLeaseUnavailable as e:
+                    # The response has started, so this is an SSE error, not a 503.
+                    log.warning("chat: %s", e.detail)
+                    yield f'data: {json.dumps({"error": e.detail, "retry_after": e.retry_after})}\n\n'
+                    yield 'data: [DONE]\n\n'
+                    return
+            yield f'data: {json.dumps({"error": f"Model not found. Tried: {tried}"})}\n\n'
+            yield 'data: [DONE]\n\n'
+
+        async def _stream_reply(base_url: str, payload: dict, model: str):
             log.info("chat: streaming from ollama, model=%s, conv=%s", model, conv.id)
             t0 = time.monotonic()
             acc_content = ""
@@ -520,24 +538,19 @@ async def chat(
 
             try:
                 try:
-                    async with ollama_lease(model, kind="chat", priority="interactive", caller=f"chat:{auth.user_id}") as base_url:
-                        async for chunk in stream_ollama_chat(base_url, payload, model, conv.id):
-                            chunk_count += 1
-                            if chunk.choices:
-                                delta = chunk.choices[0].delta
-                                if delta.content:
-                                    acc_content += delta.content
-                                if delta.tool_calls:
-                                    acc_tools.extend(delta.tool_calls)
-                            yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
+                    async for chunk in stream_ollama_chat(base_url, payload, model, conv.id):
+                        chunk_count += 1
+                        if chunk.choices:
+                            delta = chunk.choices[0].delta
+                            if delta.content:
+                                acc_content += delta.content
+                            if delta.tool_calls:
+                                acc_tools.extend(delta.tool_calls)
+                        yield f"data: {chunk.model_dump_json(exclude_none=True)}\n\n"
                 except StreamError as e:
                     log.error("chat: stream error after %.1fs (%d chunks): %s",
                               time.monotonic() - t0, chunk_count, e)
                     yield f'data: {json.dumps({"error": str(e)})}\n\n'
-                except OllamaLeaseUnavailable as e:
-                    # The response has started, so this is an SSE error, not a 503.
-                    log.warning("chat: %s", e.detail)
-                    yield f'data: {json.dumps({"error": e.detail, "retry_after": e.retry_after})}\n\n'
 
                 stream_elapsed = time.monotonic() - t0
                 log.info("chat: stream complete in %.1fs, %d chunks, %d chars, tool_calls=%s",
@@ -558,8 +571,6 @@ async def chat(
 
     # NON-STREAMING PATH
     model = await _resolve_model(requested_model)
-    if not conv.model:
-        conv.model = model
 
     msgs = req.messages
 
@@ -617,6 +628,7 @@ async def chat(
         log.error("chat: ollama failed after %.1fs, status=%d tried=%s body=%s",
                   elapsed, r.status_code, tried, (r.text or "")[:500])
         raise HTTPException(502, "Chat backend error")
+    conv.model = model  # the candidate that answered, not the (possibly missing) one requested
     await _store_new_conversation(db, conv)
 
     data = r.json()

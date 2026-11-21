@@ -2,6 +2,7 @@
 plus the GPU-resident gateway argus-iris uses to read and unload the sidecars on this host."""
 
 import asyncio
+import json
 import time
 from typing import Any, Dict, List, Literal, Optional
 
@@ -269,7 +270,11 @@ async def _summary(name: str) -> Dict[str, Any]:
         "gpu": body.get("gpu"),
     }
     if not healthy:
-        summary["detail"] = (body.get("detail") or body.get("error") or str(raw))[:500] if raw else ""
+        # A sidecar may send a dict/int detail (HTTPException(detail={...})): stringify, don't slice it.
+        detail = (body.get("detail") or body.get("error") or raw) if raw else ""
+        if not isinstance(detail, str):
+            detail = json.dumps(detail, default=str)
+        summary["detail"] = detail[:500]
     return summary
 
 

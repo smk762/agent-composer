@@ -48,6 +48,14 @@ class PrefixTests(unittest.TestCase):
         self.assertEqual(c.prompts, ["search_document: " + "x" * 13])  # 30 - len(prefix)
         self.assertTrue(truncated)
 
+    def test_a_prefix_that_eats_the_limit_still_bounds_the_body(self):
+        c = _Client()
+        client = em.OllamaEmbeddingClient(prefix="p" * 40)
+        with mock.patch.object(em, "EMBED_MAX_CHARS", 30), mock.patch.object(em, "EMBED_MIN_CHARS", 10):
+            _, truncated = asyncio.run(client._embed_one(c, "x" * 500))
+        self.assertEqual(c.prompts, ["p" * 40 + "x" * 10])  # clamped to EMBED_MIN_CHARS, not unbounded
+        self.assertTrue(truncated)
+
     def test_overflow_at_the_minimum_is_a_typed_error(self):
         c = _Client(limit=5)  # even EMBED_MIN_CHARS is over the limit
         client = em.OllamaEmbeddingClient()

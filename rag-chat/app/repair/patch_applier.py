@@ -49,7 +49,9 @@ def extract_patch(llm_response: str) -> str:
             return candidate + "\n"
 
     # Inline diff — find the first diff-looking line, stop where the diff ends
-    lines = llm_response.splitlines()
+    # Only "\n": splitlines() also breaks on \f, \v, \x1c-\x1e, \x85, \u2028/9, which can
+    # sit inside a source line and would split a hunk line in two.
+    lines = llm_response.split("\n")
     for i, line in enumerate(lines):
         if line.startswith(("diff --git ", "--- ", "@@ ")):
             end = i + 1

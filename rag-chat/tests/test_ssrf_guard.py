@@ -48,13 +48,16 @@ def unguarded_clients(path: Path) -> list[str]:
     by_name = {alias.asname or alias.name
                for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module == "httpx"
                for alias in node.names if alias.name in _CLIENT_ATTRS}
+    modules = {alias.asname or alias.name  # `import httpx as hx` names the module hx
+               for node in ast.walk(tree) if isinstance(node, ast.Import)
+               for alias in node.names if alias.name == "httpx"}
     hits = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         f = node.func
         direct = (isinstance(f, ast.Attribute) and f.attr in _CLIENT_ATTRS
-                  and isinstance(f.value, ast.Name) and f.value.id == "httpx")
+                  and isinstance(f.value, ast.Name) and f.value.id in modules)
         imported = isinstance(f, ast.Name) and f.id in by_name
         if (direct or imported) and not _marked(lines, node.lineno):
             hits.append(f"{path.name}:{node.lineno}")
@@ -72,6 +75,14 @@ class RuleTests(unittest.TestCase):
     def test_fires_on_the_positive_fixture(self) -> None:
         hits = unguarded_clients(FIXTURES / "unguarded.py")
         self.assertEqual(len(hits), 4, hits)  # AsyncClient, imported AsyncClient, httpx.get, reason-less marker
+
+    def test_fires_on_an_aliased_module_import(self) -> None:
+        import tempfile
+        src = "import httpx as hx\n\nasync def f(url):\n    async with hx.AsyncClient() as c:\n        return await c.get(url)\n"
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "aliased.py"
+            path.write_text(src, encoding="utf-8")
+            self.assertEqual(unguarded_clients(path), ["aliased.py:4"])
 
     def test_silent_on_the_negative_fixture(self) -> None:
         self.assertEqual(unguarded_clients(FIXTURES / "guarded.py"), [])

@@ -295,3 +295,72 @@ def test_import_keeps_valid_meta_fields(importer):
     raw = json.dumps({"companion_id": "kept", "name": "Kept", "num_clips": 3, "total_seconds": 12.345}).encode()
     meta = xs._import_clone(_zip(raw), "", "", False)
     assert (meta["companion_id"], meta["name"], meta["num_clips"], meta["total_seconds"]) == ("kept", "Kept", 3, 12.35)
+
+
+# ── 0121b4afef: non-finite numeric strings sort as 0 ─────────────────────────
+
+
+@pytest.mark.parametrize("raw", ["nan", "NaN", "inf", "-Infinity", "1e999"])
+def test_created_at_key_rejects_non_finite_strings(raw):
+    assert xs._created_at_key({"created_at": raw}) == 0.0
+
+
+def test_created_at_key_keeps_finite_numeric_strings():
+    assert xs._created_at_key({"created_at": "1700000000.5"}) == 1700000000.5
+
+
+# ── 34f19c44e1: a huge int in meta.json is not an OverflowError / orphan ─────
+
+
+def test_import_with_a_huge_integer_meta_field(importer):
+    raw = ('{"companion_id": "big", "num_clips": ' + "9" * 400 + ', "total_seconds": ' + "1" * 400 + "}").encode()
+    meta = xs._import_clone(_zip(raw), "", "", False)
+    assert meta["num_clips"] == 0 and meta["total_seconds"] == 0.0
+    assert set(importer) == {"voice_clones/big/prompt.pt", "voice_clones/big/meta.json"}
+
+
+def test_import_failure_while_building_meta_uploads_nothing(importer, monkeypatch):
+    def boom(*a, **k):
+        raise ValueError("bad meta")
+
+    monkeypatch.setattr(xs.json, "dumps", boom)
+    with pytest.raises(ValueError):
+        xs._import_clone(_zip(b'{"companion_id": "x"}'), "", "", False)
+    assert importer == {}
+
+
+# ── 8edd82b3b0: only a real OOM is a 503 ─────────────────────────────────────
+
+
+class _InferenceMgr:
+    state = xs.TTSState.GPU
+
+    def lease(self):
+        import contextlib
+
+        @contextlib.asynccontextmanager
+        async def cm():
+            yield self
+
+        return cm()
+
+
+@pytest.mark.parametrize("msg,code", [
+    ("CUDA error: device-side assert triggered", 500),
+    ("Expected all tensors to be on the same device (cuda:0 vs cpu)", 500),
+    ("some other runtime failure", 500),
+    ("CUDA out of memory. Tried to allocate 2.00 GiB", 503),
+])
+def test_synthesise_runtime_errors(monkeypatch, msg, code):
+    monkeypatch.setattr(xs, "_mgr", _InferenceMgr())
+    monkeypatch.setattr(xs, "_resolve_latents", lambda req: (None, None))
+    monkeypatch.setattr(xs, "_gpu_memory_info", lambda: {})
+
+    def fail(*a):
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(xs, "_run_inference", fail)
+    c = TestClient(xs.app, raise_server_exceptions=False)
+    r = c.post("/synthesise", json={"text": "hi", "language": "en"})
+    assert r.status_code == code, r.text
+    assert ("GPU OOM" in r.text) == (code == 503)

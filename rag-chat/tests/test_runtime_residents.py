@@ -113,6 +113,15 @@ class ResidentGatewayTest(unittest.TestCase):
         self.assertTrue(by_name["xtts"]["healthy"])
         self.assertFalse(by_name["whisper"]["healthy"])  # unreachable
 
+    def test_a_non_string_detail_does_not_break_the_listing(self) -> None:
+        _Upstream.answers["http://mb:7998/health"] = (503, {"detail": {"code": "oom", "free_mb": 12}})
+        _Upstream.answers["http://xtts:8031/health"] = (500, {"error": 7})
+        r = self.client.get("/api/runtime/residents")
+        self.assertEqual(r.status_code, 200)
+        by_name = {x["name"]: x for x in r.json()["residents"]}
+        self.assertEqual(by_name["modernbert"]["detail"], '{"code": "oom", "free_mb": 12}')
+        self.assertEqual(by_name["xtts"]["detail"], "7")
+
     def test_unreachable_admin_is_503(self) -> None:
         self.assertEqual(self.client.post("/api/runtime/residents/modernbert/admin/wake").status_code, 503)
 

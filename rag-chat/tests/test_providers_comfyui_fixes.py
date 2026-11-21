@@ -89,6 +89,29 @@ class ComfyUICancelTests(unittest.TestCase):
             asyncio.run(run())
         self.assertIn(("queue", {"delete": ["p1"]}), self._posts())
 
+    def test_network_error_while_polling_cancels_the_prompt(self):
+        real_get = _Client.get
+
+        async def flaky_get(self, url, **kw):
+            if "/history/" in url:
+                raise comfyui.httpx.ConnectError("blip")
+            return await real_get(self, url, **kw)
+
+        with mock.patch.object(_Client, "get", flaky_get):
+            with self.assertRaises(comfyui.httpx.ConnectError):
+                asyncio.run(self.provider.generate_image("a cat"))
+        self.assertIn(("queue", {"delete": ["p1"]}), self._posts())
+
+    def test_failed_workflow_is_not_cancelled(self):
+        async def error_get(self, url, **kw):
+            _Client.calls.append(("GET", url, None))
+            return _Resp(payload={"p1": {"status": {"status_str": "error"}}})
+
+        with mock.patch.object(_Client, "get", error_get):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(self.provider.generate_image("a cat"))
+        self.assertNotIn(("queue", {"delete": ["p1"]}), self._posts())
+
 
 if __name__ == "__main__":
     unittest.main()

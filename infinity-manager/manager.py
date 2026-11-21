@@ -309,7 +309,8 @@ async def proxy(path: str, request: Request) -> Response:
             async with session.request(
                 request.method,
                 f"{UPSTREAM}/{path}",
-                params=request.query_params,
+                # multi_items keeps repeated keys (?a=1&a=2); a Mapping would keep only the last.
+                params=list(request.query_params.multi_items()),
                 data=body,
                 headers=headers,
             ) as upstream_response:

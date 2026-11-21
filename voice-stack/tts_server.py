@@ -281,7 +281,17 @@ class TTSModelManager:
         where the weights are."""
 
         async def run() -> None:
-            await asyncio.to_thread(self._move_to_device, device)
+            try:
+                await asyncio.to_thread(self._move_to_device, device)
+            except Exception as exc:
+                # A move that stopped partway (CUDA OOM on promotion) can leave
+                # the weights split across devices. Don't let _state name either
+                # one: free the models so the next request does a clean reload.
+                self._free_models()
+                self._state = TTSState.ERROR
+                self._error = str(exc)
+                logger.error("tts_move_failed", target=device, error=str(exc))
+                raise
             self._state = state
             if self._in_use == 0 and not self._lock.locked():
                 # Its caller was cancelled and nobody else holds the lock: arm
@@ -439,7 +449,13 @@ class TTSModelManager:
                 async with self._lock:
                     if self._state != TTSState.GPU or self._in_use:
                         return
-                    await self._demote_locked()
+                    try:
+                        await self._demote_locked()
+                    except Exception as exc:
+                        # The failed move already freed the models (state ERROR);
+                        # don't let the exception kill the task unretrieved.
+                        logger.error("tts_demote_failed", error=str(exc))
+                        return
             elif self._state != TTSState.CPU:
                 return
 
@@ -463,6 +479,15 @@ _mgr = TTSModelManager()
 _s3_client = None
 _clone_cache: OrderedDict = OrderedDict()
 _clone_cache_lock = threading.Lock()
+
+
+def _cache_clone_prompt(key: str, prompt) -> None:
+    """Insert or refresh ``key`` as the most recently used clone; evict the oldest."""
+    with _clone_cache_lock:
+        _clone_cache[key] = prompt
+        _clone_cache.move_to_end(key)  # a re-cloned key keeps its old slot otherwise
+        while len(_clone_cache) > _CLONE_CACHE_MAX:
+            _clone_cache.popitem(last=False)
 
 
 def _get_s3_client():
@@ -505,10 +530,7 @@ def _get_clone_prompt(clone_id: str):
     buf.seek(0)
     prompt = torch.load(buf, map_location="cpu", weights_only=True)
 
-    with _clone_cache_lock:
-        _clone_cache[clone_id] = prompt
-        if len(_clone_cache) > _CLONE_CACHE_MAX:
-            _clone_cache.popitem(last=False)
+    _cache_clone_prompt(clone_id, prompt)
 
     return prompt
 
@@ -537,6 +559,15 @@ def _server_error(status: int, message: str, event: str, exc: Exception, **log) 
     error_id = uuid.uuid4().hex[:12]
     logger.error(event, error=str(exc), error_id=error_id, **log)
     return JSONResponse(status_code=status, content={"error": message, "error_id": error_id})
+
+
+def _is_cuda_oom(exc: BaseException) -> bool:
+    """True only for a real CUDA out-of-memory, not any error that mentions CUDA
+    (device-side asserts, device mismatches are not retryable OOMs)."""
+    oom_type = getattr(getattr(sys.modules.get("torch"), "cuda", None), "OutOfMemoryError", None)
+    if isinstance(oom_type, type) and isinstance(exc, oom_type):
+        return True
+    return "out of memory" in str(exc).lower()
 
 
 def _get_supported_languages() -> list[str]:
@@ -684,10 +715,9 @@ async def _generate_audio_leased(req: SynthesiseRequest):
             )
 
     except RuntimeError as exc:
-        err_str = str(exc).lower()
-        if "out of memory" in err_str or "cuda" in err_str:
+        if _is_cuda_oom(exc):
             return _server_error(503, "GPU OOM", "tts_gpu_oom", exc, gpu=_gpu_memory_info())
-        raise
+        return _server_error(500, "TTS generation failed", "tts_generation_failed", exc, exc_info=True)
     except ValueError as exc:
         logger.warning("tts_validation_error", error=str(exc))
         return JSONResponse(status_code=422, content={"error": str(exc)})
@@ -696,6 +726,9 @@ async def _generate_audio_leased(req: SynthesiseRequest):
 
     import numpy as np
 
+    if audio_arrays is None or len(audio_arrays) == 0:
+        logger.warning("tts_empty_generation", text_chars=len(req.text))
+        return JSONResponse(status_code=422, content={"error": "TTS produced no audio for this text"})
     audio = np.concatenate(audio_arrays) if len(audio_arrays) > 1 else audio_arrays[0]
     audio = np.ascontiguousarray(np.asarray(audio), dtype="<f4").reshape(-1)
     return audio, int(sample_rate)
@@ -877,10 +910,9 @@ async def _clone_voice_leased(audio: UploadFile, reference_text: str, companion_
             x_vector_only_mode=use_xvector_only,
         )
     except RuntimeError as exc:
-        err_str = str(exc).lower()
-        if "out of memory" in err_str or "cuda" in err_str:
+        if _is_cuda_oom(exc):
             return _server_error(503, "GPU OOM", "tts_clone_gpu_oom", exc, gpu=_gpu_memory_info())
-        raise
+        return _server_error(500, "Voice clone failed", "tts_clone_failed", exc, exc_info=True)
     finally:
         os.unlink(tmp_path)
 
@@ -892,10 +924,7 @@ async def _clone_voice_leased(audio: UploadFile, reference_text: str, companion_
 
     await asyncio.to_thread(_upload_to_s3, prompt_bytes, s3_key, "application/octet-stream")
 
-    with _clone_cache_lock:
-        _clone_cache[s3_key] = clone_prompt
-        if len(_clone_cache) > _CLONE_CACHE_MAX:
-            _clone_cache.popitem(last=False)
+    _cache_clone_prompt(s3_key, clone_prompt)
 
     logger.info("voice_cloned", companion_id=companion_id, duration=duration, s3_key=s3_key)
     return {"voice_clone_id": s3_key, "companion_id": companion_id, "duration": duration}

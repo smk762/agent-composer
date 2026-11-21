@@ -788,12 +788,10 @@ async def clones(engine: Optional[str] = Query(default=None)):
         async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
             r = await client.get(f"{base}/clones")
             r.raise_for_status()
-    except httpx.ConnectError:
-        raise HTTPException(503, detail="TTS server unreachable")
-    except httpx.HTTPStatusError as exc:
-        raise upstream_error(exc.response, "TTS server")
+    except httpx.HTTPError as exc:  # timeout -> 504, other transport -> 503, HTTP status relayed
+        raise _upstream_error(exc, "TTS server")
 
-    return r.json()
+    return _json_body(r, "TTS server")
 
 
 @router.post("/clones/import")
@@ -815,12 +813,10 @@ async def import_clone(
         async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
             r = await client.post(f"{base}/clones/import", files=files, data=form)
             r.raise_for_status()
-    except httpx.ConnectError:
-        raise HTTPException(503, detail="TTS server unreachable")
-    except httpx.HTTPStatusError as exc:
-        raise upstream_error(exc.response, "TTS server")
+    except httpx.HTTPError as exc:  # timeout -> 504, other transport -> 503, HTTP status relayed
+        raise _upstream_error(exc, "TTS server")
 
-    return r.json()
+    return _json_body(r, "TTS server")
 
 
 @router.get("/clones/{companion_id}/download")
@@ -834,10 +830,8 @@ async def download_clone(companion_id: str, engine: Optional[str] = Query(defaul
         async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
             r = await client.get(f"{base}/clones/{segment}/download")
             r.raise_for_status()
-    except httpx.ConnectError:
-        raise HTTPException(503, detail="TTS server unreachable")
-    except httpx.HTTPStatusError as exc:
-        raise upstream_error(exc.response, "TTS server")
+    except httpx.HTTPError as exc:  # timeout -> 504, other transport -> 503, HTTP status relayed
+        raise _upstream_error(exc, "TTS server")
 
     return Response(
         content=r.content,

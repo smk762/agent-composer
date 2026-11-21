@@ -110,6 +110,26 @@ class StoreFailureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(assets, [])
         self.assertEqual(self.store.deleted, self.store.saved)
 
+    async def test_failed_failure_commit_still_raises_500_and_marks_failed(self) -> None:
+        async with self.Session() as db:
+            gen = Generation(user_id="u1", provider_name="fake", capability="image", status="running")
+            db.add(gen)
+            await db.commit()
+            gen_id = gen.id
+
+            async def broken_commit():
+                raise ConnectionError("connection dropped")
+
+            db.commit = broken_commit  # every commit on this session fails, like a dead connection
+            result = await _Provider().generate_image("p")
+            with self.assertRaises(HTTPException) as cm:
+                await generation._store_results(db, gen, result, user_id="u1", media_type="image")
+        self.assertEqual(cm.exception.status_code, 500)
+        async with self.Session() as db:
+            row = (await db.execute(select(Generation).where(Generation.id == gen_id))).scalar_one()
+        self.assertEqual(row.status, "failed")
+        self.assertIn("No space left", row.error_message)
+
 
 if __name__ == "__main__":
     unittest.main()

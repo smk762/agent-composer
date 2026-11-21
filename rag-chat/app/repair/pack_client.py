@@ -154,7 +154,7 @@ def build_pack_block(pack: dict[str, Any], brief: str = "") -> PackContext:
         _bullets(criteria) if criteria else "- Fix the finding without regressing related paths.",
     ]
     if commands:
-        lines += ["", "### Suggested test commands", _bullets([f"`{c}`" for c in commands])]
+        lines += ["", "### Suggested test commands", _bullets([_code_span(c) for c in commands])]
     if constraints:
         lines += ["", "### Constraints", _bullets(constraints)]
 

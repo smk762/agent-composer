@@ -162,7 +162,13 @@ class MinioMediaStore:
             code = str((e.response or {}).get("Error", {}).get("Code", ""))
             if code not in {"404", "NoSuchBucket"}:
                 raise
-            self._client.create_bucket(Bucket=self._bucket)
+            try:
+                self._client.create_bucket(Bucket=self._bucket)
+            except ClientError as ce:
+                # Another first upload created it between our head_bucket and here: that's success.
+                code = str((ce.response or {}).get("Error", {}).get("Code", ""))
+                if code not in {"BucketAlreadyOwnedByYou", "BucketAlreadyExists"}:
+                    raise
         self._bucket_ready = True
 
     def _object_key(self, *, user_id: str, generation_id: str, filename: str) -> str:

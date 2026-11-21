@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import require_user
@@ -97,11 +98,36 @@ async def _store_results(db: AsyncSession, gen: Generation, result, *, user_id: 
                 await media_store.delete(rel_path)
             except Exception as cleanup_err:
                 log.warning("generation %s: could not delete %s: %s", gen_id, rel_path, cleanup_err)
-        gen.status = "failed"
-        gen.error_message = f"storing results failed: {e}"
-        gen.completed_at = datetime.now(tz=UTC)
-        await db.commit()
+        await _mark_failed_after_store_error(db, gen, gen_id, f"storing results failed: {e}")
         raise HTTPException(500, f"Generation succeeded but storing its results failed (generation {gen_id}); see server logs")
+
+
+async def _mark_failed_after_store_error(db: AsyncSession, gen: Generation, gen_id: str, error: str) -> None:
+    """Best-effort: record ``gen`` as failed. If the session can't commit (the failure that got
+    us here may have been the connection itself), retry once on a fresh session; never raise,
+    so the caller's HTTPException is what the client sees."""
+    now = datetime.now(tz=UTC)
+    gen.status = "failed"
+    gen.error_message = error
+    gen.completed_at = now
+    try:
+        await db.commit()
+        return
+    except Exception as commit_err:
+        log.error("generation %s: could not record the failure: %s", gen_id, commit_err)
+        try:
+            await db.rollback()
+        except Exception as rollback_err:
+            log.warning("generation %s: rollback failed: %s", gen_id, rollback_err)
+    try:
+        async with AsyncSession(db.bind) as fresh:
+            await fresh.execute(
+                update(Generation).where(Generation.id == gen_id)
+                .values(status="failed", error_message=error, completed_at=now)
+            )
+            await fresh.commit()
+    except Exception as retry_err:
+        log.error("generation %s: still could not record the failure; it stays running: %s", gen_id, retry_err)
 
 
 async def _run_inference_with_oom_retry(operation, *, metric_operation: str):

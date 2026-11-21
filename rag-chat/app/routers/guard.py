@@ -228,6 +228,12 @@ async def guard_check(req: GuardCheckRequest):
         requested = normalize_thinking(req.thinking or GUARD_THINKING)
         image = image_b64(req.image_base64)
         turns = _turns(req)
+        # Build every pass's request now, so a bad conversation/policy/image is a 400
+        # here and a ValueError during the run can only be the guard's own failure.
+        for pass_thinking in (
+            (THINKING_FAST, THINKING_SLOW) if requested == THINKING_CASCADE else (requested,)
+        ):
+            _ollama_request(model=model, turns=turns, policy=req.policy, thinking=pass_thinking, image=image)
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc)) from exc
 
@@ -279,7 +285,10 @@ async def guard_check(req: GuardCheckRequest):
 
             used, verdict = await _guard_workers.run(_run)
     except ValueError as exc:
-        raise HTTPException(400, detail=str(exc)) from exc
+        # The input was validated above: this is undecodable Ollama JSON or model
+        # output the parser rejects, an upstream fault, not the caller's.
+        log.warning("guard: bad upstream output from %s: %s", model, exc)
+        raise HTTPException(502, detail="Guard model returned an unusable response") from exc
     except httpx.TimeoutException:
         raise HTTPException(504, detail="Ollama guard timed out")
     except httpx.TransportError:
@@ -292,7 +301,13 @@ async def guard_check(req: GuardCheckRequest):
             body = None
         if isinstance(body, dict) and body.get("error"):
             detail = str(body["error"])
-        raise HTTPException(exc.response.status_code, detail=detail)
+        upstream = exc.response.status_code
+        # Ollama's status isn't ours: a 404 (model not pulled) or a 401 from a proxy would
+        # read as a rag-chat routing/auth failure. Upstream 5xx -> 503, anything else -> 502.
+        raise HTTPException(
+            503 if upstream >= 500 else 502,
+            detail=f"Ollama guard error ({upstream}): {detail[:500]}",
+        )
 
     elapsed_ms = int((time.monotonic() - t0) * 1000)
     categories = _categories(verdict)

@@ -66,21 +66,24 @@ class OpenAIProvider(ImageProvider, VideoProvider):
         model = model or "gpt-image-1"
         if n < 1:
             raise LookupError(f"OpenAI image generation needs n >= 1, got n={n}")
+        if n > 10:
+            # The API caps a request at 10 images; refuse rather than silently return fewer.
+            raise LookupError(f"OpenAI image generation makes at most 10 images per request, got n={n}")
         if model == "dall-e-3" and n > 1:
             # The API answers n>1 for dall-e-3 with a 400; say so before sending.
             raise LookupError(f"dall-e-3 generates one image per request, got n={n}")
         body: dict = {
             "model": model,
             "prompt": prompt,
-            "n": min(n, 10),
+            "n": n,
             "size": size,
         }
-        if style:
+        if style and model == "dall-e-3":
+            # Only dall-e-3 takes `style`; dall-e-2 and gpt-image-1 answer it with a 400.
             body["style"] = style
 
         if model == "gpt-image-1":
             body["output_format"] = "png"
-            body.pop("style", None)
             return await self._generate_image_gpt(body)
 
         body["response_format"] = "b64_json"

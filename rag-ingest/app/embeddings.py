@@ -156,7 +156,12 @@ class OllamaEmbeddingClient(EmbeddingClient):
             raise RuntimeError("Empty text cannot be embedded")
         original_len = len(body)
         # The prefix counts against the char budget, and shrinking never cuts into it.
-        budget = EMBED_MAX_CHARS - len(self.prefix) if EMBED_MAX_CHARS > 0 else 0
+        # A limit the prefix eats whole still bounds the body (at EMBED_MIN_CHARS), never lifts it.
+        budget = 0
+        if EMBED_MAX_CHARS > 0:
+            budget = EMBED_MAX_CHARS - len(self.prefix)
+            if budget <= 0:
+                budget = max(1, EMBED_MIN_CHARS)
         if budget > 0 and len(body) > budget:
             body = body[:budget].strip()
 

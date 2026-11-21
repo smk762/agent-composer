@@ -91,17 +91,31 @@ class FallbackWindowTests(unittest.TestCase):
         scanned = [0]
 
         class CountingStr(str):
+            """Tallies the chars each scan or slice touches, however the chunker counts lines."""
+
             def count(self, sub, start=0, end=None):  # noqa: A003
                 stop = len(self) if end is None else end
                 scanned[0] += max(0, stop - start)
                 return str.count(self, sub, start, end)
+
+            def find(self, sub, start=0, end=None):
+                pos = str.find(self, sub, start, end)
+                stop = (len(self) if end is None else end) if pos == -1 else pos + len(sub)
+                scanned[0] += max(0, stop - start)
+                return pos
+
+            def __getitem__(self, key):
+                piece = str.__getitem__(self, key)
+                scanned[0] += len(piece)  # a slice copies its chars: text[:i].count() rescans
+                return piece
 
         text = CountingStr("abcdefghi\n" * 20_000)  # 200k chars, ~1100 windows at MAX=200
         with mock.patch.object(code_chunker, "CODE_CHUNK_MAX_CHARS", 200), \
                 mock.patch.object(code_chunker, "CODE_CHUNK_MIN_CHARS", 20):
             chunks = _fallback_window(text, "text")
         self.assertEqual(chunks[-1].end_line, 20_000)
-        self.assertLessEqual(scanned[0], 2 * len(text))  # linear, not O(n^2 / step)
+        self.assertGreater(scanned[0], 0, "the tally saw no work: the hook was bypassed")
+        self.assertLessEqual(scanned[0], 4 * len(text))  # linear, not O(n^2 / step)
 
     def test_fully_covered_tail_is_not_repeated(self) -> None:
         text = "x" * 2000

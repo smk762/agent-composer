@@ -688,6 +688,15 @@ class SynthesiseRequest(BaseModel):
     speed: Optional[float] = None
 
 
+def _is_cuda_oom(exc: BaseException) -> bool:
+    """True only for a real CUDA out-of-memory. Other CUDA errors (device-side
+    asserts, device mismatches) are not retryable OOMs and mustn't become a 503."""
+    oom_type = getattr(getattr(sys.modules.get("torch"), "cuda", None), "OutOfMemoryError", None)
+    if isinstance(oom_type, type) and isinstance(exc, oom_type):
+        return True
+    return "out of memory" in str(exc).lower()
+
+
 # ── Synthesis helpers ──────────────────────────────────────────────────────────
 
 
@@ -732,12 +741,14 @@ async def synthesise(req: SynthesiseRequest):
         try:
             wav = await asyncio.to_thread(_run_inference, req.text, language, gpt, spk, speed)
         except RuntimeError as exc:
-            err_str = str(exc).lower()
-            if "out of memory" in err_str or "cuda" in err_str:
+            if _is_cuda_oom(exc):
                 gpu_info = _gpu_memory_info()
                 logger.error("xtts_gpu_oom", error=str(exc), gpu=gpu_info)
                 return JSONResponse(status_code=503, content={"error": "GPU OOM", "gpu": gpu_info})
-            raise
+            # Not an OOM (device-side assert, device mismatch): a 500 with its own
+            # event, so operators see a CUDA fault that may need a restart.
+            logger.error("xtts_generation_runtime_error", error=str(exc), exc_info=True)
+            return JSONResponse(status_code=500, content={"error": "TTS generation failed (details in the xtts log)"})
         except Exception as exc:
             logger.error("xtts_generation_failed", error=str(exc), exc_info=True)
             return JSONResponse(status_code=500, content={"error": "TTS generation failed (details in the xtts log)"})
@@ -1348,8 +1359,7 @@ async def analyze_clips(audio: list[UploadFile] = File(...)):
         async with _mgr.lease():
             result = await asyncio.to_thread(_analyze_clips, raw_paths, names)
     except RuntimeError as exc:
-        err_str = str(exc).lower()
-        if "out of memory" in err_str or "cuda" in err_str:
+        if _is_cuda_oom(exc):
             logger.error("xtts_analyze_gpu_oom", error=str(exc))
             return JSONResponse(status_code=503, content={"error": "GPU OOM"})
         raise
@@ -1454,8 +1464,7 @@ async def clone_voice(
                     _conditioning_latents, latent_paths
                 )
         except RuntimeError as exc:
-            err_str = str(exc).lower()
-            if "out of memory" in err_str or "cuda" in err_str:
+            if _is_cuda_oom(exc):
                 gpu_info = _gpu_memory_info()
                 logger.error("xtts_clone_gpu_oom", error=str(exc), gpu=gpu_info)
                 return JSONResponse(status_code=503, content={"error": "GPU OOM", "gpu": gpu_info})
@@ -1553,7 +1562,8 @@ def _created_at_key(meta: dict) -> float:
         return float(value) if math.isfinite(value) else 0.0
     if isinstance(value, str):
         try:
-            return float(value)
+            f = float(value)
+            return f if math.isfinite(f) else 0.0  # "nan"/"inf" parse but break sorting
         except ValueError:
             pass
         try:
@@ -1765,8 +1775,13 @@ def _import_clone(zip_bytes: bytes, companion_override: str, name_override: str,
         return value.strip() if isinstance(value, str) else ""
 
     def _number(value) -> float:
-        ok = isinstance(value, (int, float)) and not isinstance(value, bool)
-        return float(value) if ok and math.isfinite(value) and value >= 0 else 0.0
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            return 0.0
+        try:
+            f = float(value)  # a 400-digit JSON int raises OverflowError here
+        except OverflowError:
+            return 0.0
+        return f if math.isfinite(f) and f >= 0 else 0.0
 
     def _count(value) -> int:
         return int(_number(value))
@@ -1781,11 +1796,9 @@ def _import_clone(zip_bytes: bytes, companion_override: str, name_override: str,
     if not replace and _s3_object_exists(f"voice_clones/{companion_id}/prompt.pt"):
         raise CloneExistsError(f"Voice clone {companion_id!r} already exists; send replace=true to overwrite")
 
-    buf = io.BytesIO()
-    torch.save(prompt, buf)
     s3_key = f"voice_clones/{companion_id}/prompt.pt"
-    _upload_to_s3(buf.getvalue(), s3_key, "application/octet-stream")
-
+    # Build (and serialise) everything before the first upload, so a bad field
+    # can't leave a prompt.pt with no meta.json behind.
     meta = {
         "voice_clone_id": s3_key,
         "companion_id": companion_id,
@@ -1795,7 +1808,11 @@ def _import_clone(zip_bytes: bytes, companion_override: str, name_override: str,
         "imported": True,
         "created_at": time.time(),
     }
-    _upload_to_s3(json.dumps(meta).encode("utf-8"), f"voice_clones/{companion_id}/meta.json", "application/json")
+    meta_bytes = json.dumps(meta).encode("utf-8")
+    buf = io.BytesIO()
+    torch.save(prompt, buf)
+    _upload_to_s3(buf.getvalue(), s3_key, "application/octet-stream")
+    _upload_to_s3(meta_bytes, f"voice_clones/{companion_id}/meta.json", "application/json")
 
     with _clone_cache_lock:
         _clone_cache[s3_key] = prompt
