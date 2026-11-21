@@ -37,6 +37,8 @@ docker compose up -d --build rag-chat
 cd rag-ingest && python -m pytest tests/ -v
 cd rag-chat   && python -m pytest tests/ -v
 python -m unittest discover -s scripts/tests -v   # from the repo root; stdlib only (CI runs it too)
+# GPU sidecars, CPU only (CI sidecar-tests): install requirements.txt (if any) + requirements-test.txt
+cd voice-stack && pip install -r requirements-test.txt && python -m pytest tests   # also infinity-manager, modernbert
 
 # Single test
 python -m pytest tests/test_code_chunker.py::test_python_function -v

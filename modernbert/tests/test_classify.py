@@ -1,10 +1,24 @@
-"""Quick smoke tests — run against a live container: pytest tests/ --base-url http://localhost:7998"""
+"""Quick smoke tests against a live container: MODERNBERT_BASE_URL=http://localhost:7998 pytest tests/test_classify.py
+
+Skipped when nothing answers at MODERNBERT_BASE_URL, so the unit suite (and CI) can run without one.
+"""
 import os
 
 import pytest
 import requests
 
 BASE = os.environ.get("MODERNBERT_BASE_URL", "http://localhost:7998")
+
+
+def _reachable() -> bool:
+    try:
+        requests.get(f"{BASE}/health", timeout=2)
+    except requests.RequestException:
+        return False
+    return True
+
+
+pytestmark = pytest.mark.skipif(not _reachable(), reason=f"no modernbert container at {BASE}")
 
 
 def test_health():
