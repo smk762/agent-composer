@@ -24,7 +24,7 @@ jobs:
   tests:
     # Unit tests per service, with the service's own pinned requirements on the same Python as its
     # image (python:3.12-slim). No network services: Qdrant runs in-memory, Ollama/Postgres are faked.
-    # modernbert, voice-stack and infinity-manager run in the sidecar-tests job below.
+    # modernbert and infinity-manager run in the sidecar-tests job below.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -51,14 +51,14 @@ jobs:
 
   sidecar-tests:
     # GPU sidecars' unit tests, CPU only: each project's requirements-test.txt (on top of its
-    # requirements.txt, if any) is the same env ai-code-auditor's validate_patch builds. torch,
-    # TTS and faster-whisper are stubbed by the tests. modernbert's live smoke tests
+    # requirements.txt, if any) is the same env ai-code-auditor's validate_patch builds. The voice
+    # engines' tests live in argus-echo (#81). modernbert's live smoke tests
     # (tests/test_classify.py) skip because no container answers.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        project: [voice-stack, infinity-manager, modernbert]
+        project: [infinity-manager, modernbert]
     defaults:
       run:
         working-directory: ${{ matrix.project }}
@@ -71,9 +71,6 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: ${{ matrix.project }}/requirements*.txt
-      - name: ffmpeg (whisper decode tests)
-        if: matrix.project == 'voice-stack'
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
       - name: install
         run: |
           python -m pip install --upgrade pip

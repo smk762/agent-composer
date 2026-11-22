@@ -84,7 +84,7 @@ Priority comes from the call site (`chat`, `embed-query` and `pipeline` are `int
 
 | Variable | Default | Notes |
 |---|---|---|
-| `WHISPER_URL` | `http://whisper:8030` | STT sidecar |
+| `WHISPER_URL` | `http://whisper:8031` | STT engine (argus-echo) |
 | `XTTS_TTS_URL` | `http://xtts:8031` | Local XTTS engine |
 | `MISO_TTS_URL` | (empty = disabled) | Remote Miso engine, e.g. `http://<GPU_HOST>:8034` |
 | `TTS_URL` | (empty) | Legacy Qwen engine, registered as `tts` |
@@ -93,13 +93,25 @@ Priority comes from the call site (`chat`, `embed-query` and `pipeline` are `int
 | `XTTS_NODE_URLS` | (empty) | With `ARGUS_GPU_COORDINATOR=broker`, XTTS synth leases the `xtts` target from argus-iris (#79). A grant on another node calls the URL given here (`node=url,…`), otherwise iris's `base_url` for it. A grant on the home node calls `XTTS_TTS_URL`. A voice clone stays on the home node |
 | `XTTS_LEASE_CPU_FALLBACK` | `1` | Lease refused or timed out on the last engine in the chain: `1` sends `device: "cpu"` to the local XTTS, `0` answers 503 with the broker's reason |
 | `XTTS_LEASE_VRAM_MB` / `XTTS_LEASE_MODEL_MB` | `2000` / `1800` | Footprint and weights each XTTS lease declares (match `gpu-tenant.yaml`'s `tts-synth`) |
-| `XTTS_CPU_FALLBACK` (xtts sidecar) | `1` | A GPU promotion that runs out of CUDA memory puts the weights back on the CPU. `1` synthesises there, `0` answers 503 with the reason (`Retry-After` = `XTTS_OOM_RETRY_AFTER_S`, default 30) |
 | `VOICE_TIMEOUT` | `30` | Proxy timeout (seconds) |
 | `VOICE_MAX_CLIPS` / `VOICE_CLIP_MAX_BYTES` | `16` / `16777216` | Clips per `/api/voice/clone` or `/api/voice/analyze` request, and bytes per clip; more is a 413 |
 | `MISO_SENTENCE_PAUSE_MS` / `MAX_SENTENCE_PAUSE_MS` | `300` / `2000` | Silence inserted between Miso sentences |
-| `S3_ENDPOINT_URL`, `S3_PUBLIC_URL`, `S3_BUCKET_NAME`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | | Shared "voice" MinIO bucket for clones and re-hosted audio |
+| `S3_ENDPOINT_URL`, `S3_PUBLIC_URL`, `S3_BUCKET_NAME`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | | The "voice" MinIO bucket for rag-chat's re-hosted and stitched audio. A clip already served from `S3_PUBLIC_URL`'s origin (any bucket there) isn't re-hosted |
 
-The sidecar-side settings (`XTTS_PREPROCESS*`, `XTTS_GPT_COND_LEN`, `MISO_KEEP_ALIVE_*`, Wyoming bridge vars) are described in `voice-stack/VOICE_CLONING.md` and `.env.example`.
+## Voice engines (argus-echo)
+
+The engines run argus-echo's images (`voice.md`, #81). Engine settings are echo's: see its docs (`docs/xtts.md`, `docs/qwen.md`, `docs/whisper.md`). The compose-level ones:
+
+| Variable | Default | Notes |
+|---|---|---|
+| `ECHO_TAG` | `0.2.0` | argus-echo release for every engine and bridge image (Qwen is built from that tag's source) |
+| `XTTS_S3_BUCKET` / `XTTS_S3_PUBLIC_URL` | `voice-xtts` / required | XTTS clones and rendered audio; the bucket echo's XTTS on morpheus shares |
+| `QWEN_S3_BUCKET` / `QWEN_S3_PUBLIC_URL` | `voice-qwen` / required | Qwen's |
+| `XTTS_CPU_FALLBACK` / `XTTS_OOM_RETRY_AFTER_S` | `1` / `30` | A GPU promotion that runs out of CUDA memory runs on the CPU (`1`) or answers 503 with the reason |
+| `TTS_MODEL_SIZE` | `0.6b` | Qwen weights baked into the `tts` image (`1.7b` on dragon) |
+| `STT_MAX_UPLOAD_MB` | `100` | Largest audio Whisper accepts |
+| `STT_AUDIO_URL_ALLOWED_HOSTS` | (empty) | Internal hosts `/transcriptions` may fetch `audio_url` from |
+| `WYOMING_STT_MAX_SECONDS` | `120` | Longest utterance the Home Assistant STT bridge buffers |
 
 ## rag-chat: sidecars and repair
 

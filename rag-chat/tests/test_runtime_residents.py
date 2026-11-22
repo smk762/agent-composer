@@ -53,7 +53,7 @@ class ResidentGatewayTest(unittest.TestCase):
             patch.object(auth, "DEV_AUTH_BYPASS", True),
             patch.object(runtime.httpx, "AsyncClient", _Upstream),
             patch.object(runtime, "MODERNBERT_URL", "http://mb:7998"),
-            patch.object(runtime, "WHISPER_URL", "http://whisper:8030"),
+            patch.object(runtime, "WHISPER_URL", "http://whisper:8031"),
             patch.object(runtime, "INFINITY_URL", "http://inf:7997"),
             patch.object(runtime, "TTS_ENGINES", {"xtts": "http://xtts:8031"}),
             patch.object(runtime, "ARGUS_ADMIN_TOKEN", ""),
@@ -83,7 +83,7 @@ class ResidentGatewayTest(unittest.TestCase):
         self.assertEqual(headers, {"Authorization": "Bearer s3cret"})
 
     def test_health_is_relayed_without_token(self) -> None:
-        _Upstream.answers["http://whisper:8030/health"] = (200, {"gpu": {"loaded": False}})
+        _Upstream.answers["http://whisper:8031/health"] = (200, {"gpu": {"loaded": False}})
         with patch.object(runtime, "ARGUS_ADMIN_TOKEN", "s3cret"):
             r = self.client.get("/api/runtime/residents/whisper/health")
         self.assertEqual(r.json(), {"gpu": {"loaded": False}})

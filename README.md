@@ -10,7 +10,7 @@ Run a private AI stack that feels production-grade on day one: chat with your lo
 - Adds GPU sidecars that sleep when idle, plus the `rag-chat` features that use them:
   - **`modernbert`**: ModernBERT classifier. `/api/pipeline/*` and Pipeline Lab use it.
   - **`infinity`** (`infinity-manager/`): code embeddings and a reranker for the code-ingest profile.
-  - **Voice stack** (`voice-stack/`): Whisper STT, XTTS-v2 / Miso / legacy Qwen TTS with voice cloning, and Wyoming bridges for Home Assistant. Used by `/api/voice/*`.
+  - **Voice engines** ([argus-echo](https://github.com/smk762/argus-echo)'s images, see `voice.md`): Whisper STT, XTTS-v2 and Qwen TTS with voice cloning, and Wyoming bridges for Home Assistant. Used by `/api/voice/*`; Miso is a remote engine.
   - **Guard**: SingGuard content-safety checks (`/api/guard/*`), proxied to argus-retina's SingGuard server (`GUARD_URL`).
   - **Media generation**: image and video through pluggable providers (OpenAI, Stability, Replicate, Together, ComfyUI).
   - **Repair**: a multi-model repair loop that ai-code-auditor validates (`/api/repair/*`).
@@ -22,8 +22,8 @@ Run a private AI stack that feels production-grade on day one: chat with your lo
 | `ollama` | 11434 | LLM runtime (internal by default) |
 | `infinity` | 7997 | Infinity embeddings and reranker, behind an idle-evicting manager (loopback only) |
 | `modernbert` | 7998 | ModernBERT classifier sidecar |
-| `whisper` | 8030 | faster-whisper STT |
-| `xtts` / `tts` | 8031 | XTTS-v2 TTS / legacy Qwen3-TTS |
+| `whisper` | 8032 (loopback) | Whisper STT (argus-echo) |
+| `xtts` / `tts` | 8033 (loopback) / 8031 | XTTS-v2 / Qwen3-TTS (argus-echo) |
 | `wyoming-xtts` / `wyoming-miso` / `wyoming-whisper` | 10200 / 10201 / 10300 | Home Assistant Wyoming bridges |
 | `cloudflared` | n/a | Tunnel; `--profile cloud` only |
 
@@ -77,7 +77,6 @@ Qdrant, Postgres and MinIO run outside this compose file (`QDRANT_URL`, `DATABAS
 │  └─ guard_policy.py
 ├─ modernbert/app/               # classifier sidecar (lazy GPU load, keep-alive eviction)
 ├─ infinity-manager/manager.py   # idle-evicting proxy in front of Infinity
-├─ voice-stack/                  # whisper/xtts/qwen-tts servers, wyoming_bridge/, VOICE_CLONING.md
 └─ scripts/                      # smoke tests, tool-calling/streaming clients, recommend_model.py
 ```
 

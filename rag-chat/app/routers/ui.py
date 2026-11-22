@@ -3717,7 +3717,7 @@ def voice_clone_ui():
     body = """
     <div class="card" style="max-width:1040px;">
       <h1>Voice Cloning</h1>
-      <p class="sub">Clone a voice from reference clips. <b>XTTS-v2</b> averages several varied clips (different sentences, consistent mic) for a robust voice; <b>Miso One</b> is one-shot — one clean, expressive clip is best. See the <a href="https://github.com/smk762/agent-composer/blob/dev/voice-stack/VOICE_CLONING.md" target="_blank" rel="noopener">cloning guide</a> for optimal input.</p>
+      <p class="sub">Clone a voice from reference clips. <b>XTTS-v2</b> averages several varied clips (different sentences, consistent mic) for a robust voice; <b>Miso One</b> is one-shot — one clean, expressive clip is best. See the <a href="https://github.com/smk762/argus-echo/blob/main/docs/voice-cloning.md" target="_blank" rel="noopener">cloning guide</a> for optimal input.</p>
       <div class="vc-actions" style="margin:0 0 10px;">
         <label class="clip-meta" for="vcEngine">Engine</label>
         <select class="vc-field" id="vcEngine" style="width:auto;"><option value="">…</option></select>

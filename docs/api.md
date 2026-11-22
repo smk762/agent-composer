@@ -164,7 +164,7 @@ Errors: 400 for a bad request (retina's 400/422 detail relayed), 503 when `GUARD
 
 ### Voice (`routers/voice.py`)
 
-Proxies to the Whisper STT sidecar and a registry of TTS engines (`xtts`, `miso`, legacy `tts`). Synth requests take an `engine` field; the other routes take an `?engine=` query parameter. If you leave it out, the request uses `TTS_DEFAULT_ENGINE` and, on synth, falls back to `TTS_FALLBACK_ENGINE`. For clone input guidance, see `voice-stack/VOICE_CLONING.md`.
+Proxies to the Whisper STT sidecar and a registry of TTS engines (`xtts`, `miso`, legacy `tts`). Synth requests take an `engine` field; the other routes take an `?engine=` query parameter. If you leave it out, the request uses `TTS_DEFAULT_ENGINE` and, on synth, falls back to `TTS_FALLBACK_ENGINE`. For clone input guidance, see argus-echo's `docs/voice-cloning.md`.
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
@@ -314,6 +314,6 @@ These are internal to the compose network unless noted. rag-chat proxies the one
 |---|---|---|
 | `modernbert` | 7998 | `GET /health` (always 200; check `model_state`), `GET /model/status`, `POST /model/load\|evict\|unload`, `GET\|PUT /labels`, `POST /classify`, `POST /embed` |
 | `infinity` (infinity-manager) | 7997 (loopback) | Proxies the Infinity embeddings/rerank API to a child process that starts on demand and is evicted after `INFINITY_IDLE_TIMEOUT`; `GET /health`, `GET /admin/status`, `POST /admin/wake\|evict` |
-| `whisper` | 8030 | `POST /transcribe` |
-| `xtts` / `miso` / `tts` | 8031–8034 | Shared TTS sidecar contract: `/synthesise`, `/synthesise/stream`, `/clone-voice`, `/clones`, `/speakers`, `/analyze-clips`, `/health` |
+| `whisper` | 8031 | argus-echo's `stt` contract: `POST /transcribe`, `POST /transcriptions`, `WS /transcribe/stream` |
+| `xtts` / `miso` / `tts` | 8031 (Miso remote, 8034) | argus-echo's `tts` contract: `/synthesise`, `/synthesise/stream`, `/clone-voice`, `/clones`, `/speakers`, `/analyze-clips`, `/health` |
 | `wyoming-xtts` / `wyoming-miso` / `wyoming-whisper` | 10200 / 10201 / 10300 | Wyoming protocol bridges for Home Assistant |

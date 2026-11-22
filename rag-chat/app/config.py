@@ -150,7 +150,7 @@ RUNTIME_EXTRA_RESIDENTS = _parse_residents(os.getenv("RUNTIME_EXTRA_RESIDENTS", 
 # selectable per request and one is the default — so the local XTTS GPU sidecar
 # and a remote Miso host (e.g. morpheus) can coexist and be picked from the UI,
 # the API, or the Wyoming/Home Assistant bridges.
-WHISPER_URL = os.getenv("WHISPER_URL", "http://whisper:8030").rstrip("/")
+WHISPER_URL = os.getenv("WHISPER_URL", "http://whisper:8031").rstrip("/")
 VOICE_TIMEOUT = _env_int("VOICE_TIMEOUT", 30)
 # Reference clips /api/voice/clone and /api/voice/analyze accept per request, and the size of each
 # (bytes): they are buffered in memory before forwarding, so more is a 413.

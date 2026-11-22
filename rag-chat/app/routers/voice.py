@@ -31,7 +31,7 @@ import time
 import uuid
 import wave
 from typing import Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 from botocore.exceptions import BotoCoreError, ClientError
@@ -236,11 +236,19 @@ def _voice_s3():
     return _voice_s3_client
 
 
+def _same_origin(url: str, base: str) -> bool:
+    """Same scheme, host and port. A plain prefix test let ``…/voice`` match ``…/voice-xtts``
+    by accident, and would re-host every clip from another bucket on the same store."""
+    a, b = urlsplit(url), urlsplit(base)
+    return bool(a.netloc) and (a.scheme, a.netloc.lower()) == (b.scheme, b.netloc.lower())
+
+
 async def _rehost_audio_url(audio_url: Optional[str]) -> Optional[str]:
     """Return a browser-reachable URL for a rendered clip.
 
     If re-hosting is disabled, the URL is empty, or it's already served from the
-    shared voice bucket (S3_PUBLIC_URL), the URL is returned untouched. Otherwise
+    object store browsers reach (S3_PUBLIC_URL's origin: any bucket there, such as
+    echo's per-engine voice-xtts), the URL is returned untouched. Otherwise
     the clip is downloaded and re-uploaded to the voice bucket under the same
     ``generated/voice/`` prefix the XTTS sidecar uses, and the S3_PUBLIC_URL is
     returned. Best-effort: any failure falls back to the original URL so
@@ -248,7 +256,7 @@ async def _rehost_audio_url(audio_url: Optional[str]) -> Optional[str]:
     """
     if not VOICE_S3_REHOST or not audio_url:
         return audio_url
-    if audio_url.startswith(VOICE_S3_PUBLIC_URL):
+    if _same_origin(audio_url, VOICE_S3_PUBLIC_URL):
         return audio_url
     try:
         async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
