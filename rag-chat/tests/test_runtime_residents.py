@@ -174,7 +174,7 @@ if __name__ == "__main__":
 
 
 class ExtraResidentsTest(unittest.TestCase):
-    """RUNTIME_EXTRA_RESIDENTS adds gateway-only residents (the Qwen tts sidecar), not TTS engines."""
+    """RUNTIME_EXTRA_RESIDENTS adds gateway-only residents (any name=url), not TTS engines."""
 
     def test_parse(self) -> None:
         from app.config import _parse_residents

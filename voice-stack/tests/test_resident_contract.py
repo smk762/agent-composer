@@ -1,27 +1,18 @@
 """argus-iris resident contract on the voice sidecars: /health ``gpu`` block,
 POST /admin/{unload,evict,wake}, and ARGUS_ADMIN_TOKEN gating.
 
-whisper runs as-is (no model is loaded); tts runs with torch stubbed, as in
-test_tts_server.py. xtts shares tts's helper and is covered there by torch-gated
-tests only.
+whisper runs as-is (no model is loaded). xtts's admin gating and lifecycle are
+covered in test_xtts_clones.py and test_xtts_server.py.
 """
 
 import os
 import sys
-import types
 
 import pytest
 from fastapi.testclient import TestClient
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-if "torch" not in sys.modules:
-    _torch = types.ModuleType("torch")
-    _torch.device = lambda d: d
-    _torch.cuda = types.SimpleNamespace(is_available=lambda: False, empty_cache=lambda: None)
-    sys.modules["torch"] = _torch
-
-import tts_server  # noqa: E402
 import whisper_server as ws  # noqa: E402
 
 GPU_KEYS = {"loaded", "model_state", "idle_s", "free_vram_mb"}
@@ -108,57 +99,6 @@ def test_whisper_health_stays_open_with_token(whisper, monkeypatch):
     assert whisper.get("/health").status_code == 200
 
 
-@pytest.fixture
-def tts(monkeypatch):
-    monkeypatch.delenv("ARGUS_ADMIN_TOKEN", raising=False)
-    monkeypatch.setenv("ARGUS_ADMIN_INSECURE", "1")
-    mgr = tts_server.TTSModelManager()
-    monkeypatch.setattr(tts_server, "_mgr", mgr)
-    return TestClient(tts_server.app), mgr
-
-
-def test_tts_health_and_unload(tts, monkeypatch):
-    client, mgr = tts
-    gpu = client.get("/health").json()["gpu"]
-    assert GPU_KEYS <= set(gpu) and gpu["loaded"] is False
-
-    mgr._state = tts_server.TTSState.CPU
-    mgr._last_used = 1.0
-    body = client.post("/admin/unload").json()
-    assert body["unloaded"] is True
-    assert body["model_state"] == "unloaded" == body["gpu"]["model_state"]
-    assert body["gpu"]["idle_s"] > 0
-
-
-def test_tts_admin_token(tts, monkeypatch):
-    client, _ = tts
-    monkeypatch.setenv("ARGUS_ADMIN_TOKEN", "s3cret")
-    assert client.post("/admin/unload").status_code == 401
-    assert client.post("/admin/unload", headers={"Authorization": "Bearer s3cret"}).status_code == 200
-
-
-@pytest.mark.parametrize("route", ["/admin/unload", "/admin/evict", "/admin/wake"])
-@pytest.mark.parametrize("token", [None, "", "  "])
-def test_tts_admin_fails_closed_without_token(tts, monkeypatch, route, token):
-    client, mgr = tts
-    monkeypatch.delenv("ARGUS_ADMIN_INSECURE", raising=False)
-    if token is None:
-        monkeypatch.delenv("ARGUS_ADMIN_TOKEN", raising=False)
-    else:
-        monkeypatch.setenv("ARGUS_ADMIN_TOKEN", token)
-    mgr._state = tts_server.TTSState.CPU
-    for headers in ({}, {"Authorization": "Bearer "}, {"Authorization": "Bearer anything"}):
-        r = client.post(route, headers=headers)
-        assert r.status_code == 503, (route, headers, r.status_code)
-    assert mgr.state == tts_server.TTSState.CPU  # nothing ran
-
-
-def test_tts_admin_insecure_opt_in_does_not_override_a_token(tts, monkeypatch):
-    client, _ = tts
-    monkeypatch.setenv("ARGUS_ADMIN_TOKEN", "s3cret")  # ARGUS_ADMIN_INSECURE=1 from the fixture
-    assert client.post("/admin/unload").status_code == 401
-
-
 def test_whisper_refuses_unload_mid_transcription(whisper, monkeypatch):
     model = object()
     monkeypatch.setattr(ws, "_model", model)
@@ -171,10 +111,9 @@ def test_whisper_refuses_unload_mid_transcription(whisper, monkeypatch):
     assert health["busy"] is True and health["idle_s"] is None
 
 
-def test_top_level_state_matches_voluptas_shape(whisper, tts):
+def test_top_level_state_matches_voluptas_shape(whisper):
     """voluptas's argus-http residents put model_state, busy and idle_s at the
     top of /health; ours carry them there too, beside the lens-shaped gpu block."""
-    for client in (whisper, tts[0]):
-        body = client.get("/health").json()
-        assert {"model_state", "busy", "idle_s", "gpu"} <= set(body)
-        assert body["busy"] is False
+    body = whisper.get("/health").json()
+    assert {"model_state", "busy", "idle_s", "gpu"} <= set(body)
+    assert body["busy"] is False

@@ -2,9 +2,14 @@
 
 > Hosts in this doc are placeholders (`<AGENT_HOST>`, `<STATEFUL_HOST>`, `<NAS_HOST>`, …). The real host/IP is in the local `.env` (see `.env.example`); check it there.
 
-faster-whisper STT (port 8030, GPU) and Qwen3-TTS (port 8031, GPU), integrated
-into the main `docker-compose.yml`. Both services share the GPU — inference is
-bursty, not concurrent-heavy.
+faster-whisper STT (port 8030, GPU) and XTTS-v2 TTS (port 8031 in the container,
+host 8033, GPU), integrated into the main `docker-compose.yml`. Both services share
+the GPU — inference is bursty, not concurrent-heavy.
+
+Qwen TTS is no longer part of this repo: the Qwen3-TTS `tts` sidecar was retired in
+favour of argus-echo's Qwen engine (`ghcr.io/smk762/argus-echo-qwen`, repo
+smk762/argus-echo), which serves the same routes. Its clones live in echo's own
+`voice-qwen` bucket. Apps that need Qwen call echo directly.
 
 ## Prerequisites
 
@@ -17,7 +22,7 @@ bursty, not concurrent-heavy.
 cd ~/agent-composer
 
 # Build voice services (first time downloads models — ~15 min total)
-docker compose build whisper tts
+docker compose build whisper xtts
 
 # Start everything (or just the voice services)
 docker compose up -d
@@ -28,16 +33,16 @@ docker compose up -d
 ```bash
 # Health checks
 curl -s http://localhost:8030/health | python3 -m json.tool
-curl -s http://localhost:8031/health | python3 -m json.tool
+curl -s http://localhost:8033/health | python3 -m json.tool
 
 # Test Whisper (needs an audio file)
 curl -X POST http://localhost:8030/transcribe \
   -F "audio=@test.webm" | python3 -m json.tool
 
 # Test TTS
-curl -X POST http://localhost:8031/synthesise \
+curl -X POST http://localhost:8033/synthesise \
   -H "Content-Type: application/json" \
-  -d '{"text": "Hello, this is a test.", "speaker": "Chelsie"}' \
+  -d '{"text": "Hello, this is a test."}' \
   | python3 -m json.tool
 
 # Voice UI
@@ -49,9 +54,11 @@ open http://localhost:9150/ui/voice
 ```
 voice-stack/
 ├── Dockerfile.whisper     # faster-whisper + large-v3-turbo (self-contained)
-├── Dockerfile.tts         # Qwen3-TTS 0.6b (self-contained, no compance-base)
+├── Dockerfile.xtts        # Coqui XTTS-v2 (self-contained)
+├── Dockerfile.wyoming     # Wyoming bridges for Home Assistant
 ├── whisper_server.py      # FastAPI STT server (faster-whisper backend)
-└── tts_server.py          # Enhanced TTS server (evolved from playact-engine)
+├── xtts_server.py         # FastAPI TTS server (XTTS-v2, cloning + streaming)
+└── wyoming_bridge/        # Wyoming STT/TTS protocol adapters
 ```
 
 Both services are defined in the main `docker-compose.yml` alongside the rest of
@@ -85,9 +92,8 @@ mithrandir (direct), kimini-api (direct via `/transcriptions`).
 
 | Env var | Default | Description |
 |---------|---------|-------------|
-| `TTS_MODEL_SIZE` | `0.6b` | `0.6b` or `1.7b` |
-| `TTS_DEVICE` | `cuda:0` | `cuda:0` or `cpu` |
-| `TTS_LOAD_MODELS` | `both` | `both`, `custom_voice`, or `base` |
+| `XTTS_MODEL` | `tts_models/multilingual/multi-dataset/xtts_v2` | Coqui model id |
+| `XTTS_DEVICE` | `cuda:0` | `cuda:0` or `cpu` |
 | `S3_ENDPOINT_URL` | `http://<STATEFUL_HOST>:9000` | MinIO/S3 for audio storage |
 
 ### rag-chat voice proxy
@@ -95,7 +101,8 @@ mithrandir (direct), kimini-api (direct via `/transcriptions`).
 | Env var | Default | Description |
 |---------|---------|-------------|
 | `WHISPER_URL` | `http://whisper:8030` | Internal Docker URL (set empty to disable) |
-| `TTS_URL` | `http://tts:8031` | Internal Docker URL (set empty to disable) |
+| `XTTS_TTS_URL` | `http://xtts:8031` | Local XTTS engine (set empty to disable) |
+| `TTS_URL` | (empty) | Legacy knob: a URL that isn't a named engine is registered as engine `tts` |
 | `VOICE_TIMEOUT` | `30` | Proxy timeout in seconds |
 
 ## GPU error handling
@@ -111,18 +118,18 @@ services (whisper, TTS, imogen, ollama, infinity, modernbert).
 | Service | CPU | RAM | VRAM |
 |---------|-----|-----|------|
 | faster-whisper large-v3-turbo (fp16, GPU) | Low | ~1.5 GB | ~2.5 GB |
-| TTS 0.6b both models (bfloat16, CUDA) | Low | ~2 GB | ~2.5 GB |
-| **Total peak** | Bursty | ~4 GB | ~5.5 GB |
+| XTTS-v2 (CUDA) | Low | ~2 GB | ~2 GB |
+| **Total peak** | Bursty | ~3.5 GB | ~4.5 GB |
 | **Available (RTX 4060)** | — | — | 8 GB |
 
-~2.5 GB VRAM headroom. INT8 quantization for Whisper would free another ~1 GB if
+~3.5 GB VRAM headroom. INT8 quantization for Whisper would free another ~1 GB if
 needed later.
 
 ## Standalone deployment (alternative)
 
 For deploying voice services on a separate host without the full stack, a
 standalone `voice-stack/compose.yml` is also provided. Set `WHISPER_URL` and
-`TTS_URL` in the main `.env` to point at the remote host's LAN IP.
+`XTTS_TTS_URL` in the main `.env` to point at the remote host.
 
 ## API Endpoints
 
@@ -144,14 +151,18 @@ resolves to must be public (no loopback, private, link-local/metadata, CGNAT or 
 ranges, IPv4-mapped IPv6 included); the fetch is pinned to the vetted address, redirects
 are not followed, and failures return one generic 400/502.
 
-### Qwen3-TTS
+### XTTS-v2 TTS
 
 | Endpoint | Format | Consumer | Description |
 |----------|--------|----------|-------------|
 | `POST /synthesise` | JSON | all | Returns `{audio_url, duration, duration_seconds, format}` |
-| `GET /speakers` | — | all | Structured list: `[{id, name, language, languages}]` |
-| `POST /clone-voice` | multipart | playact-engine | Voice cloning from reference audio |
+| `POST /synthesise/stream` | JSON | rag-chat, Wyoming | Chunked 24 kHz `pcm_f32le` |
+| `GET /speakers` | — | all | Built-in XTTS studio speakers |
+| `POST /clone-voice` | multipart | rag-chat | Voice cloning from reference audio |
 | `GET /health` | — | all | Returns `{status, engine, model, device}` |
+
+For Qwen3-TTS, call argus-echo's Qwen engine (`argus-echo-qwen`), which serves the
+same routes.
 
 ## Consumers
 
@@ -161,7 +172,7 @@ Add to playact `.env`:
 
 ```
 WHISPER_SERVER_URL=http://<host>:8032
-TTS_SERVER_URL=http://<host>:8031
+TTS_SERVER_URL=http://<echo-host>:8142   # argus-echo-qwen (Qwen TTS); was this repo's tts sidecar
 ```
 
 ### kimini-api
@@ -180,7 +191,9 @@ single HTTP call to the whisper container.
 
 ### mithrandir
 
-Mithrandir calls `POST /synthesise` with a `speaker` from its persona YAML
+Mithrandir no longer calls this stack: its `TTS_URL` points at Miso TTS
+(voluptas, moving to argus-echo's `argus-echo-miso`). The contract is the same:
+it calls `POST /synthesise` with a `speaker` from its persona YAML
 (`voice.voice_id`), downloads the audio from `audio_url`, transcodes to FLAC,
 and pipes to Snapcast. It also probes `GET /speakers` to validate configured
 voice IDs and `GET /health` for readiness.

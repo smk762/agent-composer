@@ -78,6 +78,9 @@ Quality of the reference dominates quality of the clone. Aim for:
 - Clones are engine-specific: a voice cloned on `xtts` lives on the XTTS sidecar,
   one cloned on `miso` lives on the Miso host. Switch the engine dropdown to see
   the clones stored on that engine.
+- Qwen TTS is no longer one of this stack's engines: it moved to argus-echo
+  (`argus-echo-qwen`), and its clones live in echo's own `voice-qwen` bucket.
+  Apps that need Qwen call echo directly.
 
 ## Home Assistant
 

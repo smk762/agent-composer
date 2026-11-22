@@ -87,7 +87,7 @@ Priority comes from the call site (`chat`, `embed-query` and `pipeline` are `int
 | `WHISPER_URL` | `http://whisper:8030` | STT sidecar |
 | `XTTS_TTS_URL` | `http://xtts:8031` | Local XTTS engine |
 | `MISO_TTS_URL` | (empty = disabled) | Remote Miso engine, e.g. `http://<GPU_HOST>:8034` |
-| `TTS_URL` | (empty) | Legacy Qwen engine, registered as `tts` |
+| `TTS_URL` | (empty) | Legacy knob: a URL that isn't a named engine is registered as engine `tts` |
 | `TTS_DEFAULT_ENGINE` | auto: `miso` if set, else `xtts` | |
 | `TTS_FALLBACK_ENGINE` | auto: `xtts` when the default is something else | Used only for requests that don't name an engine |
 | `XTTS_NODE_URLS` | (empty) | With `ARGUS_GPU_COORDINATOR=broker`, XTTS synth leases the `xtts` target from argus-iris (#79). A grant on another node calls the URL given here (`node=url,…`), otherwise iris's `base_url` for it. A grant on the home node calls `XTTS_TTS_URL`. A voice clone stays on the home node |
@@ -145,7 +145,7 @@ The sidecar-side settings (`XTTS_PREPROCESS*`, `XTTS_GPT_COND_LEN`, `MISO_KEEP_A
 | `MODERNBERT_MODEL` | `answerdotai/ModernBERT-base` | |
 | `MODERNBERT_TASK` | `zero_shot` | Or a fine-tuned classification head |
 | `MODERNBERT_DEVICE` | `auto` | |
-| `MODERNBERT_KEEP_ALIVE_GPU` / `MODERNBERT_KEEP_ALIVE_CPU` | `300` / `0` | Idle seconds before moving down a stage (`gpu → cpu → unloaded`). `-1` stays in that stage. The CPU stage follows any demotion, an `/admin/evict` included, so `_GPU=-1` (residency handed to argus-iris) still frees RAM after `_CPU`. The same holds for `XTTS_` and `TTS_KEEP_ALIVE_*` |
+| `MODERNBERT_KEEP_ALIVE_GPU` / `MODERNBERT_KEEP_ALIVE_CPU` | `300` / `0` | Idle seconds before moving down a stage (`gpu → cpu → unloaded`). `-1` stays in that stage. The CPU stage follows any demotion, an `/admin/evict` included, so `_GPU=-1` (residency handed to argus-iris) still frees RAM after `_CPU`. The same holds for `XTTS_KEEP_ALIVE_*` |
 | `MODERNBERT_PRELOAD` | `0` | Load the model at startup |
 | `MODERNBERT_MAX_LENGTH`, `MODERNBERT_TOP_K`, `MODERNBERT_THRESHOLD` | `512`, `10`, `0.05` | Classifier defaults |
 
