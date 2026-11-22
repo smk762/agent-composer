@@ -130,6 +130,9 @@ async def sync(src: str, dst: str, *, scheme: str, dry_run: bool = False, batch:
             if i % 100 == 0:
                 log(json.dumps({"progress": i, "of": len(to_embed)}))
         await flush()
+        # A failed re-embed of a point dst already holds leaves dst with the old text and
+        # vector: delete that copy too (as for unembeddable points); the next sync re-adds it.
+        to_delete += [pid for pid in failed if pid in dst_points]
 
         for pid in to_relabel:
             await q.overwrite_payload(collection_name=dst, payload={**src_points[pid], "embedder": label},
