@@ -192,11 +192,18 @@ class PinnedTransport(httpx.AsyncBaseTransport):
                 f"{host} resolves to a link-local or unusable address ({', '.join(addresses) or 'none'})",
                 request=request,
             )
-        # The Host header was set from the name when the request was built; SNI and the
-        # certificate check use the name too, so only the socket address changes.
-        request.url = request.url.copy_with(host=str(vetted[0]))
-        request.extensions = {**request.extensions, "sni_hostname": host}
-        return await self._inner.handle_async_request(request)
+        # Send a copy addressed to the vetted IP. The Host header was set from the name when
+        # the request was built; SNI and the certificate check use the name too, so only the
+        # socket address changes. The caller's request keeps its URL: httpx resolves
+        # redirects, same-origin checks and cookies against it, and those need the name.
+        pinned = httpx.Request(
+            request.method,
+            request.url.copy_with(host=str(vetted[0])),
+            headers=request.headers,
+            stream=request.stream,
+            extensions={**request.extensions, "sni_hostname": host},
+        )
+        return await self._inner.handle_async_request(pinned)
 
     async def aclose(self) -> None:
         await self._inner.aclose()
