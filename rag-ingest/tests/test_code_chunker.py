@@ -31,7 +31,7 @@ def _have_treesitter() -> bool:
     try:
         from tree_sitter_language_pack import get_parser  # noqa: F401
         return True
-    except Exception:
+    except ImportError:
         return False
 
 

@@ -65,7 +65,8 @@ class ComfyUIProvider(ImageProvider, VideoProvider):
             async with httpx.AsyncClient(timeout=10) as c:
                 r = await c.get(f"{self.base_url}/system_stats")
             return r.status_code == 200
-        except Exception:
+        except httpx.HTTPError as exc:  # unreachable or timed out, not a rejected key: say which in the log
+            log.warning("ComfyUI config check failed: %s: %s", type(exc).__name__, exc)
             return False
 
     def available_models(self, capability: Capability) -> List[str]:

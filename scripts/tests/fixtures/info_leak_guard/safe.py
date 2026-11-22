@@ -1,10 +1,12 @@
 """Info-leak guard fixture: responses the rule must accept (scripts/tests/test_info_leak_guard.py). Never imported."""
 
 import logging
+import sys
+import traceback
 
 import httpx
 from fastapi import HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 
 log = logging.getLogger(__name__)
 
@@ -46,6 +48,26 @@ async def relay(client, url):
     except httpx.HTTPStatusError as exc:
         # info-leak: a 4xx body is the service's own message about this request, for the client
         raise HTTPException(exc.response.status_code, detail=exc.response.text)
+
+
+def convert(raw: str) -> int:
+    try:
+        return int(raw)
+    except Exception:
+        log.error("conversion failed:\n%s", traceback.format_exc())  # the trace goes to the log
+        raise HTTPException(status_code=500, detail="conversion failed (details in the log)") from None
+
+
+def bad_input(raw: str):
+    try:
+        return int(raw)
+    except ValueError:
+        # a 4xx: our own validation message, reached through sys.exc_info()
+        return JSONResponse({"error": f"not a number: {sys.exc_info()[1]}"}, status_code=422)
+
+
+def ok() -> Response:
+    return Response(content=b"ok", media_type="text/plain")
 
 
 def parse(payload):

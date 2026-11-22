@@ -10,6 +10,10 @@ thing ruff doesn't check: a ``noqa`` for it must give a reason.
 * An ``except`` (bare, ``Exception`` or ``BaseException``) whose whole body is ``pass`` or
   ``continue`` swallows the error. Log it, narrow it, or mark the ``except`` line
   ``# noqa: S110 <why nothing is lost>`` (``S112`` for ``continue``).
+* So does one whose whole body is a single ``return`` of an empty value: a bare ``return``, or
+  ``{}``, ``[]``, ``()``, ``""``, ``set()``, ``dict()``, ``list()``, ``0``, ``False`` or ``None``.
+  A corrupt state file read as ``{}`` looks like an empty state, not a failure. Ruff has no rule
+  for it, so it is reported as ``S110`` and takes the same reasoned ``# noqa: S110 <reason>``.
 
 It fires on ``fixtures/silent_failure_guard/unguarded.py``, stays quiet on ``guarded.py``, and
 finds nothing in the repo's own code.
@@ -44,6 +48,24 @@ def _broad(handler: ast.ExceptHandler) -> bool:
     return any(isinstance(e, ast.Name) and e.id in _BROAD for e in elts)
 
 
+def _empty_return(stmt: ast.stmt) -> bool:
+    """``return`` alone, or ``return`` of an empty literal / empty builtin constructor / 0 / False / None."""
+    if not isinstance(stmt, ast.Return):
+        return False
+    v = stmt.value
+    if v is None:
+        return True
+    if isinstance(v, ast.Constant):
+        x = v.value
+        return x is None or (isinstance(x, str) and x == "") or (type(x) in (int, bool) and x == 0)
+    if isinstance(v, ast.Dict):
+        return not v.keys
+    if isinstance(v, (ast.List, ast.Tuple)):
+        return not v.elts
+    return (isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id in ("set", "dict", "list")
+            and not v.args and not v.keywords)
+
+
 def findings(path: Path) -> list[str]:
     """``file:line code`` for each silent-failure pattern in *path* without a reasoned noqa."""
     source = path.read_text(encoding="utf-8")
@@ -64,6 +86,8 @@ def findings(path: Path) -> list[str]:
                 hit(node.lineno, "S110")
             elif broad and isinstance(node.body[0], ast.Continue):
                 hit(node.lineno, "S112")
+            elif broad and _empty_return(node.body[0]):
+                hit(node.lineno, "S110")
     return out
 
 
@@ -75,8 +99,17 @@ def repo_files() -> list[Path]:
 class SilentFailureGuardTests(unittest.TestCase):
     def test_fires_on_the_positive_fixture(self) -> None:
         codes = sorted(h.rsplit(" ", 1)[1] for h in findings(FIXTURES / "unguarded.py"))
-        # zip, except-continue, bare except-pass, and a noqa that gives no reason
-        self.assertEqual(codes, ["B905", "S110", "S110", "S112"], findings(FIXTURES / "unguarded.py"))
+        # zip, except-continue, bare except-pass, a noqa that gives no reason, return {} and a bare return
+        self.assertEqual(codes, ["B905", "S110", "S110", "S110", "S110", "S112"], findings(FIXTURES / "unguarded.py"))
+
+    def test_empty_returns(self) -> None:
+        empty = ("return", "return {}", "return []", "return ()", 'return ""', "return set()", "return dict()",
+                 "return list()", "return 0", "return False", "return None")
+        for stmt in empty:
+            self.assertTrue(_empty_return(ast.parse(stmt).body[0]), stmt)
+        for stmt in ("return {'ok': False}", "return [0]", "return 1", "return True", "return 'x'", "return 0.0",
+                     "return b''", "return list(xs)", "return dict(a=1)", "return fallback", "x = {}"):
+            self.assertFalse(_empty_return(ast.parse(stmt).body[0]), stmt)
 
     def test_silent_on_the_negative_fixture(self) -> None:
         self.assertEqual(findings(FIXTURES / "guarded.py"), [])
