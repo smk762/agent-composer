@@ -63,7 +63,7 @@ services:
   # /embeddings (and /rerank when a reranker is listed). Used by rag-ingest in code
   # mode and by rag-chat's repair code search.
   # VRAM, measured on dragon (fp16, 4000-char chunks = rag-ingest's cap):
-  #   CodeRankEmbed, batch 8: 0.8 GB loaded, 1.3 GB peak  <- default; fits beside SingGuard
+  #   CodeRankEmbed, batch 8: 0.8 GB loaded, 1.3 GB peak  <- default
   #   CodeRankEmbed, batch 32: 1.5 GB loaded, 3.5 GB peak
   #   + bge-reranker-v2-m3: +1.26 GB (4.7 GB peak at batch 32); nothing calls /rerank today
   # Peak memory stays reserved until the manager stops the child (INFINITY_IDLE_TIMEOUT).
@@ -219,9 +219,10 @@ services:
       - QDRANT_COLLECTION_CODE=${QDRANT_COLLECTION_CODE:-code_audit}
       - EMBED_MODEL_CODE=${EMBED_MODEL_CODE:-nomic-ai/CodeRankEmbed}
       - CHAT_MODEL=${CHAT_MODEL:-llama3.2:3b}
-      - GUARD_MODEL=${GUARD_MODEL:-hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M}
+      # /api/guard/check proxies to argus-retina's SingGuard server (empty: the route answers 503).
+      - GUARD_URL=${GUARD_URL:-}
+      - GUARD_TIMEOUT=${GUARD_TIMEOUT:-120}
       - GUARD_THINKING=${GUARD_THINKING:-fast-slow}
-      - GUARD_WORKER_CONCURRENCY=${GUARD_WORKER_CONCURRENCY:-1}
       - CHAT_SYSTEM_PROMPT=${CHAT_SYSTEM_PROMPT:-You are a helpful assistant.}
       - QDRANT_URL=${QDRANT_URL:?set QDRANT_URL in .env (see .env.example)}
       - QDRANT_COLLECTION=${QDRANT_COLLECTION:-audit_docs}

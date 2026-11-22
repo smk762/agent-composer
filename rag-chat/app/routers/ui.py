@@ -2781,11 +2781,6 @@ def guard_ui():
             </select>
           </div>
 
-          <div class="row">
-            <label>Model override <span style="color:var(--muted); font-weight:400;">(blank = default 4B)</span></label>
-            <input id="guardModel" placeholder="hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M" />
-          </div>
-
           <button id="checkBtn" style="width:100%; margin-top:8px;">Check safety</button>
           <div id="guardStatus" class="muted" style="margin-top:6px;"></div>
         </div>
@@ -2806,7 +2801,7 @@ def guard_ui():
               <div class="why-box" id="whyDisplay"></div>
             </div>
             <div class="result-meta" id="metaDisplay"></div>
-            <div class="row">
+            <div class="row" id="rawRow" style="display:none;">
               <label>Raw model output</label>
               <div class="raw-box" id="rawDisplay"></div>
             </div>
@@ -2829,7 +2824,6 @@ def guard_ui():
       const inputEl = document.getElementById("guardInput");
       const imageEl = document.getElementById("guardImage");
       const previewEl = document.getElementById("guardPreview");
-      const modelEl = document.getElementById("guardModel");
       const policyEl = document.getElementById("guardPolicy");
       const thinkingEl = document.getElementById("guardThinking");
       const roleEl = document.getElementById("guardRole");
@@ -2844,6 +2838,7 @@ def guard_ui():
       const whyEl = document.getElementById("whyDisplay");
       const metaEl = document.getElementById("metaDisplay");
       const rawEl = document.getElementById("rawDisplay");
+      const rawRow = document.getElementById("rawRow");
       const historyEl = document.getElementById("historyList");
       const addTurnBtn = document.getElementById("addTurnBtn");
 
@@ -2919,8 +2914,6 @@ def guard_ui():
           if (conv) body.conversation = conv;
           const policy = policyEl.value.trim();
           if (policy) body.policy = policy;
-          const model = modelEl.value.trim();
-          if (model) body.model = model;
 
           const r = await fetch("/api/guard/check", {
             method: "POST",
@@ -2966,7 +2959,10 @@ def guard_ui():
 
         const thinking = data.thinking ? `  ·  ${data.thinking}` : "";
         metaEl.textContent = `Model: ${data.model}  ·  ${data.elapsed_ms}ms${thinking}`;
+        // The guard runs on argus-retina, which returns no generation text; entries saved
+        // before the move still carry theirs.
         rawEl.textContent = data.raw || "";
+        rawRow.style.display = data.raw ? "block" : "none";
       }
 
       // ── History ──
@@ -2980,7 +2976,6 @@ def guard_ui():
           conversation: req.conversation || null,
           policy: req.policy || "",
           req_thinking: req.thinking,
-          req_model: req.model || "",
           had_image: hadImage,
           safe: data.safe,
           verdict: data.verdict,
@@ -3025,7 +3020,6 @@ def guard_ui():
                 roleEl.value = h.input_role || "user";
                 policyEl.value = h.policy || "";
                 if (h.req_thinking) thinkingEl.value = h.req_thinking;
-                modelEl.value = h.req_model || "";
                 turnsEl.innerHTML = "";
                 (h.conversation || []).forEach(t => addTurn(t.role, t.content));
               }

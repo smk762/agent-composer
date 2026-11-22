@@ -150,7 +150,7 @@ Image and video generation go through pluggable providers (`app/providers/`: `op
 
 ### Guard (`routers/guard.py`)
 
-SingGuard content-safety checks on the shared Ollama.
+SingGuard content-safety checks, proxied to argus-retina's SingGuard server (`GUARD_URL`; see [configuration.md](configuration.md#rag-chat-guard)). The request and response shapes are unchanged from when composer ran SingGuard on Ollama.
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
@@ -158,7 +158,9 @@ SingGuard content-safety checks on the shared Ollama.
 | GET | `/api/guard/categories` | open | Default rule taxonomy |
 | GET | `/api/guard/policy` | open | Default policy text and supported `thinking` modes |
 
-`POST /api/guard/check` fields: `input` (the text, or the prompt that goes with an image), `image_base64` (raw base64 or a data URL; optional), `conversation` (`[{role: user|assistant, content}]` turns before `input`), `input_role` (`user` or `assistant`), `policy` (natural-language rules; omit it to use the default taxonomy), `thinking` (`fast`, `fast-slow`, `slow` or `cascade`; default `GUARD_THINKING`), `model` (default `GUARD_MODEL`). The response contains `safe`, `verdict`, `rule`, `rule_text`, `explanation`, `categories`, `raw`, `model`, `thinking` (the pass whose verdict stood) and `elapsed_ms`.
+`POST /api/guard/check` fields: `input` (the text, or the prompt that goes with an image), `image_base64` (raw base64 or a data URL; optional), `conversation` (`[{role: user|assistant, content}]` turns before `input`), `input_role` (`user` or `assistant`), `policy` (natural-language rules; omit it to use the default taxonomy), `thinking` (`fast`, `fast-slow`, `slow` or `cascade`; default `GUARD_THINKING`), `model` (leave blank: retina serves one model, and any other name is a 400). The response contains `safe`, `verdict`, `rule`, `rule_text` (the rule's text in the active policy), `explanation`, `categories`, `raw` (always empty: retina returns no generation text), `model`, `thinking` (the pass whose verdict stood), `elapsed_ms`, and when retina sends them `fast_verdict` (the first-line verdict) and `fast_rule` (a cascade that slow decided: what fast flagged).
+
+Errors: 400 for a bad request (retina's 400/422 detail relayed), 503 when `GUARD_URL` is unset, retina is unreachable or answers 503 (model loading, no GPU lease), 502 when retina returns no verdict or another error, 504 after `GUARD_TIMEOUT`.
 
 ### Voice (`routers/voice.py`)
 

@@ -24,9 +24,10 @@ class GuardHistoryRecallTests(unittest.TestCase):
         self.js = _page("guard_ui")
         self.recall = _between(self.js, 'historyEl.querySelectorAll(".history-item")', 'getElementById("clearHistBtn")')
 
-    def test_model_override_is_saved_and_restored(self) -> None:
-        self.assertIn('req_model: req.model || ""', _between(self.js, "function addHistory", "function renderHistory"))
-        self.assertIn('modelEl.value = h.req_model || ""', self.recall)
+    def test_there_is_no_model_override(self) -> None:
+        # argus-retina serves one SingGuard: /api/guard/check refuses any other model.
+        self.assertNotIn("guardModel", self.js)
+        self.assertNotIn("req_model", self.js)
 
     def test_recall_drops_an_attached_image_and_resets_status(self) -> None:
         self.assertIn('imageEl.value = ""', self.recall)
