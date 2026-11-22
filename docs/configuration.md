@@ -28,7 +28,7 @@ Some rag-chat APIs are unauthenticated: guard, `/metrics`, and the read-only and
 | `OLLAMA_URL` | `http://ollama:11434` | |
 | `OLLAMA_TIMEOUT` | `300` | Seconds per Ollama chat call |
 | `OLLAMA_KEEP_ALIVE` | `15m` | The `ollama` service's default keep-alive (a duration, seconds, or `-1`; Ollama reads anything else as `5m`). Also the per-request value when `OLLAMA_REQUEST_KEEP_ALIVE` is unset |
-| `OLLAMA_REQUEST_KEEP_ALIVE` | `OLLAMA_KEEP_ALIVE` | `keep_alive` rag-chat and rag-ingest send on each Ollama request. `server` (or `none`/`off`) sends none, leaving residency to the daemon. For argus-iris: `OLLAMA_REQUEST_KEEP_ALIVE=server` with `OLLAMA_KEEP_ALIVE` left a duration; iris extends `keep_alive` per its policy and holds pinned models (SingGuard) at `-1` |
+| `OLLAMA_REQUEST_KEEP_ALIVE` | `OLLAMA_KEEP_ALIVE` | `keep_alive` rag-chat and rag-ingest send on each Ollama request. `server` (or `none`/`off`) sends none, leaving residency to the daemon. For argus-iris: `OLLAMA_REQUEST_KEEP_ALIVE=server` with `OLLAMA_KEEP_ALIVE` left a duration; iris extends `keep_alive` per its policy and holds pinned models at `-1` |
 | `CHAT_MODEL` | `llama3.2:3b` | Default model for `/chat`, pipeline helpers and the repair fixer |
 | `CHAT_SYSTEM_PROMPT` | `You are a helpful assistant.` | Prepended when the request has no system message |
 | `RAG_ENABLED` | `1` | `0` turns off retrieval; `/chat` then only proxies to Ollama |
@@ -53,13 +53,13 @@ With `ARGUS_GPU_COORDINATOR=broker`, every Ollama call holds an `ollama:<model>`
 | `ARGUS_GPU_BROKER_URL` / `ARGUS_GPU_BROKER_TOKEN` | (empty) | The broker and the suite's caller token |
 | `ARGUS_GPU_BROKER_FALLBACK` | `none` | When the broker is unreachable. `lease` (a host flock) would serialise every Ollama call |
 | `ARGUS_GPU_HOME_NODE` | `dragon` (compose) | This stack's node: a grant here uses `OLLAMA_URL`, and pinned models stay here |
-| `OLLAMA_LEASE_PINNED_MODELS` | `GUARD_MODEL`,`EMBED_MODEL` | Comma list; `none` pins nothing |
+| `OLLAMA_LEASE_PINNED_MODELS` | `EMBED_MODEL` | Comma list; `none` pins nothing |
 | `RAG_CHAT_GPU_LEASE_TIMEOUT_S` / `RAG_INGEST_GPU_LEASE_TIMEOUT_S` | `60` / `300` | Wait for a grant before the 503 (compose maps each to the service's `ARGUS_GPU_LEASE_TIMEOUT_S`) |
-| `OLLAMA_LEASE_VRAM_MB` | SingGuard `6000`, nomic-embed-text `600` | `model=MiB,…`; anything unlisted is `OLLAMA_LEASE_DEFAULT_VRAM_MB` (`6000`) |
-| `OLLAMA_LEASE_MODEL_MB` | SingGuard `3900`, qwen3:8b `5300`, nomic-embed-text `320` | `model=MiB,…`: the weights part of the footprint (Ollama `/api/ps` `size_vram`), sent as the lease's `model_mb` so iris doesn't ask for room again while the model is loaded. The rest is the working set; a larger `num_ctx` grows that, so raise `OLLAMA_LEASE_VRAM_MB`. Unlisted models send none (all working set). Keep `gpu-tenant.yaml`'s kinds in step |
+| `OLLAMA_LEASE_VRAM_MB` | nomic-embed-text `600` | `model=MiB,…`; anything unlisted is `OLLAMA_LEASE_DEFAULT_VRAM_MB` (`6000`) |
+| `OLLAMA_LEASE_MODEL_MB` | qwen3:8b `5300`, nomic-embed-text `320` | `model=MiB,…`: the weights part of the footprint (Ollama `/api/ps` `size_vram`), sent as the lease's `model_mb` so iris doesn't ask for room again while the model is loaded. The rest is the working set; a larger `num_ctx` grows that, so raise `OLLAMA_LEASE_VRAM_MB`. Unlisted models send none (all working set). Keep `gpu-tenant.yaml`'s kinds in step |
 | `OLLAMA_NODE_URLS` | (empty) | `node=url,…` when the broker's `base_url` for a node doesn't resolve in the containers |
 
-Priority comes from the call site (`chat`, `guard`, `embed-query` and `pipeline` are `interactive`; `repair` and `embed-ingest` are `batch`). A request's `X-Argus-Priority` header (`realtime`, `interactive`, `batch`, `background`) overrides it.
+Priority comes from the call site (`chat`, `embed-query` and `pipeline` are `interactive`; `repair` and `embed-ingest` are `batch`). A request's `X-Argus-Priority` header (`realtime`, `interactive`, `batch`, `background`) overrides it.
 
 ## rag-chat: media generation
 
@@ -72,11 +72,13 @@ Priority comes from the call site (`chat`, `guard`, `embed-query` and `pipeline`
 
 ## rag-chat: guard
 
+`/api/guard/check` is a proxy to argus-retina's SingGuard server (`ghcr.io/smk762/argus-retina-singguard`, container port 8080, host port 8134 in retina's compose). Retina holds the model, queues checks one at a time and takes its own GPU lease, so composer runs no SingGuard and leases nothing for it.
+
 | Variable | Default | Notes |
 |---|---|---|
-| `GUARD_MODEL` | `hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M` | Runs on the shared Ollama |
-| `GUARD_THINKING` | `fast-slow` | `fast`, `fast-slow`, `slow` or `cascade` |
-| `GUARD_WORKER_CONCURRENCY` | `1` | Concurrent guard checks |
+| `GUARD_URL` | (empty) | Retina's SingGuard base URL, e.g. `http://<GPU_HOST>:8134`. Empty: `/api/guard/check` answers 503 "guard not configured" |
+| `GUARD_TIMEOUT` | `120` | Seconds to wait for a check (slow and cascade take about 20 s on a 3090, plus queueing); a timeout is a 504 |
+| `GUARD_THINKING` | `fast-slow` | `fast`, `fast-slow`, `slow` or `cascade`, sent when a check leaves `thinking` blank (retina's own default is `fast`) |
 
 ## rag-chat: voice
 

@@ -1,4 +1,4 @@
-"""Environment-driven configuration for rag-chat: Ollama/chat and guard models, Qdrant RAG,
+"""Environment-driven configuration for rag-chat: Ollama/chat model, the guard upstream, Qdrant RAG,
 auth, media storage, ModernBERT/Infinity/Whisper URLs, audit API, and the TTS engine
 registry (TTS_ENGINES, tts_engine_url(), tts_engine_chain()) with default/fallback engines.
 """
@@ -38,15 +38,14 @@ def ollama_keep_alive() -> dict:
 
 
 CHAT_MODEL = os.getenv("CHAT_MODEL", "llama3.2:3b")
-# SingGuard 4B. The 4B is the image-safety sweet spot in the model card;
-# the 8B does not beat it there. Q4_K_M is the default pull; Q8_0 and F16
-# are on the same repo. Override with GUARD_MODEL to pick another size.
-GUARD_MODEL = os.getenv(
-    "GUARD_MODEL",
-    "hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M",
-)
+# SingGuard content checks are argus-retina's SingGuard server (ghcr.io/smk762/argus-retina-singguard);
+# /api/guard/check proxies to it. Empty: the route answers 503 "guard not configured".
+GUARD_URL = os.getenv("GUARD_URL", "").strip().rstrip("/")
+# Slow and cascade checks take about 20 s on a 3090, and retina queues one check at a time.
+GUARD_TIMEOUT = float(os.getenv("GUARD_TIMEOUT", "120"))
 # fast-slow asks the model to write why the rule fired. fast is the label only.
 # slow reasons first (no first-line verdict). cascade is fast, then slow if flagged.
+# Sent when a check leaves thinking blank (retina's own default is fast).
 # Keep in sync with guard_policy.THINKING_MODES.
 _GUARD_THINKING = os.getenv("GUARD_THINKING", "fast-slow").strip().lower()
 GUARD_THINKING = (
@@ -102,8 +101,6 @@ OOM_WAIT_INTERVAL_SECONDS = _env_int("OOM_WAIT_INTERVAL_SECONDS", 5)
 INFERENCE_WORKER_CONCURRENCY = _env_int("INFERENCE_WORKER_CONCURRENCY", 1)
 # Largest image (or mask) /api/edit/image and /api/generate/video accept; bigger is a 413.
 GENERATION_UPLOAD_MAX_BYTES = _env_int("GENERATION_UPLOAD_MAX_BYTES", 25 * 1024 * 1024)
-# One SingGuard pass at a time: cull scans and darkroom pre-flights share Ollama.
-GUARD_WORKER_CONCURRENCY = _env_int("GUARD_WORKER_CONCURRENCY", 1)
 
 MEDIA_DIR = os.getenv("MEDIA_DIR", "/data/media")
 MEDIA_BACKEND = os.getenv("MEDIA_BACKEND", "local").strip().lower()

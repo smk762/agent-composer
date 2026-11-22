@@ -1,7 +1,6 @@
 """argus-iris leases around Ollama calls (app/gpu_lease.py, #48).
 
-rag-chat and rag-ingest carry identical copies of gpu_lease.py and of this test, except
-GuardRouteLeaseTest, which is rag-chat's alone.
+rag-chat and rag-ingest carry identical copies of gpu_lease.py and of this test.
 """
 
 import contextlib
@@ -53,7 +52,7 @@ class OllamaLeaseTest(unittest.IsolatedAsyncioTestCase):
             "OLLAMA_URL": LOCAL,
             "HOME_NODE": "dragon",
             "NODE_URLS": {},
-            "PINNED_MODELS": {"singguard:q4", "nomic-embed-text"},
+            "PINNED_MODELS": {"nomic-embed-text"},
         }.items():
             p = patch.object(gpu_lease, name, value)
             p.start()
@@ -136,7 +135,7 @@ class OllamaLeaseTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_pinned_models_carry_the_home_node(self) -> None:
         coord = self._use(_FakeCoordinator())
-        async with ollama_lease("singguard:q4", kind="guard", priority="interactive"):
+        async with ollama_lease("nomic-embed-text", kind="embed-query", priority="interactive"):
             pass
         self.assertEqual(coord.requests[0]["constraints"].node, "dragon")
 
@@ -247,8 +246,7 @@ class VramAndPinsTest(unittest.TestCase):
             self.assertEqual(gpu_lease.model_mb("small"), 300)  # never more than the footprint
 
     def test_defaults_declare_weights_for_the_known_models(self) -> None:
-        for model, weights in {"hf.co/inclusionAI/SingGuard-4b-GGUF:Q4_K_M": 5300,
-                               "nomic-embed-text": 320, "qwen3:8b": 5300}.items():
+        for model, weights in {"nomic-embed-text": 320, "qwen3:8b": 5300}.items():
             self.assertEqual(gpu_lease._lookup(gpu_lease._DEFAULT_MODEL_MB, model), weights)
 
     def test_env_overrides_the_tables(self) -> None:
@@ -259,12 +257,12 @@ class VramAndPinsTest(unittest.TestCase):
         self.assertNotIn("bad", table)
 
     def test_pinned_defaults_follow_the_embed_model(self) -> None:
-        env = {"GUARD_MODEL": "sg:q8", "EMBED_MODEL": "emb"}
+        env = {"EMBED_MODEL": "emb"}
         with patch.dict("os.environ", env, clear=False):
             import os
 
             os.environ.pop("OLLAMA_LEASE_PINNED_MODELS", None)
-            self.assertEqual(gpu_lease._pinned_models(), {"emb"})  # SingGuard may spill to jarrah
+            self.assertEqual(gpu_lease._pinned_models(), {"emb"})
             with patch.dict("os.environ", {"OLLAMA_LEASE_PINNED_MODELS": ""}):
                 self.assertEqual(gpu_lease._pinned_models(), {"emb"})
             with patch.dict("os.environ", {"OLLAMA_LEASE_PINNED_MODELS": "none"}):
@@ -288,18 +286,6 @@ class PriorityMiddlewareTest(unittest.TestCase):
         self.assertEqual(client.get("/p").json(), {"priority": None})
 
 
+
 if __name__ == "__main__":
     unittest.main()
-
-
-class GuardRouteLeaseTest(unittest.TestCase):
-    """A refused lease on /api/guard/check is a 503 with Retry-After, via main's handler."""
-
-    def test_guard_check_answers_503(self) -> None:
-        from app.main import app
-
-        with patch.object(gpu_lease, "_coordinator", _FakeCoordinator(error=GpuLeaseTimeout("queued 3 ahead"))):
-            r = TestClient(app).post("/api/guard/check", json={"input": "hello", "thinking": "fast"})
-        self.assertEqual(r.status_code, 503, r.text)
-        self.assertEqual(r.headers.get("retry-after"), "30")
-        self.assertIn("no GPU lease for guard", r.json()["detail"])

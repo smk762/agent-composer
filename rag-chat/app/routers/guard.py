@@ -1,55 +1,34 @@
-"""SingGuard content-safety router.
+"""SingGuard content-safety router: a thin proxy to argus-retina's SingGuard server.
 
-Runs a prompt, and any prior turns, through SingGuard on the shared Ollama
-instance. The moderation policy is natural-language input: omit it to use
-SingGuard's default rules, or send a replacement and the model judges only
-those rules.
+``POST /api/guard/check`` keeps rag-chat's request and response shape, so its callers (cull
+scans, darkroom pre-flights, safelight, imogen, the guard tester) don't change, and forwards
+the check to ``GUARD_URL``'s ``/api/guard/check`` (ghcr.io/smk762/argus-retina-singguard).
+Retina renders the prompt, neutralizes control tokens and role markers, shrinks the image,
+takes its own GPU lease from argus-iris and runs one check at a time; rag-chat fills the
+default ``thinking`` and maps the answer and its errors.
 
-The response is the safe/unsafe label, the triggered rule title, and why
-that rule applies. Fast-slow writes that reason after a first-line verdict;
-slow writes the reason first so it is not anchored; cascade runs fast, then
-slow only when fast flags the content.
+The moderation policy is natural-language request input: omit it to use SingGuard's
+default rules, or send a replacement and the model judges only those rules. The response is
+the safe/unsafe label, the triggered rule title, and why that rule applies.
 """
 
 from __future__ import annotations
 
 import time
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from app.config import (
-    GUARD_MODEL,
-    GUARD_THINKING,
-    GUARD_WORKER_CONCURRENCY,
-    ollama_keep_alive,
-    OLLAMA_TIMEOUT,
-    log,
-)
-from app.gpu_lease import ollama_lease
-from app.guard_image import image_b64
-from app.inference_retry import InferenceWorkers
-from app.guard_policy import (
-    DEFAULT_POLICY,
-    THINKING_CASCADE,
-    THINKING_FAST,
-    THINKING_MODES,
-    THINKING_SLOW,
-    GuardVerdict,
-    build_image_chat_messages,
-    build_singguard_prompt,
-    finish_cascade,
-    max_new_tokens,
-    needs_slow_pass,
-    normalize_thinking,
-    parse_singguard_output,
-    policy_rules,
-)
+from app.config import GUARD_THINKING, GUARD_TIMEOUT, GUARD_URL, log
+from app.guard_policy import DEFAULT_POLICY, THINKING_MODES, normalize_thinking, policy_rules, rule_text
 
 router = APIRouter(prefix="/api/guard", tags=["guard"])
-_guard_workers = InferenceWorkers(GUARD_WORKER_CONCURRENCY)
+
+_DETAIL_CAP = 300
+# The model the upstream serves, read from its /health the first time a check names one.
+_upstream_model: str | None = None
 
 
 class GuardMessage(BaseModel):
@@ -86,12 +65,12 @@ class GuardCheckRequest(BaseModel):
         description=(
             "fast: label and rule. fast-slow: first-line verdict then why. "
             "slow: reason first, then the verdict. "
-            "cascade: fast, then slow only when fast flags the content."
+            "cascade: fast, then slow only when fast flags the content. Blank: GUARD_THINKING."
         ),
     )
     model: str = Field(
         default="",
-        description="Override the guard model (defaults to GUARD_MODEL).",
+        description="Must be blank or the upstream's model: argus-retina serves one SingGuard.",
     )
 
 
@@ -108,233 +87,127 @@ class GuardCheckResponse(BaseModel):
     rule_text: str = ""
     explanation: str
     categories: List[GuardCategory]
-    raw: str
+    # The generation text, which retina does not return: always "".
+    raw: str = ""
     model: str
     thinking: str
     elapsed_ms: int
+    # Retina's first-line verdict; on a cascade that slow decided, also the rule fast flagged.
+    fast_verdict: Optional[str] = None
+    fast_rule: Optional[str] = None
 
 
-def _turns(req: GuardCheckRequest) -> list[tuple[str, str]]:
-    turns: list[tuple[str, str]] = []
-    if req.conversation:
-        for message in req.conversation:
-            turns.append((message.role, message.content))
-    has_image = bool(req.image_base64.strip())
-    has_user = any(role == "user" for role, _ in turns)
-    # The image has to sit on a user turn. An assistant caption is still
-    # included when the prompt is already in the conversation.
-    if has_image and (req.input_role == "user" or not has_user):
-        turns.append(("user", req.input))
-    elif req.input.strip() or not has_image:
-        turns.append((req.input_role, req.input))
-    return turns
-
-
-def _ollama_options(thinking: str) -> dict:
-    # The GGUF advertises a 262k context. A classifier prompt is a few
-    # thousand tokens; reserving the full window wastes VRAM.
-    options = {
-        "temperature": 0,
-        "num_predict": max_new_tokens(thinking),
-        "num_ctx": 16384,
-    }
-    # Slow write-ups can loop on "follow the hint" vs the policy until the
-    # token budget dies. A mild penalty breaks that without changing fast.
-    if normalize_thinking(thinking) != THINKING_FAST:
-        options["repeat_penalty"] = 1.2
-    return options
-
-
-def _categories(verdict: GuardVerdict) -> list[GuardCategory]:
-    if verdict.safe or not verdict.rule or verdict.rule.casefold() == "safe":
-        return []
-    return [
-        GuardCategory(
-            code=verdict.rule,
-            label=verdict.rule,
-            why=verdict.rule_text,
-        )
-    ]
-
-
-def _ollama_request(
-    *,
-    model: str,
-    turns: list[tuple[str, str]],
-    policy: str,
-    thinking: str,
-    image: str,
-) -> tuple[str, dict]:
-    if image:
-        # Chat, not a raw prompt: Ollama has to run the vision projector.
-        # The GGUF template still applies the policy from the system message.
-        messages = build_image_chat_messages(
-            turns,
-            policy=policy,
-            thinking=thinking,
-            image_b64=image,
-        )
-        payload = {
-            "model": model,
-            "messages": messages,
-            "stream": False,
-            **ollama_keep_alive(),
-            "options": _ollama_options(thinking),
-        }
-        return "/api/chat", payload
-    prompt = build_singguard_prompt(turns, policy=policy, thinking=thinking)
-    # raw=true keeps Ollama from wrapping this in a second chat template.
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "raw": True,
-        "stream": False,
-        **ollama_keep_alive(),
-        "options": {**_ollama_options(thinking), "stop": ["<|im_end|>"]},
-    }
-    return "/api/generate", payload
-
-
-def _raw_from_body(body: dict) -> str:
-    return body.get("response") or body.get("message", {}).get("content", "") or ""
-
-
-async def _generate(
-    client: httpx.AsyncClient,
-    *,
-    base_url: str,
-    model: str,
-    turns: list[tuple[str, str]],
-    policy: str,
-    thinking: str,
-    image: str,
-) -> str:
-    path, payload = _ollama_request(
-        model=model,
-        turns=turns,
-        policy=policy,
-        thinking=thinking,
-        image=image,
-    )
-    response = await client.post(f"{base_url}{path}", json=payload)
-    response.raise_for_status()
-    return _raw_from_body(response.json())
-
-
-@router.post("/check", response_model=GuardCheckResponse)
-async def guard_check(req: GuardCheckRequest):
-    model = req.model or GUARD_MODEL
+def _detail(response: httpx.Response) -> str:
+    """The upstream's own message about this request (FastAPI's ``detail``), short."""
     try:
-        requested = normalize_thinking(req.thinking or GUARD_THINKING)
-        image = image_b64(req.image_base64)
-        turns = _turns(req)
-        # Build every pass's request now, so a bad conversation/policy/image is a 400
-        # here and a ValueError during the run can only be the guard's own failure.
-        for pass_thinking in (
-            (THINKING_FAST, THINKING_SLOW) if requested == THINKING_CASCADE else (requested,)
-        ):
-            _ollama_request(model=model, turns=turns, policy=req.policy, thinking=pass_thinking, image=image)
+        detail: Any = response.json().get("detail")
+    except (ValueError, AttributeError):
+        detail = None
+    if isinstance(detail, list):  # a 422: pydantic's errors
+        detail = "; ".join(
+            f"{'.'.join(str(p) for p in e.get('loc', ())[1:])}: {e.get('msg', '')}".lstrip(": ")
+            for e in detail
+            if isinstance(e, dict)
+        )
+    return str(detail or f"guard refused the check ({response.status_code})")[:_DETAIL_CAP]
+
+
+async def _model(client: httpx.AsyncClient) -> str:
+    global _upstream_model
+    if _upstream_model is None:
+        response = await client.get(f"{GUARD_URL}/health")
+        response.raise_for_status()
+        model = response.json().get("model")
+        if not isinstance(model, str) or not model:
+            raise ValueError("guard /health names no model")
+        _upstream_model = model
+    return _upstream_model
+
+
+def _response(body: dict, policy: str, elapsed_ms: int) -> GuardCheckResponse:
+    categories = [GuardCategory(**c) for c in body.get("categories") or []]
+    rule = body.get("rule") or ""
+    # The rule's own text from the policy the check was judged against (retina's category
+    # `why` is the explanation, already in `explanation`); the category's why when the rule
+    # is not a heading of that policy.
+    text = rule_text(rule, policy) or (categories[0].why if categories else "")
+    return GuardCheckResponse(
+        safe=body["safe"],
+        verdict=body.get("verdict") or ("safe" if body["safe"] else "unsafe"),
+        rule=rule,
+        rule_text=text,
+        explanation=body.get("explanation") or "",
+        categories=categories,
+        raw="",
+        model=body.get("model") or "",
+        thinking=body.get("thinking") or "",
+        elapsed_ms=elapsed_ms,
+        fast_verdict=body.get("fast_verdict"),
+        fast_rule=body.get("fast_rule"),
+    )
+
+
+@router.post("/check", response_model=GuardCheckResponse, response_model_exclude_none=True)
+async def guard_check(req: GuardCheckRequest):
+    try:
+        thinking = normalize_thinking(req.thinking or GUARD_THINKING)
     except ValueError as exc:
         raise HTTPException(400, detail=str(exc)) from exc
+    if not GUARD_URL:
+        raise HTTPException(503, detail="guard not configured (set GUARD_URL)")
 
+    payload = {
+        "input": req.input,
+        "image_base64": req.image_base64,
+        "input_role": req.input_role,
+        "conversation": [m.model_dump() for m in req.conversation] if req.conversation is not None else None,
+        "policy": req.policy or None,
+        "thinking": thinking,
+    }
     t0 = time.monotonic()
     try:
-        async with httpx.AsyncClient(timeout=OLLAMA_TIMEOUT) as client:
-            # One Ollama guard at a time by default: cull scans and darkroom
-            # pre-flights share the model, and a pile-up is a timeout, not speed.
-            # The lease is taken inside the worker slot, so queued checks hold none,
-            # and it covers both passes of a cascade.
-            async def _run() -> tuple[str, GuardVerdict]:
-                async with ollama_lease(model, kind="guard", priority="interactive") as base_url:
-                    return await _passes(base_url)
-
-            async def _passes(base_url: str) -> tuple[str, GuardVerdict]:
-                if requested != THINKING_CASCADE:
-                    raw = await _generate(
-                        client,
-                        base_url=base_url,
-                        model=model,
-                        turns=turns,
-                        policy=req.policy,
-                        thinking=requested,
-                        image=image,
+        # GUARD_URL is operator config, never request input.
+        async with httpx.AsyncClient(timeout=GUARD_TIMEOUT) as client:
+            if req.model.strip():
+                served = await _model(client)
+                if req.model.strip() != served:
+                    raise HTTPException(
+                        400, detail=f"the guard serves only {served}; leave model blank"
                     )
-                    return requested, parse_singguard_output(raw, req.policy)
-                raw_fast = await _generate(
-                    client,
-                    base_url=base_url,
-                    model=model,
-                    turns=turns,
-                    policy=req.policy,
-                    thinking=THINKING_FAST,
-                    image=image,
-                )
-                fast = parse_singguard_output(raw_fast, req.policy)
-                if not needs_slow_pass(fast):
-                    return THINKING_FAST, fast
-                raw_slow = await _generate(
-                    client,
-                    base_url=base_url,
-                    model=model,
-                    turns=turns,
-                    policy=req.policy,
-                    thinking=THINKING_SLOW,
-                    image=image,
-                )
-                return THINKING_SLOW, finish_cascade(fast, parse_singguard_output(raw_slow, req.policy))
-
-            used, verdict = await _guard_workers.run(_run)
-    except ValueError as exc:
-        # The input was validated above: this is undecodable Ollama JSON or model
-        # output the parser rejects, an upstream fault, not the caller's.
-        log.warning("guard: bad upstream output from %s: %s", model, exc)
-        raise HTTPException(502, detail="Guard model returned an unusable response") from exc
+            response = await client.post(f"{GUARD_URL}/api/guard/check", json=payload)
+            response.raise_for_status()
+            result = _response(response.json(), req.policy, int((time.monotonic() - t0) * 1000))
     except httpx.TimeoutException:
-        raise HTTPException(504, detail="Ollama guard timed out")
-    except httpx.TransportError:
-        raise HTTPException(503, detail="Ollama unreachable")
+        raise HTTPException(504, detail="guard timed out")
+    except (httpx.TransportError, httpx.InvalidURL):
+        raise HTTPException(503, detail="guard unreachable")
     except httpx.HTTPStatusError as exc:
-        detail = exc.response.text
-        try:
-            body = exc.response.json()
-        except ValueError:
-            body = None
-        if isinstance(body, dict) and body.get("error"):
-            detail = str(body["error"])
         upstream = exc.response.status_code
-        # Ollama's status isn't ours: a 404 (model not pulled) or a 401 from a proxy would
-        # read as a rag-chat routing/auth failure. Upstream 5xx -> 503, anything else -> 502.
-        raise HTTPException(
-            503 if upstream >= 500 else 502,
-            detail=f"Ollama guard error ({upstream}): {detail[:500]}",
-        )
-
-    elapsed_ms = int((time.monotonic() - t0) * 1000)
-    categories = _categories(verdict)
+        if upstream in (400, 422):
+            raise HTTPException(400, detail=_detail(exc.response))
+        if upstream == 503:
+            # info-leak: retina's own 503 detail (model loading, no GPU lease), JSON field, capped
+            raise HTTPException(503, detail=f"guard unavailable: {_detail(exc.response)}")
+        log.warning("guard: upstream answered %s", upstream)
+        if upstream == 500:
+            raise HTTPException(502, detail="guard returned no verdict")
+        raise HTTPException(502, detail=f"guard failed ({upstream})")
+    except (ValueError, KeyError, TypeError) as exc:
+        # Undecodable JSON or a body without the fields: an upstream fault, not the caller's.
+        log.warning("guard: unusable upstream response: %s", exc)
+        raise HTTPException(502, detail="guard returned an unusable response")
 
     log.info(
         "guard: model=%s safe=%s rule=%s thinking=%s requested=%s image=%s elapsed=%dms",
-        model,
-        verdict.safe,
-        verdict.rule,
-        used,
-        requested,
-        bool(image),
-        elapsed_ms,
+        result.model,
+        result.safe,
+        result.rule,
+        result.thinking,
+        thinking,
+        bool(req.image_base64.strip()),
+        result.elapsed_ms,
     )
-
-    return GuardCheckResponse(
-        safe=verdict.safe,
-        verdict=verdict.verdict,
-        rule=verdict.rule,
-        rule_text=verdict.rule_text,
-        explanation=verdict.explanation,
-        categories=categories,
-        raw=verdict.raw,
-        model=model,
-        thinking=used,
-        elapsed_ms=elapsed_ms,
-    )
+    return result
 
 
 @router.get("/categories")

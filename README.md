@@ -11,7 +11,7 @@ Run a private AI stack that feels production-grade on day one: chat with your lo
   - **`modernbert`**: ModernBERT classifier. `/api/pipeline/*` and Pipeline Lab use it.
   - **`infinity`** (`infinity-manager/`): code embeddings and a reranker for the code-ingest profile.
   - **Voice stack** (`voice-stack/`): Whisper STT, XTTS-v2 / Miso / legacy Qwen TTS with voice cloning, and Wyoming bridges for Home Assistant. Used by `/api/voice/*`.
-  - **Guard**: SingGuard content-safety checks on the shared Ollama (`/api/guard/*`).
+  - **Guard**: SingGuard content-safety checks (`/api/guard/*`), proxied to argus-retina's SingGuard server (`GUARD_URL`).
   - **Media generation**: image and video through pluggable providers (OpenAI, Stability, Replicate, Together, ComfyUI).
   - **Repair**: a multi-model repair loop that ai-code-auditor validates (`/api/repair/*`).
 
@@ -74,7 +74,7 @@ Qdrant, Postgres and MinIO run outside this compose file (`QDRANT_URL`, `DATABAS
 │  ├─ providers/                 # image/video provider adapters
 │  ├─ repair/                    # repair loop (fixer → critic → adversary)
 │  ├─ streaming.py               # /chat SSE
-│  └─ guard_policy.py, guard_image.py
+│  └─ guard_policy.py
 ├─ modernbert/app/               # classifier sidecar (lazy GPU load, keep-alive eviction)
 ├─ infinity-manager/manager.py   # idle-evicting proxy in front of Infinity
 ├─ voice-stack/                  # whisper/xtts/qwen-tts servers, wyoming_bridge/, VOICE_CLONING.md
@@ -248,7 +248,7 @@ Simple form to submit chunks for embedding and upserting to qdrant.
 - `POST /chat`: OpenAI-style chat with `model`, `conversation_id`, `tools`, `temperature`, `max_tokens` and `stream` (SSE ending in `[DONE]`). Returns `choices`, `usage` and `conversation_id`, and persists the conversation.
 - `/conversations` (list/create/get/delete), `/api-keys` (list/create/revoke)
 - `/api/generate/image`, `/api/edit/image`, `/api/generate/video`, `/api/generations`, `/api/media/{id}`, `/api/providers/*`
-- `/api/guard/check`, `/api/guard/categories`, `/api/guard/policy` (setup, model pull, request and response fields and thinking modes: [SingGuard guard server](https://studio.dragonhound.dev/docs/setup/services/singguard/) in the Argus docs)
+- `/api/guard/check`, `/api/guard/categories`, `/api/guard/policy`: a proxy to argus-retina's SingGuard server, set by `GUARD_URL` (request and response fields and thinking modes: [SingGuard guard server](https://studio.dragonhound.dev/docs/setup/services/singguard/) in the Argus docs)
 - `/api/voice/*`: transcribe, synthesise (plain/stream/pcm), analyze, clone, clones, speakers, engines, health
 - `/api/pipeline/*`: ModernBERT status/load/evict/unload, labels, classify, plus overlay/brain/prose helpers
 - `/api/repair/run` (SSE) and `/api/repair/jobs/{id}`
