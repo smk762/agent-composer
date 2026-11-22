@@ -106,6 +106,22 @@ class OllamaLeaseTest(unittest.IsolatedAsyncioTestCase):
             async with ollama_lease("qwen3:8b", kind="chat", priority="interactive") as url:
                 self.assertEqual(url, "http://192.168.1.109:11434")
 
+    # pack-agent-composer-f5bc33e932
+    async def test_metadata_addresses_outside_link_local_are_refused(self) -> None:
+        for bad in ("http://[fd00:ec2::254]", "http://[fd00:ec2::254]:80", "http://[FD00:EC2:0::254]/",
+                    "http://100.100.100.200", "http://100.100.100.200.:80", "http://1684301000",
+                    "http://[::ffff:100.100.100.200]"):
+            coord = self._use(_FakeCoordinator(GpuLease(via="broker", lease_id="L6", node="jarrah", base_url=bad)))
+            with self.assertRaises(OllamaLeaseUnavailable, msg=bad):
+                async with ollama_lease("qwen3:8b", kind="chat", priority="interactive"):
+                    self.fail("the body must not run against a cloud metadata address")
+            self.assertEqual(coord.exits, ["OllamaLeaseUnavailable"], bad)
+        # other unique-local and LAN nodes stay usable
+        for ok in ("http://[fd00:ec2::253]:11434", "http://100.100.100.201:11434"):
+            self._use(_FakeCoordinator(GpuLease(via="broker", lease_id="L7", node="jarrah", base_url=ok)))
+            async with ollama_lease("qwen3:8b", kind="chat", priority="interactive") as url:
+                self.assertEqual(url, ok)
+
     async def test_other_node_without_a_url_is_refused_not_run_locally(self) -> None:
         coord = self._use(_FakeCoordinator(GpuLease(via="broker", lease_id="L5", node="jarrah", base_url="")))
         with self.assertRaisesRegex(OllamaLeaseUnavailable, "without a URL"):

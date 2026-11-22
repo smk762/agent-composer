@@ -42,5 +42,21 @@ class VerdictTypeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await self._run({"passed": False, "failure_summary": ["E1"]}), (False, ["E1"]))
 
 
+    # pack-agent-composer-a2691d11d6
+    async def test_failed_run_without_failure_summary_is_not_a_pass(self) -> None:
+        # A syntax or collection error fails the suite with no per-test lines.
+        for body in (
+            {"passed": False, "failure_summary": []},
+            {"passed": False},
+            {"passed": False, "failure_summary": None, "errors": ["SyntaxError: invalid syntax"]},
+        ):
+            ok, errors = await self._run(body)
+            self.assertIs(ok, False, body)
+            self.assertEqual(len(errors), 1, body)
+            # One generic, actionable line: no raw (possibly infra) errors reach the model.
+            self.assertNotIn("SyntaxError", errors[0])
+            self.assertIn("collected", errors[0])
+
+
 if __name__ == "__main__":
     unittest.main()

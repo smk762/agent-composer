@@ -202,6 +202,12 @@ def _unavailable(what: str, reason: str) -> tuple[bool, list[str]]:
 # the repo and apply the patch before the tests and to answer after them.
 _VALIDATE_CLIENT_MARGIN_S = 60
 
+# Fed to the model when the suite failed without per-test failure lines.
+_NO_FAILURE_SUMMARY = (
+    "Test suite failed without reporting individual test failures: check the patch for "
+    "syntax errors, broken imports or anything that stops the tests being collected."
+)
+
 
 async def _validate_via_tests(
     patch: str,
@@ -222,6 +228,8 @@ async def _validate_via_tests(
     - Returns (True, []) when the server reports validation skipped (read-only mount,
       no test runner).
     - Returns (False, [<patch-error>]) when git apply fails on the temp copy.
+    - Returns (False, [<generic line>]) when the suite failed with no ``failure_summary``
+      (a syntax, import or collection error, say): a failed run is never a pass.
     - Fails closed: a timeout, an unreachable or missing endpoint, a non-200 answer or a
       malformed payload is (False, [<reason>]), never a pass.
     """
@@ -267,18 +275,18 @@ async def _validate_via_tests(
         ):
             return _unavailable("test validation", "malformed response")
         if not passed and not failure_summary:
-            # Test runner failed but produced no actionable failure lines.
-            # This is an infrastructure issue (broken venv, missing runner, bad shebang
-            # in a copied .venv, etc.) — not something the repair model can fix.
-            # Log as warning so ops can investigate, but don't feed it to the model.
+            # The suite failed but gave no per-test failure lines. A patch that breaks the
+            # code (syntax or import error, a pytest collection error, a crash before any
+            # test runs) looks exactly like this, so it is a failure, never a pass. The raw
+            # errors stay in the log: they may be infrastructure noise (a broken venv, a
+            # missing runner) that would mislead the model, so it gets one generic line.
             raw_errors = data.get("errors") or []
             log.warning(
                 "validate_patch: runner failed with no actionable output "
-                "(tool=%s, repo=%s) — infra issue, not propagating to repair loop. "
-                "Raw errors: %s",
+                "(tool=%s, repo=%s); the patch is not validated. Raw errors: %s",
                 data.get("tool"), repo, raw_errors[:3],
             )
-            return True, []
+            return False, [_NO_FAILURE_SUMMARY]
         return passed, failure_summary
 
     except httpx.TimeoutException:

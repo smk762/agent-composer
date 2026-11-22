@@ -189,9 +189,13 @@ def model_mb(model: str) -> int | None:
     return None if mb is None else min(mb, vram_mb(model))
 
 
-def _link_local(host: str) -> bool:
-    """Is ``host`` a link-local address literal (cloud metadata lives there), in any form the
-    socket layer accepts: decimal or hex IPv4, a trailing dot, IPv4 inside IPv6."""
+def _metadata_host(host: str) -> bool:
+    """Is ``host`` a cloud metadata address literal, in any form the socket layer accepts:
+    decimal or hex IPv4, a trailing dot, IPv4 inside IPv6.
+
+    That is any link-local address (169.254.169.254, fe80::/10) plus the metadata
+    endpoints that are not link-local (:data:`_METADATA_ADDRESSES`), such as AWS's IPv6
+    IMDS ``fd00:ec2::254``, a unique-local address."""
     host = host.strip().rstrip(".").strip("[]").split("%", 1)[0]
     try:
         ip = ipaddress.ip_address(host)
@@ -206,7 +210,14 @@ def _link_local(host: str) -> bool:
         inner = ip.ipv4_mapped or ip.sixtofour or (
             ipaddress.IPv4Address(packed & 0xFFFFFFFF)
             if ip in _NAT64 or (packed >> 32 == 0 and packed > 0xFFFF) else None)
-    return ip.is_link_local or bool(inner and inner.is_link_local)
+    return any(a is not None and (a.is_link_local or a in _METADATA_ADDRESSES) for a in (ip, inner))
+
+
+# Cloud metadata endpoints outside the link-local ranges.
+_METADATA_ADDRESSES = frozenset(ipaddress.ip_address(a) for a in (
+    "fd00:ec2::254",    # AWS IMDS over IPv6 (Nitro)
+    "100.100.100.200",  # Alibaba Cloud metadata
+))
 
 
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
@@ -217,8 +228,9 @@ def vet_node_url(url: str) -> str:
 
     The broker names the node and its base URL, and every Ollama call of the lease goes
     there. It is accepted only as a bare ``http(s)://host[:port]`` origin (no credentials,
-    path, query or fragment) whose host is not link-local, so a compromised or misconfigured
-    broker can't point the service at cloud metadata or smuggle a path into the call.
+    path, query or fragment) whose host is not a metadata address (:func:`_metadata_host`),
+    so a compromised or misconfigured broker can't point the service at cloud metadata or
+    smuggle a path into the call.
     ``OLLAMA_NODE_URLS`` (operator config) is not vetted: it is used as written.
     """
     try:
@@ -230,8 +242,8 @@ def vet_node_url(url: str) -> str:
             or parts.username is not None or parts.password is not None
             or parts.path not in ("", "/") or parts.query or parts.fragment):
         raise OllamaLeaseUnavailable(f"GPU broker gave an unusable node URL {url!r}: expected http(s)://host[:port]")
-    if _link_local(parts.hostname):
-        raise OllamaLeaseUnavailable(f"GPU broker gave a link-local node URL {url!r}, which is never allowed")
+    if _metadata_host(parts.hostname):
+        raise OllamaLeaseUnavailable(f"GPU broker gave a cloud metadata node URL {url!r}, which is never allowed")
     return f"{parts.scheme}://{parts.netloc}"
 
 
