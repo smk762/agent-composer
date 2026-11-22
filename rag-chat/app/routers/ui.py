@@ -4133,14 +4133,14 @@ def voice_clone_ui():
           const warns = rep.warnings || [];
           const div = document.createElement("div");
           div.className = "clip-item";
-          let html = '<span style="flex:1; font-size:12px;">'
+          let clipHtml = '<span style="flex:1; font-size:12px;">'
             + '<strong>' + esc(rep.name || ("clip-" + (i + 1))) + '</strong> · '
             + esc(parts.join(" · ") || "processed");
           if (warns.length) {
-            html += '<br><span style="color:#fbbf24;">⚠ ' + esc(warns.join(", ")) + '</span>';
+            clipHtml += '<br><span style="color:#fbbf24;">⚠ ' + esc(warns.join(", ")) + '</span>';
           }
-          html += '</span>';
-          div.innerHTML = html;
+          clipHtml += '</span>';
+          div.innerHTML = clipHtml;
           createReport.appendChild(div);
         });
       }
