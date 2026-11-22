@@ -163,7 +163,7 @@ class AllowlistTests(unittest.TestCase):
     def test_wildcard_allows_nothing(self) -> None:
         for allowlist in ("*", " * ", "*:8765", "audit.lan,*"):
             self.assertIn("not allowed", self.check("http://127.0.0.1:6379", allowlist) or "", allowlist)
-            self.assertIn("not allowed", self.check("http://192.168.1.20:8765", allowlist) or "", allowlist)
+            self.assertIn("not allowed", self.check("http://192.168.200.20:8765", allowlist) or "", allowlist)
 
     def test_named_hosts_still_work_beside_a_wildcard(self) -> None:
         self.assertIsNone(self.check("http://audit.lan:8765", "audit.lan,*"))
@@ -176,7 +176,7 @@ class BrokerNodeUrlTests(unittest.TestCase):
 
     def test_bare_origins_pass(self) -> None:
         self.assertEqual(self.vet("http://jarrah:11434/"), "http://jarrah:11434")
-        self.assertEqual(self.vet("https://192.168.1.109:11434"), "https://192.168.1.109:11434")
+        self.assertEqual(self.vet("https://192.168.200.109:11434"), "https://192.168.200.109:11434")
 
     def test_link_local_is_refused_in_any_form(self) -> None:
         from app.gpu_lease import OllamaLeaseUnavailable

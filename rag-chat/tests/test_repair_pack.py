@@ -597,7 +597,7 @@ class AuditUrlPolicyTests(unittest.TestCase):
         self.assertIsNone(self.check("http://host.docker.internal:8765/"))
         self.assertIsNone(self.check("HTTP://Host.Docker.Internal:8765"))
         self.assertIn("not allowed", self.check("http://host.docker.internal:6379"))  # same host, other service
-        self.assertIn("not allowed", self.check("http://192.168.1.50:8765"))
+        self.assertIn("not allowed", self.check("http://192.168.200.50:8765"))
 
     def test_allowlist_entries(self) -> None:
         self.assertIsNone(self.check("http://audit.lan:8765", allowlist=" audit.lan:8765 , other "))
