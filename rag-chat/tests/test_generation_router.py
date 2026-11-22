@@ -1,6 +1,7 @@
 """Generation routes: uploads are size-capped, and a failure while storing results marks the
 generation failed and removes its files. In-memory SQLite, fake provider and media store."""
 
+import asyncio
 import io
 import unittest
 from unittest.mock import patch
@@ -74,7 +75,7 @@ class _Provider:
         return GenerationResult(media=media, model="m", provider="fake")
 
 
-class StoreFailureTests(unittest.IsolatedAsyncioTestCase):
+class _GenerationDB(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.engine = create_async_engine("sqlite+aiosqlite:///:memory:")
         async with self.engine.begin() as conn:
@@ -96,6 +97,8 @@ class StoreFailureTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self) -> None:
         await self.engine.dispose()
 
+
+class StoreFailureTests(_GenerationDB):
     async def test_storage_failure_marks_the_generation_failed_and_cleans_up(self) -> None:
         async with self.Session() as db:
             with self.assertRaises(HTTPException) as cm:
@@ -129,6 +132,71 @@ class StoreFailureTests(unittest.IsolatedAsyncioTestCase):
             row = (await db.execute(select(Generation).where(Generation.id == gen_id))).scalar_one()
         self.assertEqual(row.status, "failed")
         self.assertIn("No space left", row.error_message)
+
+    async def _running_gen(self, db) -> Generation:
+        gen = Generation(user_id="u1", provider_name="fake", capability="image", status="running")
+        db.add(gen)
+        await db.commit()
+        return gen
+
+    async def _row(self, gen_id):
+        async with self.Session() as db:
+            row = (await db.execute(select(Generation).where(Generation.id == gen_id))).scalar_one()
+            assets = (await db.execute(select(MediaAsset))).scalars().all()
+        return row, assets
+
+    async def test_a_failure_after_the_commit_keeps_the_stored_media(self) -> None:
+        async def save(data, *, user_id, generation_id, filename):
+            self.store.saved.append(f"{user_id}/{generation_id}/{filename}")
+            return self.store.saved[-1]
+
+        self.store.save_bytes = save
+        async with self.Session() as db:
+            gen = await self._running_gen(db)
+            gen_id = gen.id
+
+            async def broken_refresh(obj, *a, **kw):
+                raise ConnectionError("pool timeout")
+
+            db.refresh = broken_refresh
+            result = await _Provider().generate_image("p")
+            with self.assertRaises(Exception):
+                await generation._store_results(db, gen, result, user_id="u1", media_type="image")
+        row, assets = await self._row(gen_id)
+        self.assertEqual((row.status, len(assets), self.store.deleted), ("completed", 2, []))
+
+    async def test_cancellation_while_storing_cleans_up_and_marks_failed(self) -> None:
+        async def cancelled_save(data, *, user_id, generation_id, filename):
+            if self.store.saved:
+                raise asyncio.CancelledError()
+            path = f"{user_id}/{generation_id}/{filename}"
+            self.store.saved.append(path)
+            return path
+
+        self.store.save_bytes = cancelled_save
+        async with self.Session() as db:
+            gen = await self._running_gen(db)
+            gen_id = gen.id
+            result = await _Provider().generate_image("p")
+            with self.assertRaises(asyncio.CancelledError):
+                await generation._store_results(db, gen, result, user_id="u1", media_type="image")
+        row, assets = await self._row(gen_id)
+        self.assertEqual((row.status, assets, self.store.deleted), ("failed", [], self.store.saved))
+
+
+class LookupProviderTests(_GenerationDB):
+    """A KeyError while resolving the provider is a provider error (502), not "not configured"."""
+
+    async def test_keyerror_in_provider_lookup_is_a_502_not_a_400(self) -> None:
+        async def get_provider(db, user_id, name):
+            return {}["choices"]
+
+        with patch.object(generation.ProviderRegistry, "get_image_provider", get_provider):
+            async with self.Session() as db:
+                with self.assertRaises(HTTPException) as cm:
+                    await generation.generate_image(ImageGenerateRequest(prompt="p"), auth=AUTH, db=db)
+        self.assertEqual(cm.exception.status_code, 502)
+        self.assertNotIn("choices", cm.exception.detail)
 
 
 if __name__ == "__main__":

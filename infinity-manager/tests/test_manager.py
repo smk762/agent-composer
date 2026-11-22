@@ -35,6 +35,12 @@ class ProxyEncodingTests(unittest.IsolatedAsyncioTestCase):
         upstream = web.Application()
         upstream.router.add_post("/embeddings", embeddings)
         upstream.router.add_get("/echo", echo_query)
+
+        async def upstream_admin(request: web.Request) -> web.Response:
+            return web.json_response({"reached": request.path})
+
+        upstream.router.add_get("/admin", upstream_admin)
+        upstream.router.add_get("/admin/{tail:.*}", upstream_admin)
         self.server = TestServer(upstream)
         await self.server.start_server()
 
@@ -67,6 +73,30 @@ class ProxyEncodingTests(unittest.IsolatedAsyncioTestCase):
             resp = await client.get("/echo?a=1&a=2")
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(resp.json(), {"a": ["1", "2"]})
+
+    async def _raw_get(self, raw_path: bytes) -> int:
+        """Drive the ASGI app with a raw path, as a client that doesn't normalise URLs sends it."""
+        sent = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            sent.append(message)
+
+        path = raw_path.decode()
+        scope = {
+            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "GET",
+            "scheme": "http", "path": path, "raw_path": raw_path, "root_path": "",
+            "query_string": b"", "headers": [], "client": ("127.0.0.1", 1), "server": ("manager", 80),
+        }
+        await manager.app(scope, receive, send)
+        return next(m["status"] for m in sent if m["type"] == "http.response.start")
+
+    async def test_upstream_admin_routes_are_not_proxied_in_any_spelling(self):
+        spellings = (b"/admin", b"//admin/status", b"/./admin/status", b"/x/../admin/status", b"/admin/")
+        statuses = {raw: await self._raw_get(raw) for raw in spellings}
+        self.assertEqual(statuses, {raw: 404 for raw in spellings})
 
 
 if __name__ == "__main__":

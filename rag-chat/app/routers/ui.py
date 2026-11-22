@@ -909,7 +909,7 @@ def generate_ui():
               note.className = "meta";
               btn.addEventListener("click", (ev) => {{
                 ev.stopPropagation();
-                checkOutputImage(m.url, prompt || "", btn, note);
+                checkOutputImage(url, prompt || "", btn, note);
               }});
               item.appendChild(btn);
               item.appendChild(note);
@@ -923,7 +923,14 @@ def generate_ui():
           btn.disabled = true;
           note.textContent = "Checking the image against the prompt...";
           try {{
-            const img = await fetch(url, {{ headers: authHeaders() }});
+            if (!url) {{
+              note.textContent = "This image has no usable URL.";
+              return;
+            }}
+            // The API key goes only to this origin: a provider-hosted or tampered history URL
+            // is fetched without it (or any cookies).
+            const sameOrigin = new URL(url, window.location.href).origin === window.location.origin;
+            const img = await fetch(url, sameOrigin ? {{ headers: authHeaders() }} : {{ credentials: "omit" }});
             if (!img.ok) {{
               note.textContent = "Could not load the image (" + img.status + ").";
               return;
@@ -4126,14 +4133,14 @@ def voice_clone_ui():
           const warns = rep.warnings || [];
           const div = document.createElement("div");
           div.className = "clip-item";
-          let html = '<span style="flex:1; font-size:12px;">'
+          let clipHtml = '<span style="flex:1; font-size:12px;">'
             + '<strong>' + esc(rep.name || ("clip-" + (i + 1))) + '</strong> · '
             + esc(parts.join(" · ") || "processed");
           if (warns.length) {
-            html += '<br><span style="color:#fbbf24;">⚠ ' + esc(warns.join(", ")) + '</span>';
+            clipHtml += '<br><span style="color:#fbbf24;">⚠ ' + esc(warns.join(", ")) + '</span>';
           }
-          html += '</span>';
-          div.innerHTML = html;
+          clipHtml += '</span>';
+          div.innerHTML = clipHtml;
           createReport.appendChild(div);
         });
       }

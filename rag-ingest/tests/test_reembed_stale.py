@@ -59,6 +59,23 @@ class StaleTextTests(unittest.TestCase):
         r = self.sync()  # converges: nothing left to do
         self.assertEqual((r["embed"], r["delete"], r["failed"], self.emb.calls), (0, 0, 0, 0))
 
+    def test_failed_re_embed_removes_the_stale_dst_point(self):
+        self.sync()
+        pid = next(i for i, p in self.dst().items() if p["doc_id"] == "b")
+        asyncio.run(self.q.set_payload(ip.QDRANT_COLLECTION, {"text": "beta, revised"}, points=[pid]))
+
+        class _Down(_Embedder):
+            async def embed(self, texts, profile="text"):
+                raise RuntimeError("ollama down")
+
+        r = asyncio.run(reembed.sync(ip.QDRANT_COLLECTION, "v2", scheme="nomic", client=self.q,
+                                     embedder=_Down(), log=lambda *_: None))
+        self.assertEqual((r["embed"], r["failed"], r["deleted"]), (1, 1, 1))
+        self.assertNotIn(pid, self.dst())  # no stale "beta" left to serve
+        r = self.sync()  # the next sync carries it across
+        self.assertEqual((r["embedded"], r["failed"]), (1, 0))
+        self.assertEqual(self.dst()[pid]["text"], "beta, revised")
+
 
 if __name__ == "__main__":
     unittest.main()

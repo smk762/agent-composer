@@ -3,10 +3,12 @@
 No network: httpx.AsyncClient is replaced by a recorder.
 """
 
+import asyncio
+import io
 import unittest
 from unittest.mock import patch
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.testclient import TestClient
 
 from app import auth
@@ -190,6 +192,50 @@ class ClipLimitTests(_Base):
         files = [("audio", ("a.wav", b"RIFF", "audio/wav"))]
         self.assertEqual(self.client.post("/api/voice/analyze", files=files).status_code, 200)
         self.assertIn(("POST", f"{BASE}/analyze-clips"), calls)
+
+
+class ConcurrentCreateTests(unittest.IsolatedAsyncioTestCase):
+    """Two creates of one new id at once: the second must see the first, not overwrite it."""
+
+    async def test_concurrent_creates_of_one_id_overwrite_nothing(self) -> None:
+        stored: dict[str, int] = {}
+        posts: list[str] = []
+
+        class _Engine:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get(self, url, **kw):
+                await asyncio.sleep(0)
+                return _Resp({"clones": [{"companion_id": c} for c in stored]})
+
+            async def post(self, url, files=None, data=None, **kw):
+                posts.append(data["companion_id"])
+                for _ in range(5):  # a slow engine: the other request runs meanwhile
+                    await asyncio.sleep(0)
+                stored[data["companion_id"]] = stored.get(data["companion_id"], 0) + 1
+                return _Resp({"voice_clone_id": data["companion_id"]})
+
+        async def create():
+            audio = [UploadFile(file=io.BytesIO(b"RIFF0000"), filename="a.wav")]
+            try:
+                await voice.clone_voice(None, audio=audio, voice_name="Alice", companion_id=None,
+                                        reference_text="", replace=False, engine=None, db=None)
+                return 200
+            except HTTPException as e:
+                return e.status_code
+
+        with patch.object(voice, "TTS_ENGINES", {"tts": BASE}), \
+                patch.object(voice, "_tts_base", lambda engine: BASE), \
+                patch.object(voice.httpx, "AsyncClient", _Engine):
+            codes = await asyncio.gather(create(), create())
+        self.assertEqual((sorted(codes), posts, stored), ([200, 409], ["alice"], {"alice": 1}))
 
 
 if __name__ == "__main__":

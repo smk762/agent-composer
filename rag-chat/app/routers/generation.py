@@ -56,8 +56,9 @@ async def _store_results(db: AsyncSession, gen: Generation, result, *, user_id: 
                          record_result: bool = True) -> list:
     """Save the provider's media and mark ``gen`` completed.
 
-    If saving or committing fails, the files written so far are deleted and ``gen`` is marked
-    failed (500), so a generation never stays ``running`` with orphaned files."""
+    If saving or committing fails, or the task is cancelled first, the files written so far are
+    deleted and ``gen`` is marked failed (500), so a generation never stays ``running`` with
+    orphaned files. Once the commit has succeeded the media is never deleted."""
     gen_id = gen.id  # read before a rollback expires ``gen``
     saved: list[str] = []
     try:
@@ -87,19 +88,29 @@ async def _store_results(db: AsyncSession, gen: Generation, result, *, user_id: 
         if record_result:
             gen.result_json = json.dumps({"model": result.model, "count": len(assets)})
         await db.commit()
-        for a in assets:
-            await db.refresh(a)
-        return assets
-    except Exception as e:
-        log.error("generation %s: storing results failed: %s", gen_id, e, exc_info=True)
-        await db.rollback()
-        for rel_path in saved:
-            try:
-                await media_store.delete(rel_path)
-            except Exception as cleanup_err:
-                log.warning("generation %s: could not delete %s: %s", gen_id, rel_path, cleanup_err)
-        await _mark_failed_after_store_error(db, gen, gen_id, f"storing results failed: {e}")
+    except (Exception, asyncio.CancelledError) as e:
+        log.error("generation %s: storing results failed: %r", gen_id, e, exc_info=True)
+        error = f"storing results failed: {e!r}"
+
+        async def cleanup() -> None:
+            await db.rollback()
+            for rel_path in saved:
+                try:
+                    await media_store.delete(rel_path)
+                except Exception as cleanup_err:
+                    log.warning("generation %s: could not delete %s: %s", gen_id, rel_path, cleanup_err)
+            await _mark_failed_after_store_error(db, gen, gen_id, error)
+
+        # Shielded: a cancellation (client gone, shutdown) must not cut the cleanup short.
+        await asyncio.shield(asyncio.ensure_future(cleanup()))
+        if isinstance(e, asyncio.CancelledError):
+            raise
         raise HTTPException(500, f"Generation succeeded but storing its results failed (generation {gen_id}); see server logs")
+    # Committed: the assets and the completed generation are stored, so a failure from here on
+    # must not delete their media or mark the generation failed.
+    for a in assets:
+        await db.refresh(a)
+    return assets
 
 
 async def _mark_failed_after_store_error(db: AsyncSession, gen: Generation, gen_id: str, error: str) -> None:
@@ -162,6 +173,8 @@ async def _lookup_provider(db: AsyncSession, gen: Generation, lookup, *, what: s
     its message (a KeyError raised during inference must not land there)."""
     try:
         return await lookup()
+    except (KeyError, IndexError) as e:  # LookupError subclasses: a bug or bad data, not "not configured"
+        raise await _provider_error(db, gen, e, what=what)
     except LookupError as e:
         await _fail(db, gen, str(e))
         raise HTTPException(400, str(e))

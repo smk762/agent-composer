@@ -1,5 +1,6 @@
 """OpenAI provider — DALL-E 3 / GPT-Image-1 (images) and Sora (video)."""
 
+import asyncio
 import base64
 import logging
 from typing import List, Optional
@@ -17,7 +18,13 @@ log = logging.getLogger("rag-chat.provider.openai")
 _API_BASE = "https://api.openai.com/v1"
 
 _IMAGE_MODELS = ["gpt-image-1", "dall-e-3", "dall-e-2"]
-_VIDEO_MODELS = ["sora"]
+_VIDEO_MODELS = ["sora-2", "sora-2-pro"]
+# The /videos job API takes ``seconds`` (a string: 4, 8 or 12) and ``size``, not duration/aspect_ratio.
+_VIDEO_SECONDS = (4, 8, 12)
+_VIDEO_ASPECTS = {"16:9": "1280x720", "9:16": "720x1280"}
+_VIDEO_SIZES = ("1280x720", "720x1280", "1792x1024", "1024x1792")
+_VIDEO_POLL_INTERVAL = 5
+_VIDEO_MAX_POLLS = 120  # 10 min at 5s
 
 
 class OpenAIProvider(ImageProvider, VideoProvider):
@@ -191,41 +198,68 @@ class OpenAIProvider(ImageProvider, VideoProvider):
         duration: Optional[float] = None,
         aspect_ratio: Optional[str] = None,
     ) -> GenerationResult:
+        """Sora is a job API: create ``POST /videos``, poll ``GET /videos/{id}`` until it is
+        ``completed`` (or ``failed``), then download ``GET /videos/{id}/content``."""
         if image is not None:
             # This call sends no reference image; refuse rather than bill a text-only video.
             raise LookupError("OpenAI video generation here does not take an input image; send the prompt alone")
-        model = model or "sora"
-        body: dict = {
-            "model": model,
-            "prompt": prompt,
-        }
+        model = model or _VIDEO_MODELS[0]
+        if model not in _VIDEO_MODELS:
+            raise LookupError(f"Unknown OpenAI video model {model!r}: use one of {_VIDEO_MODELS}")
+        form: dict = {"model": (None, model), "prompt": (None, prompt)}
+        seconds = None
         if duration:
-            body["duration"] = int(duration)
+            seconds = int(duration)
+            if seconds != duration or seconds not in _VIDEO_SECONDS:
+                raise LookupError(f"OpenAI video duration must be one of {list(_VIDEO_SECONDS)} seconds, got {duration}")
+            form["seconds"] = (None, str(seconds))
         if aspect_ratio:
-            body["aspect_ratio"] = aspect_ratio
+            size = _VIDEO_ASPECTS.get(aspect_ratio, aspect_ratio if aspect_ratio in _VIDEO_SIZES else None)
+            if size is None:
+                raise LookupError(
+                    f"OpenAI video aspect ratio must be one of {sorted(_VIDEO_ASPECTS)} "
+                    f"or a size {list(_VIDEO_SIZES)}, got {aspect_ratio!r}"
+                )
+            form["size"] = (None, size)
 
-        async with httpx.AsyncClient(timeout=300) as c:
-            r = await c.post(
-                f"{_API_BASE}/videos/generations",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json=body,
-            )
-        r.raise_for_status()
-        data = r.json()
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        async with httpx.AsyncClient(timeout=60) as c:
+            r = await c.post(f"{_API_BASE}/videos", headers=headers, files=form)
+            r.raise_for_status()
+            job = r.json()
+            video_id = job.get("id")
+            if not video_id:
+                raise RuntimeError("OpenAI video job was created without an id")
+            for _ in range(_VIDEO_MAX_POLLS):
+                status = job.get("status")
+                if status == "completed":
+                    break
+                if status == "failed":
+                    raise RuntimeError(f"OpenAI video job {video_id} failed: {job.get('error')}")
+                await asyncio.sleep(_VIDEO_POLL_INTERVAL)
+                r = await c.get(f"{_API_BASE}/videos/{video_id}", headers=headers)
+                r.raise_for_status()
+                job = r.json()
+            else:
+                raise TimeoutError(f"OpenAI video job {video_id} did not finish in time")
 
-        media = []
-        for i, item in enumerate(data.get("data", [])):
-            url = item.get("url", "")
-            if url:
-                async with httpx.AsyncClient(timeout=120) as dl:
-                    vr = await dl.get(url)
-                    vr.raise_for_status()
-                media.append(GeneratedMedia(
-                    data=vr.content,
-                    mime_type="video/mp4",
-                    filename=f"video_{i}_{uuid4().hex[:8]}.mp4",
-                    duration_seconds=duration,
-                ))
+            vr = await c.get(f"{_API_BASE}/videos/{video_id}/content", headers=headers, timeout=300)
+            vr.raise_for_status()
+        if not vr.content:
+            raise RuntimeError(f"OpenAI video job {video_id} completed but returned no content")
+        job_seconds = job.get("seconds")
+        try:
+            duration_seconds = float(job_seconds) if job_seconds is not None else seconds
+        except (TypeError, ValueError):
+            duration_seconds = seconds
+        media = [GeneratedMedia(
+            data=vr.content,
+            mime_type="video/mp4",
+            filename=f"video_0_{uuid4().hex[:8]}.mp4",
+            width=_parse_dim(str(job.get("size") or ""), 0),
+            height=_parse_dim(str(job.get("size") or ""), 1),
+            duration_seconds=duration_seconds,
+        )]
         return GenerationResult(media=media, model=model, provider=self.name)
 
 

@@ -27,6 +27,8 @@ _SAFE_OPERANDS = {
     "role", "why", "rule", "cls", "i", "ok",                # conditions of `x ? '...' : '...'`
     "parts.map(esc).join('')",          # voice health banner
     "detailHtml",                        # voice-clone: built from esc() pieces just above
+    "clipHtml",                          # voice-clone clip report: built from esc() pieces just above
+    "mkSel(2)", "mkSel(3)", "mkSel(4)",  # pipeline stage <select>: esc() pieces and static stage names
     "URL.createObjectURL", "floatChunksToWav(collected, sr)",  # a local blob: URL
 }
 
@@ -63,21 +65,44 @@ def _innerhtml_operands(html: str) -> set[str]:
     js = _strip_esc_calls(_STR.sub("''", _template_to_concat(html.replace("\\'", ""))))
     found: set[str] = set()
     for m in re.finditer(r"\.innerHTML\s*\+?=", js):
-        # The statement ends at a top-level ';', at the bracket closing its enclosing block
-        # (`{ el.innerHTML = a + b }`), or at the end of the script text, never past it.
-        depth, j = 0, m.end()
-        while j < len(js) and not (js[j] == ";" and depth == 0):
-            if js[j] in "([{":
-                depth += 1
-            elif js[j] in ")]}":
-                depth -= 1
-                if depth < 0:
-                    break
-            j += 1
-        stmt = js[m.end():j]
+        stmt = js[m.end():_statement_end(js, m.end())]
         found |= set(re.findall(r"\+\s*\(?\s*(" + _OPERAND + ")", stmt))
         found |= set(re.findall(r"(" + _OPERAND + r")\s*\)?\s*\+", stmt))
+        # A bare value with no concatenation at all: `el.innerHTML = msg.content;`.
+        bare = re.fullmatch(r"\s*\(*\s*(" + _OPERAND + r")\s*\)*\s*", stmt)
+        if bare:
+            found.add(bare.group(1))
     return found
+
+
+# A line ending in one of these, or a next line starting with one, continues the expression;
+# any other top-level newline ends the statement (a simplified automatic semicolon insertion).
+_CONTINUES_AFTER = set("+-*/%(,[{?:=&|.<>!~^")
+_CONTINUES_BEFORE = set("+-*/%.,?:)]}&|<>=^")
+
+
+def _statement_end(js: str, start: int) -> int:
+    """Where the statement starting at ``start`` ends: a top-level ';', a top-level newline that
+    ASI would end it at, the bracket closing its enclosing block (`{ el.innerHTML = a + b }`),
+    or the end of the script text, never past it."""
+    depth, j = 0, start
+    while j < len(js):
+        c = js[j]
+        if depth == 0 and c == ";":
+            break
+        if depth == 0 and c == "\n":
+            before = js[start:j].rstrip()
+            after = js[j:].lstrip()
+            if before and before[-1] not in _CONTINUES_AFTER and (not after or after[0] not in _CONTINUES_BEFORE):
+                break
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+            if depth < 0:
+                break
+        j += 1
+    return j
 
 
 def _section(html: str, start: str, end: str) -> str:
@@ -122,6 +147,22 @@ class InnerHtmlScannerTests(unittest.TestCase):
         self.assertIn("raw", _innerhtml_operands("el.innerHTML = '<b>' + raw"))
         self.assertIn("raw", _innerhtml_operands("f(() => { el.innerHTML = '<b>' + raw })\nnext();"))
         self.assertIn("raw", _innerhtml_operands("el.innerHTML = ('<b>' + raw"))  # unbalanced to EOF
+
+    # pack-agent-composer-4acf0e712e
+    def test_bare_assignment_is_reported(self) -> None:
+        cases = ["el.innerHTML = msg.content;", "el.innerHTML = (data.html);", "el.innerHTML += x\n",
+                 "el.innerHTML = esc(msg.content);", "el.innerHTML = '';"]
+        self.assertEqual([_innerhtml_operands(c) for c in cases],
+                         [{"msg.content"}, {"data.html"}, {"x"}, set(), set()])
+
+    # pack-agent-composer-8b3748b243
+    def test_newline_ends_a_statement_unless_the_expression_continues(self) -> None:
+        cases = [
+            "el.innerHTML = '<b>' + a\nconst url = base + id;",
+            "el.innerHTML = '<b>' +\n  a\nother = b + c;",
+            "el.innerHTML = '<b>'\n  + a;\nother = b + c;",
+        ]
+        self.assertEqual([_innerhtml_operands(c) for c in cases], [{"a"}, {"a"}, {"a"}])
 
 
 class EscHelperTests(unittest.TestCase):
