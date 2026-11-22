@@ -42,6 +42,14 @@ Env vars:
   XTTS_KEEP_ALIVE_CPU  — idle seconds on CPU before full unload (default 600)
   XTTS_TEMPERATURE     — sampling temperature (default 0.7)
   XTTS_STREAM_CHUNK_SIZE — GPT tokens per streamed audio chunk (default 20)
+  XTTS_CPU_FALLBACK    — "1" (default): when the model can't be moved onto the GPU
+                         (CUDA OOM), synthesise on the CPU copy instead; "0": 503
+  XTTS_OOM_RETRY_AFTER_S — Retry-After on that 503 (default 30)
+
+  A synth request may send ``device: "cpu"`` (rag-chat does when argus-iris refuses
+  its GPU lease, #79): the model is used where it is (loaded to CPU if it isn't) and
+  is not promoted. A GPU promotion that runs out of memory moves the weights back to
+  the CPU and frees the cache, so the model stays usable (state ``cpu``).
   S3_ENDPOINT_URL / S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY /
   S3_BUCKET_NAME / S3_PUBLIC_URL
 """
@@ -62,7 +70,7 @@ import uuid
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from enum import Enum
-from typing import Optional
+from typing import Literal, Optional
 
 import structlog
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
@@ -81,6 +89,8 @@ KEEP_ALIVE_GPU: float = float(os.getenv("XTTS_KEEP_ALIVE_GPU", "120"))
 KEEP_ALIVE_CPU: float = float(os.getenv("XTTS_KEEP_ALIVE_CPU", "600"))
 TEMPERATURE: float = float(os.getenv("XTTS_TEMPERATURE", "0.7"))
 STREAM_CHUNK_SIZE: int = int(os.getenv("XTTS_STREAM_CHUNK_SIZE", "20"))
+CPU_FALLBACK: bool = os.getenv("XTTS_CPU_FALLBACK", "1").strip().lower() not in ("0", "false", "no", "off")
+OOM_RETRY_AFTER_S: int = int(os.getenv("XTTS_OOM_RETRY_AFTER_S", "30"))
 
 # Reference-clip preprocessing (applied at clone time, before latents).
 PREPROCESS: bool = os.getenv("XTTS_PREPROCESS", "1") == "1"
@@ -149,6 +159,11 @@ class TTSState(str, Enum):
     ERROR = "error"
 
 
+class GpuUnavailable(RuntimeError):
+    """The model could not be moved onto the GPU (CUDA out of memory). It is back on
+    the CPU, intact; the request is answered 503 with this reason, or runs on the CPU."""
+
+
 class XTTSModelManager:
     """Three-state lifecycle: unloaded → cpu → gpu (mirrors the Qwen sidecar)."""
 
@@ -210,8 +225,22 @@ class XTTSModelManager:
             self._model.cpu()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
-        else:
+            return
+        try:
             self._model.to(torch.device(device))
+        except BaseException as exc:
+            # A failed .to() leaves some weights on the GPU: put them all back, or
+            # every later request finds a model split across devices (#79).
+            self._model.cpu()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if isinstance(exc, Exception) and _is_cuda_oom(exc):
+                free = _free_vram_mb()
+                raise GpuUnavailable(
+                    f"CUDA out of memory moving XTTS onto {device}"
+                    + (f" ({free} MiB free)" if free is not None else "")
+                ) from exc
+            raise
 
     async def _do_load(self) -> None:
         try:
@@ -291,14 +320,43 @@ class XTTSModelManager:
     def active(self) -> int:
         return self._active
 
-    async def acquire(self) -> None:
-        """Promote to GPU and take a lease: until the matching ``release()``
-        the model is neither demoted nor unloaded."""
+    async def _ensure_loaded_locked(self) -> None:
+        """Load to CPU if nothing is resident; a model already on the GPU stays there.
+        Caller holds ``_lock``."""
+        await self._await_transition()
+        if self._state in (TTSState.UNLOADED, TTSState.ERROR):
+            self._state = TTSState.LOADING
+            await self._run_transition(self._do_load())
+        if self._state not in (TTSState.CPU, TTSState.GPU) or self._model is None:
+            raise RuntimeError(f"xtts model not ready (state {self._state.value})")
+
+    async def acquire(self, device: Optional[str] = None) -> str:
+        """Take a lease: until the matching ``release()`` the model is neither
+        moved nor unloaded. Returns where it runs (``cpu`` or ``XTTS_DEVICE``).
+
+        By default the model is promoted to the GPU. ``device="cpu"`` uses it where
+        it is, loading to CPU if needed. A promotion that runs out of memory runs
+        on the CPU (``XTTS_CPU_FALLBACK``) or raises :class:`GpuUnavailable`. While
+        CPU work holds a lease the model can't move, so other requests join it there."""
         async with self._lock:
-            await self._ensure_gpu_locked()
+            if not DEVICE.startswith("cuda"):
+                await self._ensure_gpu_locked()  # CPU-only deployment: "gpu" is the CPU
+            elif device == "cpu":
+                await self._ensure_loaded_locked()
+            elif self._state == TTSState.CPU and self._active > 0:
+                logger.info("xtts_gpu_deferred_cpu_work_in_flight", active=self._active)
+                await self._ensure_loaded_locked()
+            else:
+                try:
+                    await self._ensure_gpu_locked()
+                except GpuUnavailable as exc:
+                    if not CPU_FALLBACK:
+                        raise
+                    logger.warning("xtts_gpu_unavailable_running_on_cpu", reason=str(exc))
             self._active += 1
             self._last_used = time.time()
             self._cancel_evict()
+            return "cpu" if DEVICE.startswith("cuda") and self._state == TTSState.CPU else DEVICE
 
     def release(self) -> None:
         """Drop a lease (event-loop thread only). The idle timer starts from
@@ -309,10 +367,11 @@ class XTTSModelManager:
             self._arm_evict()
 
     @asynccontextmanager
-    async def lease(self):
-        await self.acquire()
+    async def lease(self, device: Optional[str] = None):
+        """``acquire()``/``release()`` around the body; yields where the model runs."""
+        ran_on = await self.acquire(device)
         try:
-            yield self._model
+            yield ran_on
         finally:
             self.release()
 
@@ -674,6 +733,14 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Voice Stack — XTTS-v2", version="1.0.0", lifespan=lifespan)
 
 
+@app.exception_handler(GpuUnavailable)
+async def _gpu_unavailable(_request, exc: GpuUnavailable) -> JSONResponse:
+    """No room on the GPU and no CPU fallback: busy, with the reason, never a bare 500 (#79)."""
+    logger.warning("xtts_gpu_unavailable", reason=str(exc))
+    return JSONResponse(status_code=503, content={"error": str(exc), "detail": str(exc)},
+                        headers={"Retry-After": str(OOM_RETRY_AFTER_S)})
+
+
 # ── Request models ────────────────────────────────────────────────────────────
 
 
@@ -686,6 +753,8 @@ class SynthesiseRequest(BaseModel):
     emotion: str = "neutral"                  # unused by XTTS; accepted for compat
     language: str = Field(default="en")
     speed: Optional[float] = None
+    # "cpu": don't promote to the GPU (rag-chat sends it when argus-iris refuses the lease).
+    device: Optional[Literal["cpu"]] = None
 
 
 def _is_cuda_oom(exc: BaseException) -> bool:
@@ -725,7 +794,7 @@ async def synthesise(req: SynthesiseRequest):
     t_req = time.monotonic()
     # The lease keeps the model on GPU from latent resolution to the end of
     # inference; the idle eviction can't move it mid-synthesis.
-    async with _mgr.lease():
+    async with _mgr.lease(req.device) as ran_on:
         t_ready = time.monotonic()
 
         try:
@@ -781,6 +850,7 @@ async def synthesise(req: SynthesiseRequest):
         upload_s=round(t_uploaded - t_encoded, 2),
         total_s=round(t_uploaded - t_req, 2),
         rtf=round((t_gen1 - t_gen0) / duration, 2) if duration else None,
+        device=ran_on,
     )
 
     return {
@@ -788,6 +858,7 @@ async def synthesise(req: SynthesiseRequest):
         "duration": duration,
         "duration_seconds": round(duration, 3),
         "format": "wav",
+        "device": ran_on,
     }
 
 
@@ -809,7 +880,7 @@ async def synthesise_stream(req: SynthesiseRequest):
     # demoted or unloaded between the 422 check and the stream starting (which
     # would mean a reload, or a failure after the 200 headers went out). It is
     # handed to the producer thread, which releases it when it is done.
-    await _mgr.acquire()
+    ran_on = await _mgr.acquire(req.device)
     handed_off = False
     try:
         # Resolve (and validate) the voice up front so a bad clone id is a 422,
@@ -924,6 +995,7 @@ async def synthesise_stream(req: SynthesiseRequest):
             "X-Sample-Rate": str(SAMPLE_RATE),
             "X-Audio-Format": "pcm_f32le",
             "X-Channels": "1",
+            "X-XTTS-Device": ran_on,
         },
     )
 

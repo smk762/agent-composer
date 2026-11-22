@@ -283,6 +283,13 @@ services:
       # unreachable. Empty auto-selects xtts when the default is something else.
       - TTS_FALLBACK_ENGINE=${TTS_FALLBACK_ENGINE:-}
       - TTS_URL=${TTS_URL:-http://xtts:8031}
+      # argus-iris leases for XTTS synth (#79, with ARGUS_GPU_COORDINATOR=broker): a grant
+      # on another node calls XTTS_NODE_URLS[node] (node=url,...), else iris's base_url.
+      # Refused on the last engine: run on the local XTTS CPU (1) or answer 503 (0).
+      - XTTS_NODE_URLS=${XTTS_NODE_URLS:-}
+      - XTTS_LEASE_CPU_FALLBACK=${XTTS_LEASE_CPU_FALLBACK:-1}
+      - XTTS_LEASE_VRAM_MB=${XTTS_LEASE_VRAM_MB:-2000}
+      - XTTS_LEASE_MODEL_MB=${XTTS_LEASE_MODEL_MB:-1800}
       # Extra GPU sidecars for the argus-iris gateway (/api/runtime/residents), as
       # name=url pairs. They are not TTS engines: the Qwen tts sidecar serves
       # argus-mask directly, and iris unloads it through rag-chat. Empty disables.
@@ -487,6 +494,9 @@ services:
       - XTTS_KEEP_ALIVE_CPU=${XTTS_KEEP_ALIVE_CPU:-600}
       - XTTS_TEMPERATURE=${XTTS_TEMPERATURE:-0.7}
       - XTTS_STREAM_CHUNK_SIZE=${XTTS_STREAM_CHUNK_SIZE:-20}
+      # No room to move onto the GPU (CUDA OOM): synthesise on the CPU copy (1) or 503 (0).
+      - XTTS_CPU_FALLBACK=${XTTS_CPU_FALLBACK:-1}
+      - XTTS_OOM_RETRY_AFTER_S=${XTTS_OOM_RETRY_AFTER_S:-30}
       - COQUI_TOS_AGREED=1
       # MinIO is on the stateful node (LAN), not an in-stack service.
       # S3_PUBLIC_URL is the host-reachable URL handed back to the browser.

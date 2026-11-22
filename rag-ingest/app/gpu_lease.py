@@ -3,7 +3,8 @@
 ``async with ollama_lease(model, kind=..., priority=...) as base_url:`` holds an
 ``ollama:<model>`` lease from the suite's GPU broker for its body and yields the Ollama
 base URL to call: the local ``OLLAMA_URL`` unless the broker placed the work on another
-node (spilling to jarrah), then that node's URL.
+node (spilling to jarrah), then that node's URL. :func:`service_lease` does the same for a
+service target such as ``xtts`` (#79), yielding the URL of the instance the broker chose.
 
 Off by default. ``ARGUS_GPU_COORDINATOR=broker`` turns it on, with argus-cortex's other
 ``ARGUS_GPU_*`` variables (``BROKER_URL``, ``BROKER_TOKEN``, ``TENANT``,
@@ -14,7 +15,7 @@ to ``none``, not cortex's ``lease``: a host flock would serialise every Ollama c
   A broker that answers with a 4xx (a bad token, an incompatible version) is logged and
   the call goes to local Ollama too: a config slip must not take chat and ingest down.
 * **Refusals are not OOMs.** A refused or timed-out lease raises
-  :class:`OllamaLeaseUnavailable`, which is not a ``RuntimeError``, and the lease is taken
+  :class:`GpuLeaseUnavailable` (alias ``OllamaLeaseUnavailable``), which is not a ``RuntimeError``, and the lease is taken
   outside ``run_with_oom_wait``, so the OOM loop never polls on it. Routes answer 503
   with ``Retry-After``.
 * **Pinned models** (``OLLAMA_LEASE_PINNED_MODELS``) carry a node constraint
@@ -108,13 +109,17 @@ PINNED_MODELS = _pinned_models()
 _priority: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("argus_priority", default=None)
 
 
-class OllamaLeaseUnavailable(Exception):
+class GpuLeaseUnavailable(Exception):
     """The broker refused the lease, or didn't grant it in time. Not an OOM: don't retry it as one."""
 
     def __init__(self, detail: str, *, retry_after: int | None = LEASE_RETRY_AFTER_S) -> None:
         super().__init__(detail)
         self.detail = detail
         self.retry_after = retry_after
+
+
+# The name the Ollama call sites (and main.py's 503 handler) use.
+OllamaLeaseUnavailable = GpuLeaseUnavailable
 
 
 class PriorityMiddleware:
@@ -237,76 +242,125 @@ def vet_node_url(url: str) -> str:
     if (parts is None or parts.scheme not in ("http", "https") or not parts.hostname
             or parts.username is not None or parts.password is not None
             or parts.path not in ("", "/") or parts.query or parts.fragment):
-        raise OllamaLeaseUnavailable(f"GPU broker gave an unusable node URL {url!r}: expected http(s)://host[:port]")
+        raise GpuLeaseUnavailable(f"GPU broker gave an unusable node URL {url!r}: expected http(s)://host[:port]")
     if _metadata_host(parts.hostname):
-        raise OllamaLeaseUnavailable(f"GPU broker gave a cloud metadata node URL {url!r}, which is never allowed")
+        raise GpuLeaseUnavailable(f"GPU broker gave a cloud metadata node URL {url!r}, which is never allowed")
     return f"{parts.scheme}://{parts.netloc}"
 
 
-def url_for(handle) -> str:
-    """Where to send the call: local Ollama unless the broker placed it on another node.
+def url_for(handle, home_url: str | None = None, node_urls: dict[str, str] | None = None,
+            node_urls_env: str = "OLLAMA_NODE_URLS") -> str:
+    """Where to send the call: the local service unless the broker placed it on another node.
 
-    A node in ``OLLAMA_NODE_URLS`` uses that URL; any other node's broker-supplied
-    ``base_url`` must pass :func:`vet_node_url` (else :class:`OllamaLeaseUnavailable`, a 503).
-    A grant on another node with no URL at all is refused too: running it on local Ollama
-    would load the model where the broker reserved nothing.
+    *home_url* is the local service (default ``OLLAMA_URL``) and *node_urls* the operator's
+    per-node URLs (default ``OLLAMA_NODE_URLS``). A node in *node_urls* uses that URL; any
+    other node's broker-supplied ``base_url`` must pass :func:`vet_node_url` (else
+    :class:`GpuLeaseUnavailable`, a 503). A grant on another node with no URL at all is
+    refused too: running it locally would load the model where the broker reserved nothing.
     """
+    home_url = OLLAMA_URL if home_url is None else home_url
+    node_urls = NODE_URLS if node_urls is None else node_urls
     if getattr(handle, "via", "local") != "broker":
-        return OLLAMA_URL
+        return home_url
     node = handle.node
-    if node and node in NODE_URLS:
-        return NODE_URLS[node]
+    if node and node in node_urls:
+        return node_urls[node]
     if not node or node == HOME_NODE:
-        return OLLAMA_URL
+        return home_url
     if not handle.base_url:
-        raise OllamaLeaseUnavailable(
-            f"GPU broker placed the call on node {node!r} without a URL, and OLLAMA_NODE_URLS has none for it")
+        raise GpuLeaseUnavailable(
+            f"GPU broker placed the call on node {node!r} without a URL, and {node_urls_env} has none for it")
     return vet_node_url(handle.base_url)
 
 
 @contextlib.asynccontextmanager
-async def ollama_lease(model: str, *, kind: str, priority: str, caller: str = "") -> AsyncIterator[str]:
-    """Hold an ``ollama:<model>`` lease for the body; yields the base URL to call."""
+async def _broker_lease(*, target: str, kind: str, priority: str, caller: str, min_vram_mb: int,
+                        model_mb: int | None, node: str | None) -> AsyncIterator[object | None]:
+    """Hold a lease on *target* for the body; yields its handle, or ``None`` when calls go
+    to the local service unleased (no broker configured, or a broker error: fails open).
+
+    A refusal or a timeout raises :class:`GpuLeaseUnavailable`. *node* constrains placement.
+    """
     coord = coordinator()
     if coord.name == "none":
-        yield OLLAMA_URL
+        yield None
         return
 
     from argus_cortex.gpu import GpuLeaseRefused, GpuLeaseTimeout
     from argus_cortex.gpu_broker import BrokerError
     from argus_cortex.gpu_wire import GpuConstraints
 
-    constraints = GpuConstraints(node=HOME_NODE) if HOME_NODE and model in PINNED_MODELS else None
     cm = coord.alease(
         caller=caller or kind,
-        min_vram_mb=vram_mb(model),
-        model_mb=model_mb(model),
+        min_vram_mb=min_vram_mb,
+        model_mb=model_mb,
         priority=_priority.get() or priority,
-        target=f"ollama:{model}",
+        target=target,
         kind=kind,
         preemptible=False,
-        constraints=constraints,
+        constraints=GpuConstraints(node=node) if node else None,
     )
     try:
         handle = await cm.__aenter__()
     except GpuLeaseRefused as exc:
-        raise OllamaLeaseUnavailable(f"GPU broker refused {kind} on ollama:{model}: {exc}", retry_after=None) from exc
+        raise GpuLeaseUnavailable(f"GPU broker refused {kind} on {target}: {exc}", retry_after=None) from exc
     except GpuLeaseTimeout as exc:
-        raise OllamaLeaseUnavailable(f"no GPU lease for {kind} on ollama:{model}: {exc}") from exc
+        raise GpuLeaseUnavailable(f"no GPU lease for {kind} on {target}: {exc}") from exc
     except BrokerError as exc:
-        log.error("GPU broker error for %s on ollama:%s (%s); calling local Ollama unleased", kind, model, exc)
-        yield OLLAMA_URL
+        log.error("GPU broker error for %s on %s (%s); calling the local service unleased", kind, target, exc)
+        yield None
         return
 
     # Everything after the grant runs inside the try, so the lease is released even if
-    # resolving the node's URL or logging the placement fails.
+    # the body (resolving the node's URL, logging the placement, the call) fails.
     try:
-        url = url_for(handle)
-        if url != OLLAMA_URL:
-            log.info("lease %s: %s on ollama:%s placed on %s (%s)", handle.lease_id, kind, model, handle.node, url)
-        yield url
+        yield handle
     except BaseException as exc:
         if not await cm.__aexit__(type(exc), exc, exc.__traceback__):
             raise
     else:
         await cm.__aexit__(None, None, None)
+
+
+@contextlib.asynccontextmanager
+async def ollama_lease(model: str, *, kind: str, priority: str, caller: str = "") -> AsyncIterator[str]:
+    """Hold an ``ollama:<model>`` lease for the body; yields the base URL to call."""
+    async with _broker_lease(
+        target=f"ollama:{model}", kind=kind, priority=priority, caller=caller,
+        min_vram_mb=vram_mb(model), model_mb=model_mb(model),
+        node=HOME_NODE if HOME_NODE and model in PINNED_MODELS else None,
+    ) as handle:
+        if handle is None:
+            yield OLLAMA_URL
+            return
+        url = url_for(handle)
+        if url != OLLAMA_URL:
+            log.info("lease %s: %s on ollama:%s placed on %s (%s)", handle.lease_id, kind, model, handle.node, url)
+        yield url
+
+
+@contextlib.asynccontextmanager
+async def service_lease(target: str, *, kind: str, priority: str, home_url: str, vram_mb: int,
+                        model_mb: int | None = None, node_urls: dict[str, str] | None = None,
+                        node_urls_env: str = "", pin_home: bool = False,
+                        caller: str = "") -> AsyncIterator[str]:
+    """Hold a lease on a service target (``xtts``) for the body; yields the base URL to call.
+
+    *home_url* is this stack's own instance, used for a grant on ``ARGUS_GPU_HOME_NODE``
+    (iris's ``base_url`` for it may be a gateway that only serves the resident contract)
+    and whenever calls go unleased. A grant elsewhere uses *node_urls*, else the broker's
+    vetted ``base_url``. *pin_home* keeps the work on the home node (a voice clone stored
+    only here).
+    """
+    async with _broker_lease(
+        target=target, kind=kind, priority=priority, caller=caller,
+        min_vram_mb=vram_mb, model_mb=model_mb,
+        node=HOME_NODE if pin_home and HOME_NODE else None,
+    ) as handle:
+        if handle is None:
+            yield home_url
+            return
+        url = url_for(handle, home_url, node_urls or {}, node_urls_env or "its node URLs")
+        if url != home_url:
+            log.info("lease %s: %s on %s placed on %s (%s)", handle.lease_id, kind, target, handle.node, url)
+        yield url

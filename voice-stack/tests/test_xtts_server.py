@@ -125,6 +125,118 @@ def mgr(monkeypatch):
     return m
 
 
+class _MovableModel:
+    """Records moves; .to() fails like a CUDA OOM while *oom* is set."""
+
+    def __init__(self):
+        self.oom = False
+        self.calls = []
+
+    def to(self, device):
+        self.calls.append(str(device))
+        if self.oom:
+            raise torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 20.00 MiB.")
+        return self
+
+    def cpu(self):
+        self.calls.append("cpu")
+        return self
+
+
+@pytest.fixture
+def cpu_mgr(monkeypatch):
+    """A manager whose load installs a model on the CPU; the real promote/move code runs (#79)."""
+    m = xs.XTTSModelManager()
+    model = _MovableModel()
+
+    async def load():
+        m._model = model
+        m._state = xs.TTSState.CPU
+
+    monkeypatch.setattr(m, "_do_load", load)
+    monkeypatch.setattr(xs, "DEVICE", "cuda:0")
+    monkeypatch.setattr(xs, "_free_vram_mb", lambda: 1)
+    m.keep_alive_gpu = m.keep_alive_cpu = -1
+    m.fake = model
+    return m
+
+
+def test_oom_on_promotion_puts_the_model_back_and_runs_on_cpu(cpu_mgr, monkeypatch):
+    monkeypatch.setattr(xs, "CPU_FALLBACK", True)
+    cpu_mgr.fake.oom = True
+
+    async def run():
+        async with cpu_mgr.lease() as ran_on:
+            assert ran_on == "cpu"
+            assert cpu_mgr.state == xs.TTSState.CPU
+        assert cpu_mgr.fake.calls == ["cuda:0", "cpu"]  # the failed move was undone
+        cpu_mgr.fake.oom = False  # room again: the next request promotes
+        async with cpu_mgr.lease() as ran_on:
+            assert ran_on == "cuda:0" and cpu_mgr.state == xs.TTSState.GPU
+
+    asyncio.run(run())
+
+
+def test_oom_on_promotion_without_fallback_raises_the_reason(cpu_mgr, monkeypatch):
+    monkeypatch.setattr(xs, "CPU_FALLBACK", False)
+    cpu_mgr.fake.oom = True
+
+    async def run():
+        with pytest.raises(xs.GpuUnavailable, match=r"out of memory moving XTTS onto cuda:0 \(1 MiB free\)"):
+            await cpu_mgr.acquire()
+        assert cpu_mgr.active == 0
+        assert cpu_mgr.state == xs.TTSState.CPU
+
+    asyncio.run(run())
+
+
+def test_a_non_oom_move_failure_is_undone_and_raised(cpu_mgr):
+    def broken(device):
+        cpu_mgr.fake.calls.append(device)
+        raise RuntimeError("CUDA error: device-side assert triggered")
+
+    cpu_mgr.fake.to = broken
+
+    async def run():
+        with pytest.raises(RuntimeError, match="device-side assert") as caught:
+            await cpu_mgr.acquire()
+        assert not isinstance(caught.value, xs.GpuUnavailable)
+        assert cpu_mgr.fake.calls[-1] == "cpu"
+
+    asyncio.run(run())
+
+
+def test_device_cpu_does_not_promote(cpu_mgr):
+    async def run():
+        async with cpu_mgr.lease("cpu") as ran_on:
+            assert ran_on == "cpu"
+        assert cpu_mgr.fake.calls == []
+        assert cpu_mgr.state == xs.TTSState.CPU
+
+    asyncio.run(run())
+
+
+def test_device_cpu_uses_a_model_already_on_the_gpu(cpu_mgr):
+    async def run():
+        async with cpu_mgr.lease():
+            pass
+        async with cpu_mgr.lease("cpu") as ran_on:
+            assert ran_on == "cuda:0"
+        assert cpu_mgr.fake.calls == ["cuda:0"]
+
+    asyncio.run(run())
+
+
+def test_cpu_work_in_flight_keeps_the_model_on_cpu(cpu_mgr):
+    async def run():
+        async with cpu_mgr.lease("cpu"):
+            async with cpu_mgr.lease() as ran_on:
+                assert ran_on == "cpu"  # moving it now would break the CPU run
+        assert cpu_mgr.fake.calls == []
+
+    asyncio.run(run())
+
+
 # ── d196101bad: leases block demote/unload ────────────────────────────────────
 
 
@@ -471,8 +583,8 @@ def test_cancelled_first_load_does_not_stick_in_loading(real_mgr, monkeypatch):
         assert m.active == 0 and not m._lock.locked()
         release.set()
         await _until(lambda: m.state == xs.TTSState.CPU)
-        async with m.lease() as model:
-            assert model is m.fake
+        async with m.lease() as ran_on:
+            assert m.model is m.fake and ran_on == "cuda:0"
             assert m.state == xs.TTSState.GPU
 
     asyncio.run(run())
@@ -487,8 +599,8 @@ def test_lease_during_orphaned_load_waits_for_the_model(real_mgr, monkeypatch):
         await _cancel_during(started, m.acquire)
 
         async def use():
-            async with m.lease() as model:
-                return model
+            async with m.lease():
+                return m.model
 
         t = asyncio.create_task(use())
         await asyncio.sleep(0.05)

@@ -15,7 +15,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app import gpu_lease
-from app.gpu_lease import OllamaLeaseUnavailable, PriorityMiddleware, ollama_lease
+from app.gpu_lease import GpuLeaseUnavailable, OllamaLeaseUnavailable, PriorityMiddleware, ollama_lease, service_lease
 from app.inference_retry import run_with_oom_wait
 
 LOCAL = "http://ollama:11434"
@@ -98,7 +98,7 @@ class OllamaLeaseTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(OllamaLeaseUnavailable, msg=bad):
                 async with ollama_lease("qwen3:8b", kind="chat", priority="interactive"):
                     self.fail("the body must not run against an unvetted node URL")
-            self.assertEqual(coord.exits, ["OllamaLeaseUnavailable"], bad)
+            self.assertEqual(coord.exits, ["GpuLeaseUnavailable"], bad)
         # OLLAMA_NODE_URLS is operator config and wins over the broker's URL
         self._use(_FakeCoordinator(GpuLease(via="broker", lease_id="L4", node="jarrah", base_url="http://169.254.169.254")))
         with patch.object(gpu_lease, "NODE_URLS", {"jarrah": "http://192.168.1.109:11434"}):
@@ -114,7 +114,7 @@ class OllamaLeaseTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(OllamaLeaseUnavailable, msg=bad):
                 async with ollama_lease("qwen3:8b", kind="chat", priority="interactive"):
                     self.fail("the body must not run against a cloud metadata address")
-            self.assertEqual(coord.exits, ["OllamaLeaseUnavailable"], bad)
+            self.assertEqual(coord.exits, ["GpuLeaseUnavailable"], bad)
         # other unique-local and LAN nodes stay usable
         for ok in ("http://[fd00:ec2::253]:11434", "http://100.100.100.201:11434"):
             self._use(_FakeCoordinator(GpuLease(via="broker", lease_id="L7", node="jarrah", base_url=ok)))
@@ -126,7 +126,7 @@ class OllamaLeaseTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(OllamaLeaseUnavailable, "without a URL"):
             async with ollama_lease("qwen3:8b", kind="chat", priority="interactive"):
                 self.fail("the body must not run on local Ollama for a lease on another node")
-        self.assertEqual(coord.exits, ["OllamaLeaseUnavailable"])
+        self.assertEqual(coord.exits, ["GpuLeaseUnavailable"])
 
     async def test_fallback_handle_means_local(self) -> None:
         self._use(_FakeCoordinator(GpuLease(via="fallback")))
@@ -225,6 +225,79 @@ class OllamaLeaseTest(unittest.IsolatedAsyncioTestCase):
                          (gpu_lease.vram_mb("qwen3:8b"), gpu_lease.model_mb("qwen3:8b")))
         self.assertEqual(seen[-1][1], "/leases/abc/release")
         self.assertEqual(seen[-1][2]["outcome"], "ok")
+
+
+XTTS_HOME = "http://xtts:8031"
+
+
+class ServiceLeaseTest(unittest.IsolatedAsyncioTestCase):
+    """service_lease (#79): a lease on a service target such as xtts."""
+
+    def setUp(self) -> None:
+        p = patch.object(gpu_lease, "HOME_NODE", "dragon")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _use(self, coordinator):
+        p = patch.object(gpu_lease, "_coordinator", coordinator)
+        p.start()
+        self.addCleanup(p.stop)
+        return coordinator
+
+    def _lease(self, **kw):
+        args = dict(kind="tts-synth", priority="interactive", home_url=XTTS_HOME, vram_mb=2000, model_mb=1800)
+        args.update(kw)
+        return service_lease("xtts", **args)
+
+    async def test_no_broker_means_the_home_instance(self) -> None:
+        self._use(NullCoordinator())
+        async with self._lease() as url:
+            self.assertEqual(url, XTTS_HOME)
+
+    async def test_home_grant_ignores_the_gateway_base_url(self) -> None:
+        # iris's base_url for dragon's xtts is rag-chat's resident gateway, which can't synthesise.
+        gateway = GpuLease(via="broker", lease_id="X1", node="dragon",
+                           base_url="http://192.168.1.198:9150/api/runtime/residents/xtts")
+        coord = self._use(_FakeCoordinator(gateway))
+        async with self._lease() as url:
+            self.assertEqual(url, XTTS_HOME)
+        req = coord.requests[0]
+        self.assertEqual((req["target"], req["kind"], req["min_vram_mb"], req["model_mb"]),
+                         ("xtts", "tts-synth", 2000, 1800))
+        self.assertIsNone(req["constraints"])
+        self.assertEqual(coord.exits, [None])
+
+    async def test_other_node_uses_its_configured_url_else_the_vetted_base_url(self) -> None:
+        grant = GpuLease(via="broker", lease_id="X2", node="morpheus", base_url="http://192.168.1.39:8141/")
+        self._use(_FakeCoordinator(grant))
+        async with self._lease() as url:
+            self.assertEqual(url, "http://192.168.1.39:8141")
+        async with self._lease(node_urls={"morpheus": "http://echo:8031"}) as url:
+            self.assertEqual(url, "http://echo:8031")
+
+    async def test_other_node_with_an_unusable_url_is_refused_and_released(self) -> None:
+        grant = GpuLease(via="broker", lease_id="X3", node="morpheus", base_url="http://169.254.169.254")
+        coord = self._use(_FakeCoordinator(grant))
+        with self.assertRaises(GpuLeaseUnavailable):
+            async with self._lease():
+                self.fail("body ran")
+        self.assertEqual(coord.exits, ["GpuLeaseUnavailable"])
+
+    async def test_pin_home_constrains_the_node(self) -> None:
+        coord = self._use(_FakeCoordinator())
+        async with self._lease(pin_home=True):
+            pass
+        self.assertEqual(coord.requests[0]["constraints"].node, "dragon")
+
+    async def test_refusal_and_timeout_raise_lease_errors(self) -> None:
+        for error, retry in ((GpuLeaseRefused("never fits"), None), (GpuLeaseTimeout("queued"), 30)):
+            self._use(_FakeCoordinator(error=error))
+            with self.assertRaises(GpuLeaseUnavailable) as caught:
+                async with self._lease():
+                    self.fail("body ran")
+            self.assertIn("tts-synth on xtts", caught.exception.detail)
+            self.assertEqual(caught.exception.retry_after, retry)
+            self.assertIs(OllamaLeaseUnavailable, GpuLeaseUnavailable)
 
 
 class VramAndPinsTest(unittest.TestCase):
