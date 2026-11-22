@@ -19,7 +19,7 @@ from app.routers import voice
 
 BASE = "http://tts-internal-host:8031"
 ALT = "http://fallback-host:8031"
-WHISPER = "http://whisper-internal:8030"
+WHISPER = "http://whisper-internal:8031"
 _RealAsyncClient = httpx.AsyncClient
 
 
@@ -262,6 +262,48 @@ class PacedFetchTests(_Base):
             r = self.client.post("/api/voice/synthesise", json={"text": "One. Two.", "pause_ms": 100})
         self.assertEqual(r.status_code, 200, r.text)
         self.assertNotIn("paced", r.json())
+
+
+class RehostOriginTests(unittest.TestCase):
+    """#81: echo's engines write to their own buckets on the same MinIO; those URLs are already reachable."""
+
+    def _rehost(self, url):
+        import asyncio
+
+        fetched = []
+
+        def handler(req):
+            fetched.append(str(req.url))
+            return httpx.Response(200, content=b"RIFF")
+
+        class _Client(_RealAsyncClient):
+            def __init__(self, *a, **kw):
+                kw["transport"] = httpx.MockTransport(handler)
+                super().__init__(*a, **kw)
+
+        class _S3:
+            def put_object(self, **kw):
+                pass
+
+        with patch.object(voice, "VOICE_S3_REHOST", True), \
+                patch.object(voice, "VOICE_S3_PUBLIC_URL", "http://minio:9000/voice"), \
+                patch.object(voice.httpx, "AsyncClient", _Client), \
+                patch.object(voice, "_voice_s3", lambda: _S3()):
+            return asyncio.run(voice._rehost_audio_url(url)), fetched
+
+    def test_another_bucket_on_the_same_store_is_served_as_is(self) -> None:
+        url = "http://minio:9000/voice-xtts/generated/voice/a.wav"
+        self.assertEqual(self._rehost(url), (url, []))
+
+    def test_another_host_is_rehosted(self) -> None:
+        out, fetched = self._rehost("http://miso-host:8034/media/a.wav")
+        self.assertTrue(out.startswith("http://minio:9000/voice/generated/voice/"), out)
+        self.assertEqual(fetched, ["http://miso-host:8034/media/a.wav"])
+
+    def test_a_prefix_lookalike_host_is_rehosted(self) -> None:
+        out, fetched = self._rehost("http://minio:90001/voice/a.wav")
+        self.assertEqual(len(fetched), 1)
+        self.assertTrue(out.startswith("http://minio:9000/voice/"))
 
 
 class EightBitSilenceTests(unittest.TestCase):

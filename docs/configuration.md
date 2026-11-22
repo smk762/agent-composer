@@ -17,7 +17,7 @@ Every service reads its settings from environment variables, which compose passe
 | `PROVIDER_ENCRYPTION_KEY` | rag-chat | (empty) | Passphrase (PBKDF2 → Fernet) that encrypts stored image/video provider API keys. **If unset, saving a provider key is refused (503)** and startup logs an error; set but unusable (`cryptography` missing) fails startup. Keys saved by older versions as plain base64 stay readable (re-save them to encrypt). Changing the passphrase later makes encrypted keys unreadable. |
 | `ALLOW_PLAINTEXT_PROVIDER_KEYS` | rag-chat | (unset) | `1` lets provider keys be saved without `PROVIDER_ENCRYPTION_KEY`, as `plain:`-prefixed base64. Development only. |
 | `CF_TUNNEL_TOKEN` | cloudflared | (empty) | Only needed with `--profile cloud` |
-| `BIND_ADDR`, `*_BIND_IP` | compose | `127.0.0.1` | Host interface for published ports (`RAG_CHAT_BIND_IP`, `RAG_INGEST_BIND_IP`, `OLLAMA_BIND_IP`, `WYOMING_{TTS,MISO,STT}_BIND_IP`, …) |
+| `BIND_ADDR`, `*_BIND_IP` | compose | `127.0.0.1` | Host interface for published ports (`RAG_CHAT_BIND_IP`, `RAG_INGEST_BIND_IP`, `OLLAMA_BIND_IP`, …) |
 
 Some rag-chat APIs are unauthenticated: guard, `/metrics`, and the read-only and generative voice, pipeline and repair calls. Destructive and git actions (clone delete, label replace, repair `apply`/`git_ops`) require auth. See [api.md](api.md#authentication). Binding rag-chat beyond loopback exposes the open routes.
 
@@ -84,8 +84,8 @@ Priority comes from the call site (`chat`, `embed-query` and `pipeline` are `int
 
 | Variable | Default | Notes |
 |---|---|---|
-| `WHISPER_URL` | `http://whisper:8030` | STT sidecar |
-| `XTTS_TTS_URL` | `http://xtts:8031` | Local XTTS engine |
+| `WHISPER_URL` | (empty = disabled) | argus-echo's Whisper, e.g. `http://<AGENT_HOST>:8144` |
+| `XTTS_TTS_URL` | (empty = disabled) | argus-echo's XTTS on the home node, e.g. `http://<AGENT_HOST>:8141` |
 | `MISO_TTS_URL` | (empty = disabled) | Remote Miso engine, e.g. `http://<GPU_HOST>:8034` |
 | `TTS_URL` | (empty) | Legacy knob: a URL that isn't a named engine is registered as engine `tts` |
 | `TTS_DEFAULT_ENGINE` | auto: `miso` if set, else `xtts` | |
@@ -93,13 +93,14 @@ Priority comes from the call site (`chat`, `embed-query` and `pipeline` are `int
 | `XTTS_NODE_URLS` | (empty) | With `ARGUS_GPU_COORDINATOR=broker`, XTTS synth leases the `xtts` target from argus-iris (#79). A grant on another node calls the URL given here (`node=url,…`), otherwise iris's `base_url` for it. A grant on the home node calls `XTTS_TTS_URL`. A voice clone stays on the home node |
 | `XTTS_LEASE_CPU_FALLBACK` | `1` | Lease refused or timed out on the last engine in the chain: `1` sends `device: "cpu"` to the local XTTS, `0` answers 503 with the broker's reason |
 | `XTTS_LEASE_VRAM_MB` / `XTTS_LEASE_MODEL_MB` | `2000` / `1800` | Footprint and weights each XTTS lease declares (match `gpu-tenant.yaml`'s `tts-synth`) |
-| `XTTS_CPU_FALLBACK` (xtts sidecar) | `1` | A GPU promotion that runs out of CUDA memory puts the weights back on the CPU. `1` synthesises there, `0` answers 503 with the reason (`Retry-After` = `XTTS_OOM_RETRY_AFTER_S`, default 30) |
 | `VOICE_TIMEOUT` | `30` | Proxy timeout (seconds) |
 | `VOICE_MAX_CLIPS` / `VOICE_CLIP_MAX_BYTES` | `16` / `16777216` | Clips per `/api/voice/clone` or `/api/voice/analyze` request, and bytes per clip; more is a 413 |
 | `MISO_SENTENCE_PAUSE_MS` / `MAX_SENTENCE_PAUSE_MS` | `300` / `2000` | Silence inserted between Miso sentences |
-| `S3_ENDPOINT_URL`, `S3_PUBLIC_URL`, `S3_BUCKET_NAME`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | | Shared "voice" MinIO bucket for clones and re-hosted audio |
+| `S3_ENDPOINT_URL`, `S3_PUBLIC_URL`, `S3_BUCKET_NAME`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY` | | The "voice" MinIO bucket for rag-chat's re-hosted and stitched audio. A clip already served from `S3_PUBLIC_URL`'s origin (any bucket there) isn't re-hosted |
 
-The sidecar-side settings (`XTTS_PREPROCESS*`, `XTTS_GPT_COND_LEN`, `MISO_KEEP_ALIVE_*`, Wyoming bridge vars) are described in `voice-stack/VOICE_CLONING.md` and `.env.example`.
+## Voice engines (argus-echo)
+
+Composer runs no voice engines (#81, `voice.md`): argus-echo runs them from its own compose, and their settings (buckets, keep-alives, `XTTS_CPU_FALLBACK`, Whisper limits, Wyoming bridges) are echo's.
 
 ## rag-chat: sidecars and repair
 

@@ -150,7 +150,8 @@ RUNTIME_EXTRA_RESIDENTS = _parse_residents(os.getenv("RUNTIME_EXTRA_RESIDENTS", 
 # selectable per request and one is the default — so the local XTTS GPU sidecar
 # and a remote Miso host (e.g. morpheus) can coexist and be picked from the UI,
 # the API, or the Wyoming/Home Assistant bridges.
-WHISPER_URL = os.getenv("WHISPER_URL", "http://whisper:8030").rstrip("/")
+# argus-echo's engines (#81): composer runs none, so unset means disabled.
+WHISPER_URL = os.getenv("WHISPER_URL", "").rstrip("/")
 VOICE_TIMEOUT = _env_int("VOICE_TIMEOUT", 30)
 # Reference clips /api/voice/clone and /api/voice/analyze accept per request, and the size of each
 # (bytes): they are buffered in memory before forwarding, so more is a 413.
@@ -163,7 +164,7 @@ def _clean_url(value: str) -> str:
 
 
 # Per-engine base URLs. Empty → that engine is not available.
-XTTS_TTS_URL = _clean_url(os.getenv("XTTS_TTS_URL", "http://xtts:8031"))
+XTTS_TTS_URL = _clean_url(os.getenv("XTTS_TTS_URL", ""))
 MISO_TTS_URL = _clean_url(os.getenv("MISO_TTS_URL", ""))
 # Legacy single-engine knob (back-compat): a custom engine speaking the same contract.
 _LEGACY_TTS_URL = _clean_url(os.getenv("TTS_URL", ""))

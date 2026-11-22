@@ -34,7 +34,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "info_leak_guard"
-SERVICES = ["rag-chat/app", "rag-ingest/app", "modernbert/app", "voice-stack", "infinity-manager"]
+SERVICES = ["rag-chat/app", "rag-ingest/app", "modernbert/app", "infinity-manager"]
 SKIP_DIRS = {"tests", "fixtures", "__pycache__", ".venv", "venv"}
 SAFE_ATTRS = {"status_code", "detail", "retry_after"}
 _MARKER = re.compile(r"#\s*info-leak:\s*(.*)$")

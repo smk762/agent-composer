@@ -53,9 +53,7 @@ class ResidentGatewayTest(unittest.TestCase):
             patch.object(auth, "DEV_AUTH_BYPASS", True),
             patch.object(runtime.httpx, "AsyncClient", _Upstream),
             patch.object(runtime, "MODERNBERT_URL", "http://mb:7998"),
-            patch.object(runtime, "WHISPER_URL", "http://whisper:8030"),
             patch.object(runtime, "INFINITY_URL", "http://inf:7997"),
-            patch.object(runtime, "TTS_ENGINES", {"xtts": "http://xtts:8031"}),
             patch.object(runtime, "ARGUS_ADMIN_TOKEN", ""),
         ):
             p.start()
@@ -64,28 +62,28 @@ class ResidentGatewayTest(unittest.TestCase):
     def test_requires_auth(self) -> None:
         with patch.object(auth, "DEV_AUTH_BYPASS", False):
             self.assertEqual(self.client.get("/api/runtime/residents").status_code, 401)
-            self.assertEqual(self.client.post("/api/runtime/residents/xtts/admin/unload").status_code, 401)
+            self.assertEqual(self.client.post("/api/runtime/residents/infinity/admin/unload").status_code, 401)
         self.assertEqual(_Upstream.calls, [])
 
     def test_unknown_resident_and_action(self) -> None:
         self.assertEqual(self.client.get("/api/runtime/residents/nope/health").status_code, 404)
-        self.assertEqual(self.client.post("/api/runtime/residents/xtts/admin/explode").status_code, 422)
+        self.assertEqual(self.client.post("/api/runtime/residents/infinity/admin/explode").status_code, 422)
         self.assertEqual(_Upstream.calls, [])
 
     def test_admin_relays_status_and_forwards_token(self) -> None:
-        _Upstream.answers["http://xtts:8031/admin/unload"] = (409, {"status": "busy", "active": 1})
+        _Upstream.answers["http://inf:7997/admin/unload"] = (409, {"status": "busy", "active": 1})
         with patch.object(runtime, "ARGUS_ADMIN_TOKEN", "s3cret"):
-            r = self.client.post("/api/runtime/residents/xtts/admin/unload")
+            r = self.client.post("/api/runtime/residents/infinity/admin/unload")
         self.assertEqual(r.status_code, 409)
         self.assertEqual(r.json()["status"], "busy")
         method, url, headers = _Upstream.calls[-1]
-        self.assertEqual((method, url), ("POST", "http://xtts:8031/admin/unload"))
+        self.assertEqual((method, url), ("POST", "http://inf:7997/admin/unload"))
         self.assertEqual(headers, {"Authorization": "Bearer s3cret"})
 
     def test_health_is_relayed_without_token(self) -> None:
-        _Upstream.answers["http://whisper:8030/health"] = (200, {"gpu": {"loaded": False}})
+        _Upstream.answers["http://inf:7997/health"] = (200, {"gpu": {"loaded": False}})
         with patch.object(runtime, "ARGUS_ADMIN_TOKEN", "s3cret"):
-            r = self.client.get("/api/runtime/residents/whisper/health")
+            r = self.client.get("/api/runtime/residents/infinity/health")
         self.assertEqual(r.json(), {"gpu": {"loaded": False}})
         self.assertEqual(_Upstream.calls[-1][2], {})
 
@@ -96,31 +94,30 @@ class ResidentGatewayTest(unittest.TestCase):
         )
         body = self.client.get("/api/runtime/residents").json()["residents"]
         by_name = {r["name"]: r for r in body}
-        self.assertEqual(set(by_name), {"modernbert", "whisper", "infinity", "xtts"})
+        self.assertEqual(set(by_name), {"modernbert", "infinity"})
         self.assertTrue(by_name["modernbert"]["reachable"])
         self.assertEqual(by_name["modernbert"]["gpu"]["model_state"], "gpu")
         self.assertIs(by_name["modernbert"]["busy"], True)
-        self.assertFalse(by_name["whisper"]["reachable"])
-        self.assertEqual(by_name["whisper"]["status_code"], 503)
+        self.assertFalse(by_name["infinity"]["reachable"])
+        self.assertEqual(by_name["infinity"]["status_code"], 503)
 
     def test_a_failing_sidecar_is_reachable_but_not_healthy(self) -> None:
         _Upstream.answers["http://mb:7998/health"] = (503, {"detail": "model load failed"})
-        _Upstream.answers["http://xtts:8031/health"] = (200, {"model_state": "gpu"})
+        _Upstream.answers["http://inf:7997/health"] = (200, {"model_state": "gpu"})
         by_name = {r["name"]: r for r in self.client.get("/api/runtime/residents").json()["residents"]}
         mb = by_name["modernbert"]
         self.assertEqual((mb["reachable"], mb["healthy"], mb["status_code"]), (True, False, 503))
         self.assertEqual(mb["detail"], "model load failed")
-        self.assertTrue(by_name["xtts"]["healthy"])
-        self.assertFalse(by_name["whisper"]["healthy"])  # unreachable
+        self.assertTrue(by_name["infinity"]["healthy"])
 
     def test_a_non_string_detail_does_not_break_the_listing(self) -> None:
         _Upstream.answers["http://mb:7998/health"] = (503, {"detail": {"code": "oom", "free_mb": 12}})
-        _Upstream.answers["http://xtts:8031/health"] = (500, {"error": 7})
+        _Upstream.answers["http://inf:7997/health"] = (500, {"error": 7})
         r = self.client.get("/api/runtime/residents")
         self.assertEqual(r.status_code, 200)
         by_name = {x["name"]: x for x in r.json()["residents"]}
         self.assertEqual(by_name["modernbert"]["detail"], '{"code": "oom", "free_mb": 12}')
-        self.assertEqual(by_name["xtts"]["detail"], "7")
+        self.assertEqual(by_name["infinity"]["detail"], "7")
 
     def test_unreachable_admin_is_503(self) -> None:
         self.assertEqual(self.client.post("/api/runtime/residents/modernbert/admin/wake").status_code, 503)
@@ -185,26 +182,24 @@ class ExtraResidentsTest(unittest.TestCase):
         )
         self.assertEqual(_parse_residents(""), {})
 
-    def test_extras_join_the_gateway_and_engines_win_on_a_clash(self) -> None:
-        extras = {"tts": "http://tts:8031/", "xtts": "http://elsewhere:1"}
+    def test_extras_join_the_gateway_and_backends_win_on_a_clash(self) -> None:
+        extras = {"tts": "http://tts:8031/", "modernbert": "http://elsewhere:1"}
         with patch.object(runtime, "RUNTIME_EXTRA_RESIDENTS", extras), \
-                patch.object(runtime, "TTS_ENGINES", {"xtts": "http://xtts:8031"}):
+                patch.object(runtime, "MODERNBERT_URL", "http://mb:7998"):
             found = runtime._residents()
         self.assertEqual(found["tts"], "http://tts:8031")
-        self.assertEqual(found["xtts"], "http://xtts:8031")
+        self.assertEqual(found["modernbert"], "http://mb:7998")
+
+    def test_voice_engines_are_echos_residents_not_the_gateways(self) -> None:
+        # #81: iris reaches argus-echo's engines directly; rag-chat only calls them by URL.
+        found = runtime._residents()
+        self.assertFalse({"xtts", "whisper", "miso", "tts"} & set(found), found)
 
     def test_an_unset_backend_does_not_drop_an_extra_resident(self) -> None:
         with patch.object(runtime, "RUNTIME_EXTRA_RESIDENTS", {"modernbert": "http://mb-elsewhere:7998"}), \
-                patch.object(runtime, "MODERNBERT_URL", ""), \
-                patch.object(runtime, "TTS_ENGINES", {"xtts": "http://xtts:8031", "tts": ""}):
+                patch.object(runtime, "MODERNBERT_URL", ""):
             found = runtime._residents()
         self.assertEqual(found["modernbert"], "http://mb-elsewhere:7998")
-        self.assertNotIn("tts", found)
-
-    def test_an_empty_engine_does_not_drop_the_extra_tts(self) -> None:
-        with patch.object(runtime, "RUNTIME_EXTRA_RESIDENTS", {"tts": "http://tts:8031"}), \
-                patch.object(runtime, "TTS_ENGINES", {"xtts": "http://xtts:8031", "tts": ""}):
-            self.assertEqual(runtime._residents()["tts"], "http://tts:8031")
 
     def test_env_reaches_the_gateway_but_not_the_engines(self) -> None:
         from app import config

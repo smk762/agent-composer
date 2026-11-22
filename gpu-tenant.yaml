@@ -27,10 +27,12 @@
 # rag-chat/tests/test_gpu_tenant.py checks that they agree. Miso is not listed: it runs on morpheus and is a
 # voluptas resident (voluptas/gpu-tenant.yaml). Nor is SingGuard: /api/guard/check proxies to
 # argus-retina's SingGuard server (GUARD_URL), which is its own tenant and takes its own leases.
-# Nor is Qwen TTS: it moved to argus-echo (argus-echo-qwen), whose resident iris reaches directly.
+# Nor are the voice engines (Whisper, XTTS, Qwen): argus-echo runs them on dragon from its own
+# compose and declares them in its manifest; iris reaches them directly (#81). Composer only
+# calls them by URL, leasing XTTS first (kind tts-synth).
 tenant_version: "1.0"
 tenant: agent-composer
-description: RAG chat and ingest, and the voice stack (STT, TTS, classifier, code embedder).
+description: RAG chat and ingest, the classifier and code embedder; voice requests proxied to argus-echo.
 repo: smk762/agent-composer
 node: dragon
 kinds:
@@ -74,8 +76,8 @@ kinds:
     priority: batch
   # rag-chat /api/voice/synthesise{,/stream,/pcm} on the local XTTS engine (#79): a lease
   # on the xtts service, so XTTS loads only where iris has room. A grant on dragon calls
-  # this stack's XTTS; one elsewhere calls that node's xtts service (XTTS_NODE_URLS, else
-  # iris's base_url). /pcm leases as realtime. Refused: the next engine, else XTTS on CPU.
+  # XTTS_TTS_URL (echo's XTTS there); one elsewhere calls that node's xtts service
+  # (XTTS_NODE_URLS, else iris's base_url). /pcm leases as realtime. Refused: the next engine, else XTTS on CPU.
   - kind: tts-synth
     description: Speech synthesis on XTTS-v2 someone is waiting on.
     target: xtts
@@ -104,28 +106,7 @@ residents:
     warm_path: /admin/wake
     admin_auth: false             # rag-chat adds ARGUS_ADMIN_TOKEN
 
-  # faster-whisper STT. No CPU stage (its /admin/evict is the same as unload), so no
-  # evict_path. Answers 409 busy while a transcription is running.
-  - name: whisper
-    adapter: argus-http
-    container: whisper
-    base_url: http://dragon:9150/api/runtime/residents/whisper
-    health_path: /health
-    unload_path: /admin/unload
-    warm_path: /admin/wake
-    admin_auth: false             # rag-chat adds ARGUS_ADMIN_TOKEN
 
-  # XTTS-v2, the default TTS engine. Answers 409 busy while synthesising.
-  - name: xtts
-    adapter: argus-http
-    container: xtts
-    base_url: http://dragon:9150/api/runtime/residents/xtts
-    health_path: /health
-    unload_path: /admin/unload
-    evict_path: /admin/evict
-    warm_path: /admin/wake
-    vram_mb: 2000                 # about 2 GB loaded
-    admin_auth: false             # rag-chat adds ARGUS_ADMIN_TOKEN
 
   # Infinity (CodeRankEmbed) behind its idle manager (INFINITY_IDLE_TIMEOUT stays on).
   # Evict is the same as unload, so no evict_path. Answers 409 busy with requests in flight.

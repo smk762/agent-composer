@@ -17,8 +17,6 @@ from app.routers import runtime
 
 MANIFEST = Path(__file__).resolve().parents[2] / "gpu-tenant.yaml"
 GATEWAY = "/api/runtime/residents/"
-# Remote engines are other tenants' residents (Miso is voluptas's, on morpheus).
-REMOTE = {"miso"}
 
 
 @unittest.skipUnless(MANIFEST.exists(), "gpu-tenant.yaml is in the repo checkout, not the image")
@@ -29,11 +27,10 @@ class GpuTenantManifestTest(unittest.TestCase):
         cls.http = {r["name"]: r for r in cls.manifest["residents"] if r["adapter"] == "argus-http"}
 
     def test_every_local_sidecar_is_listed(self) -> None:
-        # As compose configures dragon: xtts and miso engines, no gateway-only extras.
-        engines = {"xtts": "http://xtts:8031", "miso": "http://morpheus:8034"}
-        with patch.object(runtime, "TTS_ENGINES", engines), \
-                patch.object(runtime, "RUNTIME_EXTRA_RESIDENTS", {}):
-            local = set(runtime._residents()) - REMOTE
+        # As compose configures dragon: no gateway-only extras. Voice engines are argus-echo's
+        # residents (#81), so neither the gateway nor this manifest lists them.
+        with patch.object(runtime, "RUNTIME_EXTRA_RESIDENTS", {}):
+            local = set(runtime._residents())
         self.assertEqual(set(self.http), local)
 
     def test_argus_http_residents_go_through_the_gateway(self) -> None:
