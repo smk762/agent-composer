@@ -39,6 +39,10 @@ _VIDEO_MODELS = {
 _MODEL_REF_RE = re.compile(r"[a-z0-9][a-z0-9_.-]{0,99}/[a-z0-9][a-z0-9_.-]{0,99}(:[0-9a-f]{64})?", re.IGNORECASE)
 
 
+class _PredictionEnded(RuntimeError):
+    """Replicate finished the prediction as failed or canceled: nothing left to cancel."""
+
+
 def _resolve_model(model_key: str, known: dict) -> str:
     """A known alias, or a well-formed ``owner/name[:version]``; LookupError (400) otherwise."""
     if model_key in known:
@@ -117,7 +121,11 @@ class ReplicateProvider(ImageProvider, VideoProvider):
     async def _poll_prediction(self, pred_id: str) -> dict:
         try:
             return await self._poll_until_done(pred_id)
-        except (TimeoutError, asyncio.CancelledError):
+        except _PredictionEnded:
+            raise
+        except BaseException:
+            # Timeout, cancellation, a 5xx/429, a network error or a bad body: the caller gives
+            # up, so stop the prediction rather than leave it running (and billing) upstream.
             await self._cancel_prediction(pred_id)
             raise
 
@@ -135,7 +143,7 @@ class ReplicateProvider(ImageProvider, VideoProvider):
             if status == "succeeded":
                 return data
             if status in ("failed", "canceled"):
-                raise RuntimeError(f"Replicate prediction {status}: {data.get('error')}")
+                raise _PredictionEnded(f"Replicate prediction {status}: {data.get('error')}")
         raise TimeoutError("Replicate prediction timed out")
 
     async def generate_image(
