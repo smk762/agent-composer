@@ -123,5 +123,47 @@ class SupervisedLabelTests(unittest.IsolatedAsyncioTestCase):
             await clf._supervised("hello", 10, 0.0)
 
 
+class _TruncatingTokenizer:
+    """Word-level stand-in for an HF tokenizer's truncation=True: one sequence loses its tail;
+    a pair loses tokens from the longer sequence first (longest_first)."""
+
+    def __init__(self, max_length):
+        self.max_length = max_length
+        self.seen = []
+
+    def __call__(self, first, second=None, truncation=False, max_length=None, **_kw):
+        a = (first[0] if isinstance(first, list) else first).split()
+        b = (second[0] if isinstance(second, list) else second).split() if second else []
+        while truncation and len(a) + len(b) > max_length:
+            if len(a) >= len(b):
+                a.pop()
+            else:
+                b.pop()
+        self.seen.append(a + b)
+
+        class Inputs(dict):
+            def to(self, _device):
+                return self
+
+        return Inputs()
+
+
+class LongContextTests(unittest.IsolatedAsyncioTestCase):
+    async def test_long_context_never_truncates_away_the_text(self):
+        from app.schemas import ClassifyRequest
+
+        manager = FakeManager([0.9, 0.1])
+        manager.release.set()
+        manager.tokenizer = _TruncatingTokenizer(max_length=16)
+        clf = Classifier(manager)
+        clf.labels, clf.max_length = ["spam", "ham"], 16
+
+        context = ["old turn " * 20] * 5  # far past max_length on its own
+        await clf.classify(ClassifyRequest(text="current message", context=context))
+
+        self.assertTrue(manager.tokenizer.seen)
+        self.assertEqual(manager.tokenizer.seen[-1][-2:], ["current", "message"])
+
+
 if __name__ == "__main__":
     unittest.main()

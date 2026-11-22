@@ -76,11 +76,16 @@ class Classifier:
         m = mask.unsqueeze(-1).float()
         return (hidden * m).sum(1) / m.sum(1).clamp(min=1e-9)
 
-    def _encode_sync(self, texts: List[str]) -> torch.Tensor:
+    def _encode_sync(self, texts: List[str], context: Optional[str] = None) -> torch.Tensor:
+        """Embed ``texts``; a ``context`` goes first as the pair's other sequence.
+
+        Paired, ``truncation=True`` trims the longer sequence first, so a long context can't
+        truncate away the text itself (one joined sequence would lose its tail, the text)."""
         m = self.manager
         device = m.current_device()
+        args = ([context] * len(texts), texts) if context else (texts,)
         inputs = m.tokenizer(
-            texts, padding=True, truncation=True,
+            *args, padding=True, truncation=True,
             max_length=self.max_length, return_tensors="pt",
         ).to(device)
         with torch.no_grad():
@@ -94,13 +99,17 @@ class Classifier:
         threshold = req.threshold if req.threshold is not None else self.threshold
 
         turns = (req.context or [])[-5:]
-        text = (" [SEP] ".join(turns) + " [SEP] " + req.text) if turns else req.text
+        # The context and the text stay separate sequences down to the tokenizer, so
+        # truncation trims the context, never the message being classified.
+        context = " [SEP] ".join(turns) if turns else None
 
         if self.manager.task == "classify":
-            return await self._supervised(text, top_k, threshold)
-        return await self._zero_shot(text, top_k, threshold)
+            return await self._supervised(req.text, top_k, threshold, context)
+        return await self._zero_shot(req.text, top_k, threshold, context)
 
-    async def _zero_shot(self, text: str, top_k: int, threshold: float) -> ClassifyResponse:
+    async def _zero_shot(
+        self, text: str, top_k: int, threshold: float, context: Optional[str] = None
+    ) -> ClassifyResponse:
         # Snapshot the label set and its embeddings together (no await in between): a
         # concurrent update_labels() replaces both, and must not mix into this request.
         labels, label_embs = self.labels, self._label_embeddings
@@ -114,7 +123,7 @@ class Classifier:
 
             loop = asyncio.get_event_loop()
             text_emb = await loop.run_in_executor(
-                None, lambda: F.normalize(self._encode_sync([text]), dim=-1)
+                None, lambda: F.normalize(self._encode_sync([text], context), dim=-1)
             )
             label_embs = label_embs.to(text_emb.device)
             scores = (text_emb @ label_embs.T).squeeze(0).cpu().tolist()
@@ -131,7 +140,9 @@ class Classifier:
             model_state=self.manager.state,
         )
 
-    async def _supervised(self, text: str, top_k: int, threshold: float) -> ClassifyResponse:
+    async def _supervised(
+        self, text: str, top_k: int, threshold: float, context: Optional[str] = None
+    ) -> ClassifyResponse:
         # Snapshot the label set once: a concurrent update_labels() replaces self.labels, and
         # the names must be the ones the head size was chosen for.
         labels = self.labels
@@ -140,8 +151,9 @@ class Classifier:
 
         def _run():
             device = self.manager.current_device()
+            args = (context, text) if context else (text,)
             inputs = self.manager.tokenizer(
-                text, truncation=True, max_length=self.max_length, return_tensors="pt",
+                *args, truncation=True, max_length=self.max_length, return_tensors="pt",
             ).to(device)
             with torch.no_grad():
                 logits = self.manager.model(**inputs).logits
