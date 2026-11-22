@@ -629,7 +629,7 @@ async def health():
 # /health carries a ``gpu`` block, POST /admin/unload frees the model, and
 # /admin/wake preloads it. The admin routes need ``Authorization: Bearer <ARGUS_ADMIN_TOKEN>``.
 # They fail closed: with the token unset they answer 503, unless
-# ARGUS_ADMIN_INSECURE=1 explicitly opens them (local dev only). Same rule as tts_server.
+# ARGUS_ADMIN_INSECURE=1 explicitly opens them (local dev only). Same rule as xtts_server.
 
 
 def _require_admin(authorization: Optional[str] = Header(default=None)) -> None:

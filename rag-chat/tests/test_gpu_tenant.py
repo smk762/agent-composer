@@ -29,11 +29,10 @@ class GpuTenantManifestTest(unittest.TestCase):
         cls.http = {r["name"]: r for r in cls.manifest["residents"] if r["adapter"] == "argus-http"}
 
     def test_every_local_sidecar_is_listed(self) -> None:
-        # As compose configures dragon: xtts and miso engines, and the Qwen tts sidecar
-        # as a gateway-only resident (RUNTIME_EXTRA_RESIDENTS).
+        # As compose configures dragon: xtts and miso engines, no gateway-only extras.
         engines = {"xtts": "http://xtts:8031", "miso": "http://morpheus:8034"}
         with patch.object(runtime, "TTS_ENGINES", engines), \
-                patch.object(runtime, "RUNTIME_EXTRA_RESIDENTS", {"tts": "http://tts:8031"}):
+                patch.object(runtime, "RUNTIME_EXTRA_RESIDENTS", {}):
             local = set(runtime._residents()) - REMOTE
         self.assertEqual(set(self.http), local)
 
@@ -81,6 +80,10 @@ class GpuTenantManifestTest(unittest.TestCase):
         self.assertNotIn("guard", {k["kind"] for k in self.manifest["kinds"]})
         for r in self.manifest["residents"]:
             self.assertNotIn("singguard", (r["name"] + r.get("target", "")).lower())
+
+    def test_qwen_tts_is_not_composers(self) -> None:
+        # Qwen TTS is argus-echo's (argus-echo-qwen), its own tenant: the old tts sidecar is gone.
+        self.assertNotIn("tts", {r["name"] for r in self.manifest["residents"]})
 
 if __name__ == "__main__":
     unittest.main()

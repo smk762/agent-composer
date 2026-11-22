@@ -291,13 +291,12 @@ services:
       - XTTS_LEASE_VRAM_MB=${XTTS_LEASE_VRAM_MB:-2000}
       - XTTS_LEASE_MODEL_MB=${XTTS_LEASE_MODEL_MB:-1800}
       # Extra GPU sidecars for the argus-iris gateway (/api/runtime/residents), as
-      # name=url pairs. They are not TTS engines: the Qwen tts sidecar serves
-      # argus-mask directly, and iris unloads it through rag-chat. Empty disables.
-      - RUNTIME_EXTRA_RESIDENTS=${RUNTIME_EXTRA_RESIDENTS-tts=http://tts:8031}
+      # name=url pairs, never TTS engines. Empty (the default) adds none.
+      - RUNTIME_EXTRA_RESIDENTS=${RUNTIME_EXTRA_RESIDENTS:-}
       - VOICE_TIMEOUT=${VOICE_TIMEOUT:-180}
       # Shared "voice" MinIO bucket — lets the proxy re-host rendered audio from
       # remote engines (e.g. Miso on another subnet) so browsers always fetch it
-      # from the LAN-reachable S3_PUBLIC_URL. Same creds the tts/xtts sidecars use.
+      # from the LAN-reachable S3_PUBLIC_URL. Same creds the xtts sidecar uses.
       - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:?set S3_ENDPOINT_URL in .env (see .env.example)}
       - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
       - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
@@ -408,69 +407,10 @@ services:
       start_period: 30s
     networks: [internal]
 
-  # Qwen3-TTS — GPU text-to-speech (CustomVoice + Base model variants).
-  # GPU memory managed: models lazy-load on first request, demote to CPU after
-  # TTS_KEEP_ALIVE_GPU idle seconds, fully unload after TTS_KEEP_ALIVE_CPU.
-  # API: POST /synthesise, POST /synthesise/stream, GET /speakers,
-  #      POST /clone-voice, GET /health,
-  #      POST /admin/evict, POST /admin/unload, POST /admin/wake.
-  # /synthesise/stream is the argus-mask PCM contract (24 kHz pcm_f32le).
-  # Qwen returns the whole clip at the end; the route does not chunk mid-utterance.
-  tts:
-    build:
-      context: ./voice-stack
-      dockerfile: Dockerfile.tts
-      args:
-        TTS_MODEL_SIZE: "${TTS_MODEL_SIZE:-0.6b}"
-        TTS_TORCH_INDEX_URL: "https://download.pytorch.org/whl/cu124"
-    container_name: tts
-    restart: unless-stopped
-    environment:
-      # argus-iris resident contract: Bearer token for /admin/* (503 when empty: fails closed).
-      - ARGUS_ADMIN_TOKEN=${ARGUS_ADMIN_TOKEN:-}
-      - ARGUS_ADMIN_INSECURE=${ARGUS_ADMIN_INSECURE:-}  # 1 = open /admin/* with no token (dev only)
-      - TTS_MODEL_SIZE=${TTS_MODEL_SIZE:-0.6b}
-      - TTS_DEVICE=${TTS_DEVICE:-cuda:0}
-      - TTS_LOAD_MODELS=${TTS_LOAD_MODELS:-both}
-      - TTS_DEFAULT_SPEAKER=${TTS_DEFAULT_SPEAKER:-}
-      - TTS_PRELOAD=${TTS_PRELOAD:-0}
-      - TTS_KEEP_ALIVE_GPU=${TTS_KEEP_ALIVE_GPU:-120}
-      - TTS_KEEP_ALIVE_CPU=${TTS_KEEP_ALIVE_CPU:-600}
-      # MinIO is on the stateful node (LAN), not an in-stack service.
-      # S3_PUBLIC_URL is the host-reachable URL handed back to the browser.
-      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:?set S3_ENDPOINT_URL in .env (see .env.example)}
-      - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
-      - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
-      - S3_BUCKET_NAME=${S3_BUCKET_NAME:-voice}
-      - S3_PUBLIC_URL=${S3_PUBLIC_URL:?set S3_PUBLIC_URL in .env (see .env.example)}
-      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    depends_on:
-      minio-setup:
-        condition: service_completed_successfully
-    # argus-mask calls POST /synthesise/stream on this port. Unset TTS_BIND_IP
-    # follows BIND_ADDR; both unset stays on loopback.
-    ports:
-      - "${TTS_BIND_IP:-${BIND_ADDR:-127.0.0.1}}:${TTS_PORT:-8031}:8031"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8031/health', timeout=5).read()"]
-      interval: 30s
-      timeout: 5s
-      retries: 10
-      start_period: 120s
-    networks: [internal]
-
   # XTTS-v2 — GPU text-to-speech with zero-shot voice cloning + real streaming.
-  # Drop-in for the Qwen `tts` sidecar (same :8031 contract); the default TTS
-  # engine for rag-chat. Same three-state GPU lifecycle (lazy load, demote to
-  # CPU after XTTS_KEEP_ALIVE_GPU idle seconds, unload after XTTS_KEEP_ALIVE_CPU).
+  # The default TTS engine for rag-chat, serving the :8031 contract every engine
+  # speaks. Three-state GPU lifecycle (lazy load, demote to CPU after
+  # XTTS_KEEP_ALIVE_GPU idle seconds, unload after XTTS_KEEP_ALIVE_CPU).
   # API: POST /synthesise, POST /synthesise/stream, GET /speakers,
   #      POST /clone-voice, GET /health, POST /admin/{evict,unload,wake}.
   xtts:

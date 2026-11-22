@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 #
 # Self-contained Coqui XTTS-v2 image for agent-composer voice stack.
-# Drop-in replacement for the Qwen3-TTS sidecar (same port + HTTP contract),
-# adding zero-shot voice cloning with real streaming output.
+# Serves the voice stack's TTS engine contract on :8031, with zero-shot voice
+# cloning and real streaming output.
 FROM python:3.11-slim
 
 WORKDIR /app

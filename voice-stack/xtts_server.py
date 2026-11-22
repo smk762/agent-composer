@@ -1,8 +1,8 @@
 """
-XTTS-v2 server — FastAPI, port 8031 (drop-in for the Qwen3-TTS sidecar).
+XTTS-v2 server — FastAPI, port 8031.
 
 Coqui XTTS-v2 (via the maintained `coqui-tts` fork) for zero-shot voice cloning
-with streaming output. Exposes the same HTTP contract as the Qwen3-TTS server so
+with streaming output. Serves the TTS engine contract every rag-chat engine speaks, so
 rag-chat's voice proxy, the `voice` MinIO bucket, and the UI need no changes:
 
   POST /synthesise         — text → audio, uploaded to S3, returns {audio_url,...}
@@ -18,7 +18,7 @@ rag-chat's voice proxy, the `voice` MinIO bucket, and the UI need no changes:
   GET  /health             — status + GPU memory
   POST /admin/{evict,unload,wake}
 
-GPU memory lifecycle (three-state, like the Qwen sidecar / ModernBERT):
+GPU memory lifecycle (three-state, like ModernBERT):
   unloaded → cpu → gpu
 
   On request the model is promoted to GPU; after XTTS_KEEP_ALIVE_GPU idle
@@ -31,7 +31,7 @@ GPU memory lifecycle (three-state, like the Qwen sidecar / ModernBERT):
 
 A "voice clone" here is the pair (gpt_cond_latent, speaker_embedding) computed
 from the reference clip by get_conditioning_latents(); we torch.save it to S3
-under the same `voice_clones/{companion_id}/prompt.pt` key the Qwen path used.
+under the `voice_clones/{companion_id}/prompt.pt` key.
 
 Env vars:
   XTTS_MODEL           — Coqui model id (default tts_models/multilingual/multi-dataset/xtts_v2)
@@ -131,7 +131,7 @@ S3_PUBLIC_URL = os.getenv("S3_PUBLIC_URL", "http://localhost:9000/voice")
 SAMPLE_RATE = 24000  # XTTS-v2 output sample rate
 
 # XTTS-v2 supported languages → our public ISO codes accepted on the wire.
-# Qwen used "zh"; XTTS expects "zh-cn", so we normalise.
+# The wire takes "zh"; XTTS expects "zh-cn", so we normalise.
 ISO_TO_XTTS: dict[str, str] = {
     "en": "en", "es": "es", "fr": "fr", "de": "de", "it": "it",
     "pt": "pt", "pl": "pl", "tr": "tr", "ru": "ru", "nl": "nl",
@@ -165,7 +165,7 @@ class GpuUnavailable(RuntimeError):
 
 
 class XTTSModelManager:
-    """Three-state lifecycle: unloaded → cpu → gpu (mirrors the Qwen sidecar)."""
+    """Three-state lifecycle: unloaded → cpu → gpu."""
 
     def __init__(self) -> None:
         self.keep_alive_gpu = KEEP_ALIVE_GPU
@@ -1449,7 +1449,7 @@ async def analyze_clips(audio: list[UploadFile] = File(...)):
 
 
 # A clone's id is its S3 prefix (voice_clones/<id>/): one plain path segment,
-# the same rule as tts_server and rag-chat's gateway.
+# the same rule as rag-chat's gateway.
 _COMPANION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _COMPANION_ID_ERROR = "companion_id must be 1-64 characters of A-Z, a-z, 0-9, '_' or '-'"
 
@@ -1473,7 +1473,7 @@ async def clone_voice(
     (mono → resample → high-pass → Silero VAD trim → LUFS normalise); the
     response includes a per-clip `clips` report of what changed.
 
-    `reference_text` is accepted for API parity with the Qwen sidecar but XTTS
+    `reference_text` is accepted for parity with the engine contract but XTTS
     does not require a transcript to clone.
 
     ``companion_id`` must match ``^[A-Za-z0-9_-]{1,64}$`` (422 otherwise): it is
@@ -1964,7 +1964,7 @@ async def health():
 # POST /admin/evict demotes to CPU, /admin/unload frees the model, /admin/wake
 # preloads it. The admin routes need ``Authorization: Bearer <ARGUS_ADMIN_TOKEN>``.
 # They fail closed: with the token unset they answer 503, unless
-# ARGUS_ADMIN_INSECURE=1 explicitly opens them (local dev only). Same rule as tts_server.
+# ARGUS_ADMIN_INSECURE=1 explicitly opens them (local dev only). Same rule as whisper_server.
 
 
 def _admin_insecure() -> bool:
