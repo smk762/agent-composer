@@ -226,6 +226,18 @@ async def rag_context_for(msgs: List[Msg]) -> Optional[str]:
     return retrieval.format_context(hits, RAG_MAX_CONTEXT_CHARS)
 
 
+def _model_messages(client_msgs: List[Msg], ctx: Optional[str]) -> List[Msg]:
+    """What goes to the model: the server SYSTEM_PROMPT first, then the RAG context, then the
+    client's messages. A client ``system`` message is demoted to ``user``: it keeps its text but
+    can't replace the server prompt or frame the retrieved documents as an instruction."""
+    out = [Msg(role="system", content=SYSTEM_PROMPT)]
+    if ctx:
+        out.append(Msg(role="system", content=ctx))
+    for m in client_msgs:
+        out.append(m.model_copy(update={"role": "user"}) if m.role == "system" else m)
+    return out
+
+
 async def _conversation_for_user(db: AsyncSession, conversation_id: str, user_id: str) -> Conversation:
     stmt = (
         select(Conversation)
@@ -328,6 +340,12 @@ async def _save_stream_turn(db: AsyncSession, conv: Conversation, user_msg: str,
         await _prune_messages(db, conv.id)
     except Exception as e:
         log.error("chat: stream persist error: %s", e, exc_info=True)
+        # A failed flush/commit leaves the session in a failed transaction: roll back so the
+        # unsaved rows and dirty conversation fields don't poison its next use.
+        try:
+            await db.rollback()
+        except Exception as rb:
+            log.error("chat: rollback after stream persist error failed: %s", rb)
 
 
 async def _store_new_conversation(db: AsyncSession, conv: Conversation) -> None:
@@ -457,18 +475,15 @@ async def chat(
     if req.stream:
         from app.streaming import stream_ollama_chat, StreamError
 
+        # Model and RAG context before the response starts, so their failures (a 502, or no GPU
+        # lease for the embed) are a status code, not a 200 stream cut off with no error event.
+        # RAG context first: its embed takes a lease of its own, so it must not run while this
+        # request holds the chat lease in stream_gen.
+        model = await _resolve_model(requested_model)
+        msgs = _model_messages(req.messages, await rag_context_for(req.messages))
+
         async def stream_gen():
-            model = await _resolve_model(requested_model)
-
-            # RAG context first: its embed takes a lease of its own, so it must not run while
-            # this request holds the chat lease below.
-            msgs = req.messages
-            if not msgs or msgs[0].role != "system":
-                msgs = [Msg(role="system", content=SYSTEM_PROMPT)] + msgs
-            ctx = await rag_context_for(msgs)
-            if ctx:
-                msgs = [msgs[0], Msg(role="system", content=ctx)] + msgs[1:]
-
+            nonlocal model
             payload = {
                 "messages": [_msg_to_ollama_format(m) for m in msgs],
                 "stream": True,
@@ -572,13 +587,7 @@ async def chat(
     # NON-STREAMING PATH
     model = await _resolve_model(requested_model)
 
-    msgs = req.messages
-
-    if not msgs or msgs[0].role != "system":
-        msgs = [Msg(role="system", content=SYSTEM_PROMPT)] + msgs
-    ctx = await rag_context_for(msgs)
-    if ctx:
-        msgs = [msgs[0], Msg(role="system", content=ctx)] + msgs[1:]
+    msgs = _model_messages(req.messages, await rag_context_for(req.messages))
 
     payload = {
         "model": model,
