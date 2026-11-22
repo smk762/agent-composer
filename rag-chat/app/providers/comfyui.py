@@ -133,7 +133,7 @@ class ComfyUIProvider(ImageProvider, VideoProvider):
         """
         if seed is None:
             seed = secrets.randbits(63)
-        ckpt = _CHECKPOINT_MAP.get(model, model)
+        ckpt = _CHECKPOINT_MAP[model]
         return {
             "1": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": ckpt}},
             "2": {"class_type": "CLIPTextEncode", "inputs": {"text": prompt, "clip": ["1", 1]}},
@@ -166,6 +166,9 @@ class ComfyUIProvider(ImageProvider, VideoProvider):
         if not 1 <= n <= _MAX_IMAGES:
             raise LookupError(f"ComfyUI generates 1-{_MAX_IMAGES} images per request, got n={n}")
         model = model or "stable-diffusion-xl"
+        # Only mapped checkpoints: a raw name would let a caller load any checkpoint on the shared box.
+        if model not in _CHECKPOINT_MAP:
+            raise LookupError(f"Unknown ComfyUI model {model!r}: use one of {sorted(_CHECKPOINT_MAP)}")
         negative = negative_prompt or ""
 
         all_media: list[GeneratedMedia] = []
