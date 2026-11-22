@@ -289,10 +289,30 @@ async def admin_unload():
     return await _stop_if_idle()
 
 
+def _upstream_path(path: str) -> Optional[str]:
+    """Canonical upstream path for a proxied request, or None when it must not be proxied.
+
+    The captured path isn't normalised, but the upstream URL is (by yarl or the upstream), so
+    ``//admin``, ``./admin`` or ``x/../admin`` would reach the child's admin routes. Empty and
+    ``.`` segments are dropped, any ``..`` is refused, and ``admin`` is blocked in that form.
+    """
+    segments = path.split("/")
+    if ".." in segments:
+        return None
+    kept = [segment for segment in segments if segment not in ("", ".")]
+    if kept and kept[0] == "admin":
+        return None
+    canonical = "/".join(kept)
+    if canonical and path.endswith("/"):
+        canonical += "/"
+    return canonical
+
+
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
 async def proxy(path: str, request: Request) -> Response:
     global _active_requests, _last_used
-    if path.startswith("admin/"):
+    upstream_path = _upstream_path(path)
+    if upstream_path is None:
         raise HTTPException(404, detail="Not Found")
 
     await _ensure_started()
@@ -308,7 +328,7 @@ async def proxy(path: str, request: Request) -> Response:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.request(
                 request.method,
-                f"{UPSTREAM}/{path}",
+                f"{UPSTREAM}/{upstream_path}",
                 # multi_items keeps repeated keys (?a=1&a=2); a Mapping would keep only the last.
                 params=list(request.query_params.multi_items()),
                 data=body,
