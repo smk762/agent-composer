@@ -75,14 +75,26 @@ def _innerhtml_operands(html: str) -> set[str]:
     return found
 
 
+# A line ending in one of these, or a next line starting with one, continues the expression;
+# any other top-level newline ends the statement (a simplified automatic semicolon insertion).
+_CONTINUES_AFTER = set("+-*/%(,[{?:=&|.<>!~^")
+_CONTINUES_BEFORE = set("+-*/%.,?:)]}&|<>=^")
+
+
 def _statement_end(js: str, start: int) -> int:
-    """Where the statement starting at ``start`` ends: a top-level ';', the bracket closing its
-    enclosing block (`{ el.innerHTML = a + b }`), or the end of the script text, never past it."""
+    """Where the statement starting at ``start`` ends: a top-level ';', a top-level newline that
+    ASI would end it at, the bracket closing its enclosing block (`{ el.innerHTML = a + b }`),
+    or the end of the script text, never past it."""
     depth, j = 0, start
     while j < len(js):
         c = js[j]
         if depth == 0 and c == ";":
             break
+        if depth == 0 and c == "\n":
+            before = js[start:j].rstrip()
+            after = js[j:].lstrip()
+            if before and before[-1] not in _CONTINUES_AFTER and (not after or after[0] not in _CONTINUES_BEFORE):
+                break
         if c in "([{":
             depth += 1
         elif c in ")]}":
@@ -142,6 +154,15 @@ class InnerHtmlScannerTests(unittest.TestCase):
                  "el.innerHTML = esc(msg.content);", "el.innerHTML = '';"]
         self.assertEqual([_innerhtml_operands(c) for c in cases],
                          [{"msg.content"}, {"data.html"}, {"x"}, set(), set()])
+
+    # pack-agent-composer-8b3748b243
+    def test_newline_ends_a_statement_unless_the_expression_continues(self) -> None:
+        cases = [
+            "el.innerHTML = '<b>' + a\nconst url = base + id;",
+            "el.innerHTML = '<b>' +\n  a\nother = b + c;",
+            "el.innerHTML = '<b>'\n  + a;\nother = b + c;",
+        ]
+        self.assertEqual([_innerhtml_operands(c) for c in cases], [{"a"}, {"a"}, {"a"}])
 
 
 class EscHelperTests(unittest.TestCase):
