@@ -30,6 +30,7 @@ import re
 import time
 import uuid
 import wave
+import weakref
 from typing import Optional
 from urllib.parse import quote, urlsplit
 
@@ -805,6 +806,19 @@ async def _clone_exists(base: str, companion_id: str) -> Optional[bool]:
     return any(isinstance(c, dict) and c.get("companion_id") == companion_id for c in listed)
 
 
+# One lock per (engine, companion_id): the existence check and the engine's /clone-voice run
+# under it, so a second create can't land between them and overwrite the first (rag-chat runs
+# one uvicorn worker). Weak values: a lock goes once no request holds it.
+_clone_locks: "weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock]" = weakref.WeakValueDictionary()
+
+
+def _clone_lock(base: str, companion_id: str) -> asyncio.Lock:
+    lock = _clone_locks.get((base, companion_id))
+    if lock is None:
+        lock = _clone_locks[(base, companion_id)] = asyncio.Lock()
+    return lock
+
+
 def _slugify(name: str) -> str:
     # TTS sidecars accept companion ids of at most 64 chars ([A-Za-z0-9_-]).
     slug = _SLUG_RE.sub("-", (name or "").strip().lower()).strip("-")[:64].strip("-")
@@ -846,13 +860,6 @@ async def clone_voice(
     cid = (companion_id or "").strip() or _slugify(voice_name)
     _companion_segment(cid)
 
-    if not replace:
-        exists = await _clone_exists(base, cid)
-        if exists:
-            raise HTTPException(409, detail=f"Voice clone '{cid}' already exists; send replace=true to overwrite it")
-        if exists is None:
-            await require_user(request, db)
-
     files = await _read_clips(audio)
     form = {
         "companion_id": cid,
@@ -861,13 +868,23 @@ async def clone_voice(
         "replace": "true" if replace else "false",
     }
 
-    t0 = time.monotonic()
-    try:
-        async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
-            r = await client.post(f"{base}/clone-voice", files=files, data=form)
-            r.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise _upstream_error(exc, "TTS server")
+    async with _clone_lock(base, cid):
+        # Checked under the lock, right before the engine call, so the check still holds when
+        # the clone is written.
+        if not replace:
+            exists = await _clone_exists(base, cid)
+            if exists:
+                raise HTTPException(409, detail=f"Voice clone '{cid}' already exists; send replace=true to overwrite it")
+            if exists is None:
+                await require_user(request, db)
+
+        t0 = time.monotonic()
+        try:
+            async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
+                r = await client.post(f"{base}/clone-voice", files=files, data=form)
+                r.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise _upstream_error(exc, "TTS server")
 
     elapsed_ms = int((time.monotonic() - t0) * 1000)
     data = _json_body(r, "TTS server")
