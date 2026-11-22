@@ -263,7 +263,8 @@ async def _validate_via_tests(
             patch_err = data.get("patch_error", "patch did not apply cleanly")
             return False, [f"Patch apply error: {patch_err}"]
 
-        passed = data.get("passed", True)
+        # No default: a payload without a verdict ({} or {"error": ...}) is malformed, not a pass.
+        passed = data.get("passed")
         # Use failure_summary (pre-filtered, LLM-ready) as the canonical error source.
         # Never fall back to raw errors — they may contain infrastructure noise
         # (broken venv symlinks, missing runners) that would mislead the model.
