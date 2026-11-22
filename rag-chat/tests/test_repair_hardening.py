@@ -274,7 +274,7 @@ class ApplyInplaceTests(unittest.TestCase):
 
 class NonCanonicalLiteralTests(unittest.TestCase):
     def check(self, url):
-        return url_policy.check_audit_url(url, "audit_api_url", allowlist="192.168.1.198:8765,[::1]:8765,audit.lan:8765", configured=())
+        return url_policy.check_audit_url(url, "audit_api_url", allowlist="192.168.200.198:8765,[::1]:8765,audit.lan:8765", configured=())
 
     def test_decimal_and_hex_ipv4_are_link_local(self) -> None:
         for url in ("http://2852039166:8765/", "http://0xA9FEA9FE/", "http://0251.0376.0251.0376/"):
@@ -289,7 +289,7 @@ class NonCanonicalLiteralTests(unittest.TestCase):
             self.assertIn("link-local", self.check(url) or "", url)
 
     def test_lan_and_loopback_stay_allowed_by_the_allowlist(self) -> None:
-        for url in ("http://192.168.1.198:8765", "http://[::1]:8765", "http://audit.lan:8765"):
+        for url in ("http://192.168.200.198:8765", "http://[::1]:8765", "http://audit.lan:8765"):
             self.assertIsNone(self.check(url), url)
 
 
@@ -311,7 +311,7 @@ class ResolvedHostTests(unittest.TestCase):
 
         async def resolve(host, port):
             return {"metadata.evil.test": ["10.0.0.5", "169.254.169.254"],
-                    "audit.lan": ["192.168.1.198"]}.get(host) or []
+                    "audit.lan": ["192.168.200.198"]}.get(host) or []
 
         app = FastAPI()
         app.include_router(repair_router.router)

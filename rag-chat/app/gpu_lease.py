@@ -82,7 +82,7 @@ _DEFAULT_VRAM_MB = {"nomic-embed-text": 600}
 _DEFAULT_MODEL_MB = {"nomic-embed-text": 320, "qwen3:8b": 5300}
 
 
-# "jarrah=http://192.168.1.109:11434": the URL to call on a node, when the broker's
+# "<node>=http://<HOST>:11434": the URL to call on a node, when the broker's
 # base_url for it doesn't resolve from inside the container.
 NODE_URLS = {node: url.rstrip("/") for node, url in _pairs(os.getenv("OLLAMA_NODE_URLS", "")).items()}
 VRAM_MB = _mb_table("OLLAMA_LEASE_VRAM_MB", _DEFAULT_VRAM_MB)

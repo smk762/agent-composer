@@ -88,9 +88,9 @@ class OllamaLeaseTest(unittest.IsolatedAsyncioTestCase):
         self._use(_FakeCoordinator(spill))
         async with ollama_lease("qwen3:8b", kind="chat", priority="interactive") as url:
             self.assertEqual(url, "http://jarrah:11434")
-        with patch.object(gpu_lease, "NODE_URLS", {"jarrah": "http://192.168.1.109:11434"}):
+        with patch.object(gpu_lease, "NODE_URLS", {"jarrah": "http://192.168.200.109:11434"}):
             async with ollama_lease("qwen3:8b", kind="chat", priority="interactive") as url:
-                self.assertEqual(url, "http://192.168.1.109:11434")
+                self.assertEqual(url, "http://192.168.200.109:11434")
 
     async def test_unsafe_broker_url_is_refused_and_the_lease_released(self) -> None:
         for bad in ("http://169.254.169.254:80", "http://jarrah:11434/admin", "http://u:p@jarrah:11434"):
@@ -101,9 +101,9 @@ class OllamaLeaseTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(coord.exits, ["GpuLeaseUnavailable"], bad)
         # OLLAMA_NODE_URLS is operator config and wins over the broker's URL
         self._use(_FakeCoordinator(GpuLease(via="broker", lease_id="L4", node="jarrah", base_url="http://169.254.169.254")))
-        with patch.object(gpu_lease, "NODE_URLS", {"jarrah": "http://192.168.1.109:11434"}):
+        with patch.object(gpu_lease, "NODE_URLS", {"jarrah": "http://192.168.200.109:11434"}):
             async with ollama_lease("qwen3:8b", kind="chat", priority="interactive") as url:
-                self.assertEqual(url, "http://192.168.1.109:11434")
+                self.assertEqual(url, "http://192.168.200.109:11434")
 
     # pack-agent-composer-f5bc33e932
     async def test_metadata_addresses_outside_link_local_are_refused(self) -> None:
