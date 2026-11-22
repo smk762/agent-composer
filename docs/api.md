@@ -164,7 +164,7 @@ Errors: 400 for a bad request (retina's 400/422 detail relayed), 503 when `GUARD
 
 ### Voice (`routers/voice.py`)
 
-Proxies to the Whisper STT sidecar and a registry of TTS engines (`xtts`, `miso`, legacy `tts`). Synth requests take an `engine` field; the other routes take an `?engine=` query parameter. If you leave it out, the request uses `TTS_DEFAULT_ENGINE` and, on synth, falls back to `TTS_FALLBACK_ENGINE`. For clone input guidance, see argus-echo's `docs/voice-cloning.md`.
+Proxies to the Whisper STT sidecar and a registry of TTS engines (`xtts`, `miso`, and `tts` for a custom `TTS_URL`). Qwen TTS is not one of them: it lives in argus-echo (`argus-echo-qwen`), which apps call directly. Synth requests take an `engine` field; the other routes take an `?engine=` query parameter. If you leave it out, the request uses `TTS_DEFAULT_ENGINE` and, on synth, falls back to `TTS_FALLBACK_ENGINE`. For clone input guidance, see argus-echo's `docs/voice-cloning.md`.
 
 | Method | Path | Auth | Notes |
 |---|---|---|---|
@@ -228,7 +228,7 @@ All routes require **auth**.
 | GET | `/api/runtime/residents/{name}/health` |
 | POST | `/api/runtime/residents/{name}/admin/{unload\|evict\|wake}` |
 
-`residents` is the argus-iris gateway to the GPU sidecars (`modernbert`, `whisper`, `infinity`, each TTS engine, and the `RUNTIME_EXTRA_RESIDENTS` entries, by default the Qwen `tts` sidecar argus-mask uses), whose own ports are loopback-only. Status codes are relayed. The caller sends only a rag-chat API key; rag-chat adds its own `ARGUS_ADMIN_TOKEN` as the Bearer when it calls a sidecar's `/admin/*`, so set the same value on rag-chat and the sidecars. `gpu-tenant.yaml` at the repo root lists these residents for iris.
+`residents` is the argus-iris gateway to the GPU sidecars (`modernbert`, `whisper`, `infinity`, each TTS engine, and the `RUNTIME_EXTRA_RESIDENTS` entries, none by default), whose own ports are loopback-only. Status codes are relayed. The caller sends only a rag-chat API key; rag-chat adds its own `ARGUS_ADMIN_TOKEN` as the Bearer when it calls a sidecar's `/admin/*`, so set the same value on rag-chat and the sidecars. `gpu-tenant.yaml` at the repo root lists these residents for iris.
 
 ### Metrics
 
@@ -315,5 +315,5 @@ These are internal to the compose network unless noted. rag-chat proxies the one
 | `modernbert` | 7998 | `GET /health` (always 200; check `model_state`), `GET /model/status`, `POST /model/load\|evict\|unload`, `GET\|PUT /labels`, `POST /classify`, `POST /embed` |
 | `infinity` (infinity-manager) | 7997 (loopback) | Proxies the Infinity embeddings/rerank API to a child process that starts on demand and is evicted after `INFINITY_IDLE_TIMEOUT`; `GET /health`, `GET /admin/status`, `POST /admin/wake\|evict` |
 | `whisper` | 8031 | argus-echo's `stt` contract: `POST /transcribe`, `POST /transcriptions`, `WS /transcribe/stream` |
-| `xtts` / `miso` / `tts` | 8031 (Miso remote, 8034) | argus-echo's `tts` contract: `/synthesise`, `/synthesise/stream`, `/clone-voice`, `/clones`, `/speakers`, `/analyze-clips`, `/health` |
+| `xtts` / `miso` | 8031 (Miso remote, 8034) | argus-echo's `tts` contract: `/synthesise`, `/synthesise/stream`, `/clone-voice`, `/clones`, `/speakers`, `/analyze-clips`, `/health` |
 | `wyoming-xtts` / `wyoming-miso` / `wyoming-whisper` | 10200 / 10201 / 10300 | Wyoming protocol bridges for Home Assistant |

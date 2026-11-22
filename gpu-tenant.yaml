@@ -27,6 +27,7 @@
 # rag-chat/tests/test_gpu_tenant.py checks that they agree. Miso is not listed: it runs on morpheus and is a
 # voluptas resident (voluptas/gpu-tenant.yaml). Nor is SingGuard: /api/guard/check proxies to
 # argus-retina's SingGuard server (GUARD_URL), which is its own tenant and takes its own leases.
+# Nor is Qwen TTS: it moved to argus-echo (argus-echo-qwen), whose resident iris reaches directly.
 tenant_version: "1.0"
 tenant: agent-composer
 description: RAG chat and ingest, and the voice stack (STT, TTS, classifier, code embedder).
@@ -124,19 +125,6 @@ residents:
     evict_path: /admin/evict
     warm_path: /admin/wake
     vram_mb: 2000                 # about 2 GB loaded
-    admin_auth: false             # rag-chat adds ARGUS_ADMIN_TOKEN
-
-  # Qwen3-TTS. argus-mask calls it directly on :8031; it isn't one of rag-chat's TTS
-  # engines, so the gateway serves it through RUNTIME_EXTRA_RESIDENTS (compose default
-  # tts=http://tts:8031).
-  - name: tts
-    adapter: argus-http
-    container: tts
-    base_url: http://dragon:9150/api/runtime/residents/tts
-    health_path: /health
-    unload_path: /admin/unload
-    evict_path: /admin/evict
-    warm_path: /admin/wake
     admin_auth: false             # rag-chat adds ARGUS_ADMIN_TOKEN
 
   # Infinity (CodeRankEmbed) behind its idle manager (INFINITY_IDLE_TIMEOUT stays on).

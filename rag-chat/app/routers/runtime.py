@@ -211,9 +211,9 @@ def _residents() -> Dict[str, str]:
     # empty URLs first, so an unset backend never removes a resident another source configured.
     found: Dict[str, str] = {}
     for source in (
-        RUNTIME_EXTRA_RESIDENTS,  # e.g. tts (Qwen, used by argus-mask); never TTS engines
+        RUNTIME_EXTRA_RESIDENTS,  # gateway-only extras (none by default); never TTS engines
         {"modernbert": MODERNBERT_URL, "whisper": WHISPER_URL, "infinity": INFINITY_URL},
-        TTS_ENGINES,  # xtts, miso (remote), tts (legacy Qwen)
+        TTS_ENGINES,  # xtts, miso (remote), tts (a custom TTS_URL)
     ):
         found.update({name: url.rstrip("/") for name, url in source.items() if url})
     return found

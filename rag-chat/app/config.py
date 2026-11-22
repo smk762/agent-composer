@@ -139,8 +139,8 @@ def _parse_residents(raw: str) -> dict[str, str]:
 
 
 # GPU sidecars the /api/runtime/residents gateway serves that aren't rag-chat's own
-# backends, e.g. the Qwen tts sidecar argus-mask calls directly. Gateway only: they
-# don't become TTS engines. A name rag-chat already uses (an engine) wins.
+# backends (none by default). Gateway only: they don't become TTS engines. A name
+# rag-chat already uses (an engine) wins.
 RUNTIME_EXTRA_RESIDENTS = _parse_residents(os.getenv("RUNTIME_EXTRA_RESIDENTS", ""))
 
 # ── Voice services ────────────────────────────────────────────────────────────
@@ -165,14 +165,14 @@ def _clean_url(value: str) -> str:
 # Per-engine base URLs. Empty → that engine is not available.
 XTTS_TTS_URL = _clean_url(os.getenv("XTTS_TTS_URL", "http://xtts:8031"))
 MISO_TTS_URL = _clean_url(os.getenv("MISO_TTS_URL", ""))
-# Legacy single-engine knob (back-compat / rollback to the Qwen sidecar).
+# Legacy single-engine knob (back-compat): a custom engine speaking the same contract.
 _LEGACY_TTS_URL = _clean_url(os.getenv("TTS_URL", ""))
 
 # Human-friendly labels shown in the UI engine picker.
 TTS_ENGINE_LABELS = {
     "miso": "Miso One",
     "xtts": "XTTS-v2",
-    "tts": "Qwen3-TTS (legacy)",
+    "tts": "Custom (TTS_URL)",
 }
 
 # Build the registry in a stable, human-meaningful order.
@@ -181,7 +181,7 @@ for _name, _url in (("xtts", XTTS_TTS_URL), ("miso", MISO_TTS_URL)):
     if _url:
         TTS_ENGINES[_name] = _url
 # A custom TTS_URL that isn't already one of the named engines is registered as
-# its own "tts" engine (the legacy Qwen sidecar) so rollback keeps working.
+# its own "tts" engine.
 if _LEGACY_TTS_URL and _LEGACY_TTS_URL not in TTS_ENGINES.values():
     TTS_ENGINES["tts"] = _LEGACY_TTS_URL
 

@@ -11,8 +11,7 @@ services:
   # collections by rag-ingest on startup. Credentials live in .env.
 
   # One-shot MinIO provisioner (stateful node). Idempotently creates the voice
-  # buckets (rag-chat's re-hosted audio, and echo's per-engine XTTS and Qwen
-  # buckets) and the media bucket if missing and grants anonymous read on the generated-audio
+  # buckets (rag-chat's re-hosted audio, and echo's XTTS bucket) and the media bucket if missing and grants anonymous read on the generated-audio
   # prefix so browsers can play TTS output. Safe to re-run on every `up`.
   minio-setup:
     image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
@@ -24,7 +23,6 @@ services:
       - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
       - TTS_BUCKET=${S3_BUCKET_NAME:-voice}
       - XTTS_BUCKET=${XTTS_S3_BUCKET:-voice-xtts}
-      - QWEN_BUCKET=${QWEN_S3_BUCKET:-voice-qwen}
       - MEDIA_BUCKET=${MEDIA_S3_BUCKET:-uploads}
     entrypoint:
       - /bin/sh
@@ -32,12 +30,12 @@ services:
       - |
         set -e
         mc alias set stateful "$$S3_ENDPOINT_URL" "$$S3_ACCESS_KEY_ID" "$$S3_SECRET_ACCESS_KEY"
-        for b in "$$TTS_BUCKET" "$$XTTS_BUCKET" "$$QWEN_BUCKET"; do
+        for b in "$$TTS_BUCKET" "$$XTTS_BUCKET"; do
           mc mb --ignore-existing "stateful/$$b"
           mc anonymous set download "stateful/$$b/generated"
         done
         mc mb --ignore-existing "stateful/$$MEDIA_BUCKET"
-        echo "minio ready @ $$S3_ENDPOINT_URL: $$TTS_BUCKET $$XTTS_BUCKET $$QWEN_BUCKET (public: generated/), $$MEDIA_BUCKET (private)"
+        echo "minio ready @ $$S3_ENDPOINT_URL: $$TTS_BUCKET $$XTTS_BUCKET (public: generated/), $$MEDIA_BUCKET (private)"
     networks: [internal]
 
   # Local LLM runtime (kept internal; accessed by rag-ingest and rag-chat only)
@@ -296,13 +294,12 @@ services:
       - XTTS_LEASE_VRAM_MB=${XTTS_LEASE_VRAM_MB:-2000}
       - XTTS_LEASE_MODEL_MB=${XTTS_LEASE_MODEL_MB:-1800}
       # Extra GPU sidecars for the argus-iris gateway (/api/runtime/residents), as
-      # name=url pairs. They are not TTS engines: the Qwen tts sidecar serves
-      # argus-mask directly, and iris unloads it through rag-chat. Empty disables.
-      - RUNTIME_EXTRA_RESIDENTS=${RUNTIME_EXTRA_RESIDENTS-tts=http://tts:8031}
+      # name=url pairs, never TTS engines. Empty (the default) adds none.
+      - RUNTIME_EXTRA_RESIDENTS=${RUNTIME_EXTRA_RESIDENTS:-}
       - VOICE_TIMEOUT=${VOICE_TIMEOUT:-180}
       # Shared "voice" MinIO bucket — lets the proxy re-host rendered audio from
       # remote engines (e.g. Miso on another subnet) so browsers always fetch it
-      # from the LAN-reachable S3_PUBLIC_URL. Same creds the tts/xtts sidecars use.
+      # from the LAN-reachable S3_PUBLIC_URL. Same creds the xtts sidecar uses.
       - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:?set S3_ENDPOINT_URL in .env (see .env.example)}
       - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
       - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
@@ -373,7 +370,7 @@ services:
   # listens on 8031 inside the network, serves argus-cortex's resident contract
   # (/health, /admin/{evict,unload,wake}; ARGUS_ADMIN_TOKEN, fails closed when
   # empty unless ARGUS_ADMIN_INSECURE=1) and loads lazily. Their own settings are
-  # documented in echo (docs/xtts.md, docs/qwen.md, docs/whisper.md, docs/api.md).
+  # documented in echo (docs/xtts.md, docs/whisper.md, docs/api.md).
   # ECHO_TAG pins the release; bump it to upgrade.
 
   # Whisper large-v3-turbo (faster-whisper; weights baked into the image).
@@ -413,59 +410,6 @@ services:
       timeout: 5s
       retries: 5
       start_period: 30s
-    networks: [internal]
-
-  # Qwen3-TTS (CustomVoice + Base). Built from echo's source at ECHO_TAG because
-  # the published image bakes 0.6b and TTS_MODEL_SIZE picks the weights baked in.
-  # argus-mask's PCM contract (POST /synthesise/stream, 24 kHz pcm_f32le); not one
-  # of rag-chat's engines (a gateway-only resident via RUNTIME_EXTRA_RESIDENTS).
-  tts:
-    build:
-      context: https://github.com/smk762/argus-echo.git#v${ECHO_TAG:-0.2.0}:engines/qwen
-      args:
-        TTS_MODEL_SIZE: "${TTS_MODEL_SIZE:-0.6b}"
-        ECHO_VERSION: "${ECHO_TAG:-0.2.0}"   # /health `image.version`, as echo's release images carry
-    image: argus-echo-qwen:${ECHO_TAG:-0.2.0}-${TTS_MODEL_SIZE:-0.6b}
-    container_name: tts
-    restart: unless-stopped
-    environment:
-      - ARGUS_ADMIN_TOKEN=${ARGUS_ADMIN_TOKEN:-}
-      - ARGUS_ADMIN_INSECURE=${ARGUS_ADMIN_INSECURE:-}  # 1 = open /admin/* with no token (dev only)
-      - TTS_MODEL_SIZE=${TTS_MODEL_SIZE:-0.6b}
-      - TTS_DEVICE=${TTS_DEVICE:-cuda:0}
-      - TTS_LOAD_MODELS=${TTS_LOAD_MODELS:-both}
-      - TTS_DEFAULT_SPEAKER=${TTS_DEFAULT_SPEAKER:-}
-      - TTS_PRELOAD=${TTS_PRELOAD:-0}
-      - TTS_KEEP_ALIVE_GPU=${TTS_KEEP_ALIVE_GPU:-120}
-      - TTS_KEEP_ALIVE_CPU=${TTS_KEEP_ALIVE_CPU:-600}
-      # Echo keeps each engine's clones in its own bucket (they share keys, not formats).
-      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:?set S3_ENDPOINT_URL in .env (see .env.example)}
-      - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
-      - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
-      - S3_BUCKET_NAME=${QWEN_S3_BUCKET:-voice-qwen}
-      - S3_PUBLIC_URL=${QWEN_S3_PUBLIC_URL:?set QWEN_S3_PUBLIC_URL in .env (see .env.example)}
-      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    depends_on:
-      minio-setup:
-        condition: service_completed_successfully
-    # argus-mask calls POST /synthesise/stream on this port. Unset TTS_BIND_IP
-    # follows BIND_ADDR; both unset stays on loopback.
-    ports:
-      - "${TTS_BIND_IP:-${BIND_ADDR:-127.0.0.1}}:${TTS_PORT:-8031}:8031"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8031/health', timeout=5).read()"]
-      interval: 30s
-      timeout: 5s
-      retries: 10
-      start_period: 120s
     networks: [internal]
 
   # XTTS-v2 (weights baked into the image): rag-chat's default engine. Clones go to

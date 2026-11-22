@@ -659,8 +659,8 @@ async def synthesise_pcm(req: SynthesiseRequest):
     Proxies `{TTS_URL}/synthesise/stream` byte-for-byte (24 kHz mono float32,
     `pcm_f32le`) so the browser can begin playback on the first chunk (~0.2 s)
     instead of waiting for whole-sentence WAVs. Forwards the upstream audio
-    layout headers. The XTTS-v2 and Miso sidecars implement this; the legacy Qwen
-    sidecar returns 404, which surfaces here as an upstream error.
+    layout headers. The XTTS-v2 and Miso sidecars implement this; an engine that
+    doesn't returns 404, which surfaces here as an upstream error.
     """
     _require_tts()
     chain = tts_engine_chain(req.engine)
