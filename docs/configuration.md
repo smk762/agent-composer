@@ -17,7 +17,7 @@ Every service reads its settings from environment variables, which compose passe
 | `PROVIDER_ENCRYPTION_KEY` | rag-chat | (empty) | Passphrase (PBKDF2 → Fernet) that encrypts stored image/video provider API keys. **If unset, saving a provider key is refused (503)** and startup logs an error; set but unusable (`cryptography` missing) fails startup. Keys saved by older versions as plain base64 stay readable (re-save them to encrypt). Changing the passphrase later makes encrypted keys unreadable. |
 | `ALLOW_PLAINTEXT_PROVIDER_KEYS` | rag-chat | (unset) | `1` lets provider keys be saved without `PROVIDER_ENCRYPTION_KEY`, as `plain:`-prefixed base64. Development only. |
 | `CF_TUNNEL_TOKEN` | cloudflared | (empty) | Only needed with `--profile cloud` |
-| `BIND_ADDR`, `*_BIND_IP` | compose | `127.0.0.1` | Host interface for published ports (`RAG_CHAT_BIND_IP`, `RAG_INGEST_BIND_IP`, `OLLAMA_BIND_IP`, `WYOMING_{TTS,MISO,STT}_BIND_IP`, …) |
+| `BIND_ADDR`, `*_BIND_IP` | compose | `127.0.0.1` | Host interface for published ports (`RAG_CHAT_BIND_IP`, `RAG_INGEST_BIND_IP`, `OLLAMA_BIND_IP`, …) |
 
 Some rag-chat APIs are unauthenticated: guard, `/metrics`, and the read-only and generative voice, pipeline and repair calls. Destructive and git actions (clone delete, label replace, repair `apply`/`git_ops`) require auth. See [api.md](api.md#authentication). Binding rag-chat beyond loopback exposes the open routes.
 
@@ -84,8 +84,8 @@ Priority comes from the call site (`chat`, `embed-query` and `pipeline` are `int
 
 | Variable | Default | Notes |
 |---|---|---|
-| `WHISPER_URL` | `http://whisper:8031` | STT engine (argus-echo) |
-| `XTTS_TTS_URL` | `http://xtts:8031` | Local XTTS engine |
+| `WHISPER_URL` | (empty = disabled) | argus-echo's Whisper, e.g. `http://<AGENT_HOST>:8144` |
+| `XTTS_TTS_URL` | (empty = disabled) | argus-echo's XTTS on the home node, e.g. `http://<AGENT_HOST>:8141` |
 | `MISO_TTS_URL` | (empty = disabled) | Remote Miso engine, e.g. `http://<GPU_HOST>:8034` |
 | `TTS_URL` | (empty) | Legacy knob: a URL that isn't a named engine is registered as engine `tts` |
 | `TTS_DEFAULT_ENGINE` | auto: `miso` if set, else `xtts` | |
@@ -100,16 +100,7 @@ Priority comes from the call site (`chat`, `embed-query` and `pipeline` are `int
 
 ## Voice engines (argus-echo)
 
-The engines run argus-echo's images (`voice.md`, #81). Engine settings are echo's: see its docs (`docs/xtts.md`, `docs/whisper.md`). The compose-level ones:
-
-| Variable | Default | Notes |
-|---|---|---|
-| `ECHO_TAG` | `0.2.0` | argus-echo release for every engine and bridge image |
-| `XTTS_S3_BUCKET` / `XTTS_S3_PUBLIC_URL` | `voice-xtts` / required | XTTS clones and rendered audio; the bucket echo's XTTS on morpheus shares |
-| `XTTS_CPU_FALLBACK` / `XTTS_OOM_RETRY_AFTER_S` | `1` / `30` | A GPU promotion that runs out of CUDA memory runs on the CPU (`1`) or answers 503 with the reason |
-| `STT_MAX_UPLOAD_MB` | `100` | Largest audio Whisper accepts |
-| `STT_AUDIO_URL_ALLOWED_HOSTS` | (empty) | Internal hosts `/transcriptions` may fetch `audio_url` from |
-| `WYOMING_STT_MAX_SECONDS` | `120` | Longest utterance the Home Assistant STT bridge buffers |
+Composer runs no voice engines (#81, `voice.md`): argus-echo runs them from its own compose, and their settings (buckets, keep-alives, `XTTS_CPU_FALLBACK`, Whisper limits, Wyoming bridges) are echo's.
 
 ## rag-chat: sidecars and repair
 

@@ -10,9 +10,10 @@ services:
   # below; PostgreSQL schema by rag-chat's init (bootstrap_db + alembic); Qdrant
   # collections by rag-ingest on startup. Credentials live in .env.
 
-  # One-shot MinIO provisioner (stateful node). Idempotently creates the voice
-  # buckets (rag-chat's re-hosted audio, and echo's XTTS bucket) and the media bucket if missing and grants anonymous read on the generated-audio
-  # prefix so browsers can play TTS output. Safe to re-run on every `up`.
+  # One-shot MinIO provisioner (stateful node). Idempotently creates rag-chat's
+  # voice bucket (re-hosted and stitched audio) and the media bucket if missing,
+  # and grants anonymous read on the generated-audio prefix so browsers can play
+  # it. argus-echo provisions its engines' own buckets. Safe to re-run on every `up`.
   minio-setup:
     image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
     container_name: minio-setup
@@ -22,7 +23,6 @@ services:
       - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
       - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
       - TTS_BUCKET=${S3_BUCKET_NAME:-voice}
-      - XTTS_BUCKET=${XTTS_S3_BUCKET:-voice-xtts}
       - MEDIA_BUCKET=${MEDIA_S3_BUCKET:-uploads}
     entrypoint:
       - /bin/sh
@@ -30,12 +30,10 @@ services:
       - |
         set -e
         mc alias set stateful "$$S3_ENDPOINT_URL" "$$S3_ACCESS_KEY_ID" "$$S3_SECRET_ACCESS_KEY"
-        for b in "$$TTS_BUCKET" "$$XTTS_BUCKET"; do
-          mc mb --ignore-existing "stateful/$$b"
-          mc anonymous set download "stateful/$$b/generated"
-        done
+        mc mb --ignore-existing "stateful/$$TTS_BUCKET"
+        mc anonymous set download "stateful/$$TTS_BUCKET/generated"
         mc mb --ignore-existing "stateful/$$MEDIA_BUCKET"
-        echo "minio ready @ $$S3_ENDPOINT_URL: $$TTS_BUCKET $$XTTS_BUCKET (public: generated/), $$MEDIA_BUCKET (private)"
+        echo "minio ready @ $$S3_ENDPOINT_URL: $$TTS_BUCKET (public: generated/), $$MEDIA_BUCKET (private)"
     networks: [internal]
 
   # Local LLM runtime (kept internal; accessed by rag-ingest and rag-chat only)
@@ -273,19 +271,20 @@ services:
       - AUDIT_API_ALLOWED_HOSTS=${AUDIT_API_ALLOWED_HOSTS:-}
       - AI_AUDIT_API_TOKEN=${AI_AUDIT_API_TOKEN:-}
       # Voice services. STT is Whisper; TTS is a registry of selectable engines.
-      - WHISPER_URL=${WHISPER_URL:-http://whisper:8031}
-      # TTS engines (all speak the XTTS sidecar contract). XTTS is the local GPU
-      # sidecar; MISO_TTS_URL points at the remote Miso host (e.g. morpheus) and
-      # is empty (disabled) until set. TTS_DEFAULT_ENGINE picks the default;
-      # set it to xtts to roll back if Miso is unavailable. The legacy TTS_URL
-      # is still honoured as a fallback engine.
-      - XTTS_TTS_URL=${XTTS_TTS_URL:-http://xtts:8031}
+      # Voice engines are argus-echo's, run by echo's own compose (on dragon,
+      # ~/argus-echo, published on ECHO_BIND), not by this stack (#81). rag-chat
+      # only proxies to them: set these to echo's engines, e.g.
+      # http://<AGENT_HOST>:8144 (whisper) and :8141 (xtts). Empty disables that
+      # engine. TTS_DEFAULT_ENGINE picks the default; TTS_URL names an optional
+      # custom engine ("tts").
+      - WHISPER_URL=${WHISPER_URL:-}
+      - XTTS_TTS_URL=${XTTS_TTS_URL:-}
       - MISO_TTS_URL=${MISO_TTS_URL:-}
       - TTS_DEFAULT_ENGINE=${TTS_DEFAULT_ENGINE:-xtts}
       # Engine used (for default-path requests only) when the default engine is
       # unreachable. Empty auto-selects xtts when the default is something else.
       - TTS_FALLBACK_ENGINE=${TTS_FALLBACK_ENGINE:-}
-      - TTS_URL=${TTS_URL:-http://xtts:8031}
+      - TTS_URL=${TTS_URL:-}
       # argus-iris leases for XTTS synth (#79, with ARGUS_GPU_COORDINATOR=broker): a grant
       # on another node calls XTTS_NODE_URLS[node] (node=url,...), else iris's base_url.
       # Refused on the last engine: run on the local XTTS CPU (1) or answer 503 (0).
@@ -363,187 +362,6 @@ services:
       timeout: 5s
       retries: 10
       start_period: 60s
-    networks: [internal]
-
-  # ── Voice engines: argus-echo's images (smk762/argus-echo, #81) ──────────────
-  # The engines are echo's; this file only deploys them on dragon. Every engine
-  # listens on 8031 inside the network, serves argus-cortex's resident contract
-  # (/health, /admin/{evict,unload,wake}; ARGUS_ADMIN_TOKEN, fails closed when
-  # empty unless ARGUS_ADMIN_INSECURE=1) and loads lazily. Their own settings are
-  # documented in echo (docs/xtts.md, docs/whisper.md, docs/api.md).
-  # ECHO_TAG pins the release; bump it to upgrade.
-
-  # Whisper large-v3-turbo (faster-whisper; weights baked into the image).
-  # POST /transcribe (multipart), POST /transcriptions (JSON audio_url/audio_base64,
-  # for kimini-api), WS /transcribe/stream.
-  whisper:
-    image: ghcr.io/smk762/argus-echo-whisper:${ECHO_TAG:-0.2.0}
-    container_name: whisper
-    restart: unless-stopped
-    environment:
-      - ARGUS_ADMIN_TOKEN=${ARGUS_ADMIN_TOKEN:-}
-      - ARGUS_ADMIN_INSECURE=${ARGUS_ADMIN_INSECURE:-}  # 1 = open /admin/* with no token (dev only)
-      - STT_DEVICE=${STT_DEVICE:-cuda}
-      - STT_COMPUTE_TYPE=${STT_COMPUTE_TYPE:-float16}
-      - STT_VAD_FILTER=${STT_VAD_FILTER:-1}
-      - STT_BEAM_SIZE=${STT_BEAM_SIZE:-5}
-      - STT_KEEP_ALIVE_GPU=${STT_KEEP_ALIVE_GPU:-120}
-      - STT_KEEP_ALIVE_CPU=${STT_KEEP_ALIVE_CPU:-600}
-      - STT_MAX_UPLOAD_MB=${STT_MAX_UPLOAD_MB:-100}   # composer's old STT_MAX_AUDIO_BYTES (100 MiB)
-      - STT_AUDIO_URL_ALLOWED_HOSTS=${STT_AUDIO_URL_ALLOWED_HOSTS:-}
-      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    # Loopback only: browser STT goes through rag-chat (/api/voice/transcribe)
-    # and Home Assistant through wyoming-whisper. Host port is for debugging.
-    ports:
-      - "127.0.0.1:${WHISPER_PORT:-8032}:8031"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8031/health', timeout=5).read()"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
-    networks: [internal]
-
-  # XTTS-v2 (weights baked into the image): rag-chat's default engine. Clones go to
-  # XTTS_S3_BUCKET, the same bucket echo's XTTS on morpheus uses, so a clone made
-  # on either instance loads on both. Synth requests take device: "cpu" (rag-chat
-  # sends it when argus-iris refuses the xtts lease); a GPU promotion that runs out
-  # of memory runs on the CPU (XTTS_CPU_FALLBACK=1) or answers 503 with the reason.
-  xtts:
-    image: ghcr.io/smk762/argus-echo-xtts:${ECHO_TAG:-0.2.0}
-    container_name: xtts
-    restart: unless-stopped
-    environment:
-      - ARGUS_ADMIN_TOKEN=${ARGUS_ADMIN_TOKEN:-}
-      - ARGUS_ADMIN_INSECURE=${ARGUS_ADMIN_INSECURE:-}  # 1 = open /admin/* with no token (dev only)
-      - XTTS_DEVICE=${XTTS_DEVICE:-cuda:0}
-      - XTTS_PRELOAD=${XTTS_PRELOAD:-0}
-      - XTTS_KEEP_ALIVE_GPU=${XTTS_KEEP_ALIVE_GPU:-120}
-      - XTTS_KEEP_ALIVE_CPU=${XTTS_KEEP_ALIVE_CPU:-600}
-      - XTTS_TEMPERATURE=${XTTS_TEMPERATURE:-0.7}
-      - XTTS_STREAM_CHUNK_SIZE=${XTTS_STREAM_CHUNK_SIZE:-20}
-      - XTTS_CPU_FALLBACK=${XTTS_CPU_FALLBACK:-1}
-      - XTTS_OOM_RETRY_AFTER_S=${XTTS_OOM_RETRY_AFTER_S:-30}
-      - S3_ENDPOINT_URL=${S3_ENDPOINT_URL:?set S3_ENDPOINT_URL in .env (see .env.example)}
-      - S3_ACCESS_KEY_ID=${S3_ACCESS_KEY_ID:-minioadmin}
-      - S3_SECRET_ACCESS_KEY=${S3_SECRET_ACCESS_KEY:-minioadmin}
-      - S3_BUCKET_NAME=${XTTS_S3_BUCKET:-voice-xtts}
-      - S3_PUBLIC_URL=${XTTS_S3_PUBLIC_URL:?set XTTS_S3_PUBLIC_URL in .env (see .env.example)}
-      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES:-all}
-      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-    depends_on:
-      minio-setup:
-        condition: service_completed_successfully
-    # Loopback only: browser TTS goes through rag-chat (/api/voice/*) and Home
-    # Assistant through wyoming-xtts. Host port is for debugging. Rendered audio
-    # is served to browsers from MinIO via XTTS_S3_PUBLIC_URL, not from this port.
-    ports:
-      - "127.0.0.1:${XTTS_PORT:-8033}:8031"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8031/health', timeout=5).read()"]
-      interval: 30s
-      timeout: 5s
-      retries: 10
-      start_period: 120s
-    networks: [internal]
-
-  # Wyoming TTS bridge (echo's, CPU): XTTS as a Home Assistant `tts` engine, with
-  # each stored clone advertised as clone:<companion_id>.
-  wyoming-xtts:
-    image: ghcr.io/smk762/argus-echo-wyoming:${ECHO_TAG:-0.2.0}
-    container_name: wyoming-xtts
-    restart: unless-stopped
-    environment:
-      - TTS_URL=${WYOMING_XTTS_URL:-http://xtts:8031}
-      - XTTS_DEFAULT_SPEAKER=${XTTS_DEFAULT_SPEAKER:-Claribel Dervla}
-      - WYOMING_TTS_DEFAULT_VOICE=${WYOMING_TTS_DEFAULT_VOICE:-}
-      - WYOMING_TTS_LANGUAGE=${WYOMING_TTS_LANGUAGE:-en}
-      - WYOMING_TTS_LIST_SPEAKERS=${WYOMING_TTS_LIST_SPEAKERS:-0}
-      - WYOMING_URI=tcp://0.0.0.0:10200
-      - LOG_LEVEL=${WYOMING_LOG_LEVEL:-INFO}
-    depends_on: [xtts]
-    # LAN-exposed: Home Assistant connects to this as a Wyoming tts engine.
-    ports:
-      - "${WYOMING_TTS_BIND_IP:-${BIND_ADDR:-127.0.0.1}}:${WYOMING_TTS_PORT:-10200}:10200"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 10200), 3).close()"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    networks: [internal]
-
-  # Wyoming TTS bridge for the remote Miso engine (MISO_TTS_URL): a second Home
-  # Assistant `tts` engine on its own port. Fails its healthcheck while unset.
-  wyoming-miso:
-    image: ghcr.io/smk762/argus-echo-wyoming:${ECHO_TAG:-0.2.0}
-    container_name: wyoming-miso
-    restart: unless-stopped
-    environment:
-      - TTS_URL=${WYOMING_MISO_URL:-${MISO_TTS_URL:-}}
-      - WYOMING_TTS_PROGRAM_NAME=miso
-      - WYOMING_TTS_PROGRAM_DESC=Miso TTS 8B (voice cloning)
-      - WYOMING_TTS_ATTRIBUTION_NAME=Miso Labs
-      - WYOMING_TTS_ATTRIBUTION_URL=https://huggingface.co/MisoLabs/MisoTTS
-      - XTTS_DEFAULT_SPEAKER=${MISO_DEFAULT_SPEAKER:-0}
-      - WYOMING_TTS_DEFAULT_VOICE=${WYOMING_MISO_DEFAULT_VOICE:-}
-      - WYOMING_TTS_LANGUAGE=en
-      - WYOMING_TTS_LANGUAGES=en
-      - WYOMING_TTS_LIST_SPEAKERS=${WYOMING_MISO_LIST_SPEAKERS:-0}
-      - WYOMING_URI=tcp://0.0.0.0:10200
-      - LOG_LEVEL=${WYOMING_LOG_LEVEL:-INFO}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    # LAN-exposed: Home Assistant connects to this as a second Wyoming tts engine.
-    ports:
-      - "${WYOMING_MISO_BIND_IP:-${BIND_ADDR:-127.0.0.1}}:${WYOMING_MISO_PORT:-10201}:10200"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 10200), 3).close()"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
-    networks: [internal]
-
-  # Wyoming ASR bridge (echo's asr_bridge, CPU): Whisper as a Home Assistant `stt`
-  # engine. Buffers each utterance (at most WYOMING_STT_MAX_SECONDS) and posts it
-  # to whisper's POST /transcribe.
-  wyoming-whisper:
-    image: ghcr.io/smk762/argus-echo-wyoming:${ECHO_TAG:-0.2.0}
-    container_name: wyoming-whisper
-    restart: unless-stopped
-    command: ["python", "asr_bridge.py"]
-    environment:
-      - STT_URL=${WYOMING_WHISPER_URL:-http://whisper:8031}
-      - WYOMING_ASR_LANGUAGE=${WYOMING_STT_LANGUAGE:-}
-      - WYOMING_ASR_MAX_SECONDS=${WYOMING_STT_MAX_SECONDS:-120}
-      - WYOMING_URI=tcp://0.0.0.0:10300
-      - LOG_LEVEL=${WYOMING_LOG_LEVEL:-INFO}
-    depends_on: [whisper]
-    # LAN-exposed: Home Assistant connects to this as a Wyoming stt engine.
-    ports:
-      - "${WYOMING_STT_BIND_IP:-${BIND_ADDR:-127.0.0.1}}:${WYOMING_STT_PORT:-10300}:10300"
-    healthcheck:
-      test: ["CMD", "python", "-c", "import socket; socket.create_connection(('127.0.0.1', 10300), 3).close()"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 10s
     networks: [internal]
 
   # Cloudflare Tunnel (publish ONLY rag-ingest + rag-chat hostnames in Cloudflare UI)

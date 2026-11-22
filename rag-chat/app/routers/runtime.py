@@ -23,8 +23,6 @@ from app.config import (
     OLLAMA_URL,
     RESIDENT_ADMIN_TIMEOUT,
     RUNTIME_EXTRA_RESIDENTS,
-    TTS_ENGINES,
-    WHISPER_URL,
     ollama_keep_alive,
 )
 
@@ -207,13 +205,14 @@ _HEALTH_TIMEOUT = 10.0
 
 
 def _residents() -> Dict[str, str]:
-    # Later sources win a name clash: extras < fixed backends < TTS engines. Each source drops its
-    # empty URLs first, so an unset backend never removes a resident another source configured.
+    # Composer's own GPU sidecars. The voice engines are argus-echo's residents (#81): iris
+    # reaches them directly with echo's admin token, so they aren't served here. Later sources win
+    # a name clash (extras < fixed backends); each drops its empty URLs first, so an unset backend
+    # never removes a resident another source configured.
     found: Dict[str, str] = {}
     for source in (
-        RUNTIME_EXTRA_RESIDENTS,  # gateway-only extras (none by default); never TTS engines
-        {"modernbert": MODERNBERT_URL, "whisper": WHISPER_URL, "infinity": INFINITY_URL},
-        TTS_ENGINES,  # xtts, miso (remote), tts (a custom TTS_URL)
+        RUNTIME_EXTRA_RESIDENTS,  # gateway-only extras (none by default)
+        {"modernbert": MODERNBERT_URL, "infinity": INFINITY_URL},
     ):
         found.update({name: url.rstrip("/") for name, url in source.items() if url})
     return found
