@@ -5,8 +5,8 @@
 # See argus-iris DESIGN.md, "Tenant manifests".
 #
 # kinds: with ARGUS_GPU_COORDINATOR=broker, rag-chat and rag-ingest take an
-# ollama:<model> lease around each Ollama call (app/gpu_lease.py, #48) and register this
-# manifest on their first lease. Each kind's target names its default model; a lease
+# ollama:<model> lease around each Ollama call (app/gpu_lease.py, #48), and rag-chat an
+# xtts lease around each XTTS synth (#79); they register this manifest on their first lease. Each kind's target names its default model; a lease
 # names the model actually called. A request's X-Argus-Priority header overrides the
 # priority. residents: the models agent-composer keeps loaded, which iris reads and evicts.
 #
@@ -71,6 +71,16 @@ kinds:
     vram_mb: 6000
     model_mb: 5300
     priority: batch
+  # rag-chat /api/voice/synthesise{,/stream,/pcm} on the local XTTS engine (#79): a lease
+  # on the xtts service, so XTTS loads only where iris has room. A grant on dragon calls
+  # this stack's XTTS; one elsewhere calls that node's xtts service (XTTS_NODE_URLS, else
+  # iris's base_url). /pcm leases as realtime. Refused: the next engine, else XTTS on CPU.
+  - kind: tts-synth
+    description: Speech synthesis on XTTS-v2 someone is waiting on.
+    target: xtts
+    vram_mb: 2000                 # about 2 GB loaded (estimate; iris learns the p95)
+    model_mb: 1800                # weights part (estimate)
+    priority: interactive
 residents:
   # Ollama on dragon. iris's ollama adapter uses /api/ps and keep_alive on :11434 directly
   # (rag-chat does not proxy it). Set OLLAMA_REQUEST_KEEP_ALIVE=server once iris owns

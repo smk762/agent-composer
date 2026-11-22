@@ -24,6 +24,7 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import re
 import time
@@ -40,6 +41,7 @@ from pydantic import BaseModel, Field
 from starlette.background import BackgroundTask
 
 from app.auth import require_user
+from app.gpu_lease import GpuLeaseUnavailable, service_lease
 from app.db import get_db
 from app.uploads import read_upload
 from app.upstream_errors import upstream_error
@@ -59,6 +61,12 @@ from app.config import (
     VOICE_S3_SECRET_ACCESS_KEY,
     VOICE_TIMEOUT,
     WHISPER_URL,
+    XTTS_LEASE_CPU_FALLBACK,
+    XTTS_LEASE_KIND,
+    XTTS_LEASE_MODEL_MB,
+    XTTS_LEASE_VRAM_MB,
+    XTTS_NODE_URLS,
+    XTTS_TTS_URL,
     default_sentence_pause_ms,
     log,
     tts_engine_chain,
@@ -119,10 +127,82 @@ def _json_body(r: httpx.Response, service: str):
         raise HTTPException(502, detail=f"{service} returned an invalid response")
 
 
-def _no_engine_error(last_exc: Optional[Exception]) -> HTTPException:
-    """Every engine in the chain was unreachable: log why, tell the client only that."""
+def _no_engine_error(last_exc: Optional[Exception], slots: Optional["_EngineSlots"] = None) -> HTTPException:
+    """Every engine in the chain was unreachable: log why, tell the client only that.
+
+    When the GPU broker refused one of them, its reason is the useful answer: the
+    client learns the GPU is busy, not that the voice stack is down."""
     log.warning("voice: no reachable TTS engine (last error: %r)", last_exc)
+    if slots is not None and slots.refusal is not None:
+        return _lease_error(slots.refusal)
     return HTTPException(503, detail="No reachable TTS engine")
+
+
+def _lease_error(exc: GpuLeaseUnavailable) -> HTTPException:
+    headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+    return HTTPException(503, detail=exc.detail, headers=headers)
+
+
+class _EngineSlots:
+    """The argus-iris leases a request holds on the engines it calls (#79).
+
+    Only the local XTTS engine is leased (target ``xtts``): the other engines are
+    remote services that manage their own GPU. ``open()`` returns the base URL and
+    payload to call, or ``None`` when the broker refused XTTS and the caller should
+    try the next engine in its chain (the refusal is kept in ``refusal``). On the
+    last engine a refusal becomes a CPU run on the local XTTS
+    (``XTTS_LEASE_CPU_FALLBACK``), else a 503 with the broker's reason. Leases are
+    released by ``drop()`` (that engine failed) or when the slots close.
+    """
+
+    def __init__(self, priority: str = "interactive") -> None:
+        self.priority = priority
+        self.refusal: Optional[GpuLeaseUnavailable] = None
+        self._stacks: dict[str, contextlib.AsyncExitStack] = {}
+
+    async def __aenter__(self) -> "_EngineSlots":
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        await self.aclose()
+
+    async def open(self, name: str, base: str, payload: dict, *, last: bool) -> Optional[tuple[str, dict]]:
+        if name != "xtts" or base != XTTS_TTS_URL:
+            return base, payload
+        await self.drop(name)
+        stack = contextlib.AsyncExitStack()
+        try:
+            url = await stack.enter_async_context(service_lease(
+                "xtts", kind=XTTS_LEASE_KIND, priority=self.priority, caller="voice",
+                home_url=base, vram_mb=XTTS_LEASE_VRAM_MB, model_mb=XTTS_LEASE_MODEL_MB,
+                node_urls=XTTS_NODE_URLS, node_urls_env="XTTS_NODE_URLS",
+                # A clone is stored for this XTTS: another node's instance can't load it.
+                pin_home=bool(payload.get("voice_clone_id")),
+            ))
+        except GpuLeaseUnavailable as exc:
+            await stack.aclose()
+            self.refusal = exc
+            if not last:
+                log.warning("voice: no GPU lease for engine=%s (%s), trying next", name, exc.detail)
+                return None
+            if XTTS_LEASE_CPU_FALLBACK:
+                log.warning("voice: no GPU lease for engine=%s (%s); running on its CPU", name, exc.detail)
+                return base, {**payload, "device": "cpu"}
+            raise _lease_error(exc) from exc
+        except BaseException:
+            await stack.aclose()
+            raise
+        self._stacks[name] = stack
+        return url, payload
+
+    async def drop(self, name: str) -> None:
+        stack = self._stacks.pop(name, None)
+        if stack is not None:
+            await stack.aclose()
+
+    async def aclose(self) -> None:
+        while self._stacks:
+            await self._stacks.popitem()[1].aclose()
 
 
 def _tts_base(engine: Optional[str]) -> str:
@@ -259,17 +339,26 @@ async def _synthesise_paced(chain, base_payload: dict, sentences: list[str], gap
     wav_blobs: list[bytes] = []
     last_exc: Optional[Exception] = None
 
-    async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
+    # One lease spans every sentence, so the utterance stays on one GPU and one voice.
+    async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client, _EngineSlots() as slots:
         for sentence in sentences:
-            payload = {**base_payload, "text": sentence}
-            candidates = [resolved] if resolved else list(chain)
+            candidates = [resolved[:2]] if resolved else list(chain)
             blob = None
-            for name, base in candidates:
+            for idx, (name, base) in enumerate(candidates):
+                if resolved:
+                    engine_url, extra = resolved[2], resolved[3]
+                else:
+                    slot = await slots.open(name, base, base_payload, last=idx == len(candidates) - 1)
+                    if slot is None:
+                        continue
+                    engine_url, extra = slot
+                payload = {**extra, "text": sentence}
                 try:
-                    r = await client.post(f"{base}/synthesise", json=payload)
+                    r = await client.post(f"{engine_url}/synthesise", json=payload)
                     r.raise_for_status()
                 except _UNREACHABLE as exc:
                     last_exc = exc
+                    await slots.drop(name)
                     log.warning("voice: paced engine=%s unreachable, trying next: %s", name, exc)
                     continue
                 except httpx.HTTPStatusError as exc:
@@ -287,16 +376,17 @@ async def _synthesise_paced(chain, base_payload: dict, sentences: list[str], gap
                     # The engine answered but its audio host can't be reached:
                     # treat it like an unreachable engine and try the next one.
                     last_exc = exc
+                    await slots.drop(name)
                     log.warning("voice: paced engine=%s audio fetch unreachable, trying next: %s", name, exc)
                     continue
                 # Any other fetch failure (an httpx.HTTPError) propagates to
                 # synthesise(), whose _PACING_FAILURES handler degrades to a
                 # single-shot render rather than a 500.
-                resolved = (name, base)
+                resolved = (name, base, engine_url, extra)
                 blob = ar.content
                 break
             if blob is None:
-                raise _no_engine_error(last_exc)
+                raise _no_engine_error(last_exc, slots)
             wav_blobs.append(blob)
 
     combined, total_seconds = await asyncio.to_thread(_concat_wavs_with_gaps, wav_blobs, gap_ms)
@@ -442,29 +532,36 @@ async def synthesise(req: SynthesiseRequest):
             return data
 
     last_exc: Optional[Exception] = None
-    for name, base in chain:
-        try:
-            async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
-                r = await client.post(f"{base}/synthesise", json=payload)
-                r.raise_for_status()
-        except _UNREACHABLE as exc:
-            last_exc = exc
-            log.warning("voice: synthesise engine=%s unreachable, trying next: %s", name, exc)
-            continue
-        except httpx.HTTPStatusError as exc:
-            raise upstream_error(exc.response, f"TTS engine {name}")
+    async with _EngineSlots() as slots:
+        for idx, (name, base) in enumerate(chain):
+            slot = await slots.open(name, base, payload, last=idx == len(chain) - 1)
+            if slot is None:
+                continue
+            url, body = slot
+            try:
+                async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
+                    r = await client.post(f"{url}/synthesise", json=body)
+                    r.raise_for_status()
+            except _UNREACHABLE as exc:
+                last_exc = exc
+                await slots.drop(name)
+                log.warning("voice: synthesise engine=%s unreachable, trying next: %s", name, exc)
+                continue
+            except httpx.HTTPStatusError as exc:
+                raise upstream_error(exc.response, f"TTS engine {name}")
+            break
+        else:
+            raise _no_engine_error(last_exc, slots)
 
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
-        data = r.json()
-        if data.get("audio_url"):
-            data["audio_url"] = await _rehost_audio_url(data["audio_url"])
-        log.info(
-            "voice: synthesise engine=%s elapsed=%dms duration=%.1fs",
-            name, elapsed_ms, data.get("duration", 0),
-        )
-        return data
-
-    raise _no_engine_error(last_exc)
+    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    data = r.json()
+    if data.get("audio_url"):
+        data["audio_url"] = await _rehost_audio_url(data["audio_url"])
+    log.info(
+        "voice: synthesise engine=%s elapsed=%dms duration=%.1fs",
+        name, elapsed_ms, data.get("duration", 0),
+    )
+    return data
 
 
 @router.post("/synthesise/stream")
@@ -488,44 +585,60 @@ async def synthesise_stream(req: SynthesiseStreamRequest):
     async def event_stream():
         # Resolve a reachable engine on the first chunk (walking the fallback
         # chain), then stay on it for the remaining sentences so a stream never
-        # mixes voices mid-utterance.
+        # mixes voices mid-utterance. Its GPU lease (XTTS) spans the whole stream.
         resolved: Optional[tuple] = None
-        for i, sentence in enumerate(sentences):
-            payload = {**base_payload, "text": sentence}
-            candidates = [resolved] if resolved else list(chain)
-            sent = False
-            for name, base in candidates:
-                try:
-                    async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
-                        r = await client.post(f"{base}/synthesise", json=payload)
-                        r.raise_for_status()
-                    resolved = (name, base)
-                    data = r.json()
-                    if data.get("audio_url"):
-                        data["audio_url"] = await _rehost_audio_url(data["audio_url"])
-                    data["chunk_index"] = i
-                    data["text"] = sentence
-                    data["engine"] = name
-                    yield f"data: {json.dumps(data)}\n\n"
-                    sent = True
-                    break
-                except _UNREACHABLE as exc:
-                    log.warning("voice: stream engine=%s unreachable, trying next: %s", name, exc)
-                    continue
-                except httpx.HTTPStatusError as exc:
-                    # The upstream body and exception text can name internal
-                    # hosts: log them, send the client only the status.
-                    status = exc.response.status_code
-                    log.warning("voice: stream engine=%s HTTP %s: %s", name, status, exc.response.text[:500])
-                    yield f"data: {json.dumps({'error': 'TTS engine error', 'status': status, 'chunk_index': i})}\n\n"
+        async with _EngineSlots() as slots:
+            for i, sentence in enumerate(sentences):
+                candidates = [resolved[:2]] if resolved else list(chain)
+                sent = False
+                for idx, (name, base) in enumerate(candidates):
+                    if resolved:
+                        url, extra = resolved[2], resolved[3]
+                    else:
+                        try:
+                            slot = await slots.open(name, base, base_payload, last=idx == len(candidates) - 1)
+                        except HTTPException as exc:
+                            # The 200 is out: say why in the stream (the broker's reason).
+                            event = {"error": exc.detail, "status": exc.status_code, "chunk_index": i}
+                            yield f"data: {json.dumps(event)}\n\n"
+                            return
+                        if slot is None:
+                            continue
+                        url, extra = slot
+                    payload = {**extra, "text": sentence}
+                    try:
+                        async with httpx.AsyncClient(timeout=VOICE_TIMEOUT) as client:
+                            r = await client.post(f"{url}/synthesise", json=payload)
+                            r.raise_for_status()
+                        resolved = (name, base, url, extra)
+                        data = r.json()
+                        if data.get("audio_url"):
+                            data["audio_url"] = await _rehost_audio_url(data["audio_url"])
+                        data["chunk_index"] = i
+                        data["text"] = sentence
+                        data["engine"] = name
+                        yield f"data: {json.dumps(data)}\n\n"
+                        sent = True
+                        break
+                    except _UNREACHABLE as exc:
+                        await slots.drop(name)
+                        log.warning("voice: stream engine=%s unreachable, trying next: %s", name, exc)
+                        continue
+                    except httpx.HTTPStatusError as exc:
+                        # The upstream body and exception text can name internal
+                        # hosts: log them, send the client only the status.
+                        status = exc.response.status_code
+                        log.warning("voice: stream engine=%s HTTP %s: %s", name, status, exc.response.text[:500])
+                        yield f"data: {json.dumps({'error': 'TTS engine error', 'status': status, 'chunk_index': i})}\n\n"
+                        return
+                    except Exception as exc:
+                        log.warning("voice: stream engine=%s failed: %r", name, exc)
+                        yield f"data: {json.dumps({'error': 'TTS engine error', 'chunk_index': i})}\n\n"
+                        return
+                if not sent:
+                    error = slots.refusal.detail if slots.refusal is not None else "No reachable TTS engine"
+                    yield f"data: {json.dumps({'error': error, 'status': 503, 'chunk_index': i})}\n\n"
                     return
-                except Exception as exc:
-                    log.warning("voice: stream engine=%s failed: %r", name, exc)
-                    yield f"data: {json.dumps({'error': 'TTS engine error', 'chunk_index': i})}\n\n"
-                    return
-            if not sent:
-                yield f"data: {json.dumps({'error': 'No reachable TTS engine', 'chunk_index': i})}\n\n"
-                return
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
@@ -548,35 +661,41 @@ async def synthesise_pcm(req: SynthesiseRequest):
 
     payload = req.model_dump(exclude_none=True, exclude=_PROXY_ONLY_FIELDS)
 
-    # Open the upstream stream, walking the fallback chain on connection errors.
+    # Open the upstream stream, walking the fallback chain on connection errors. The
+    # engine's GPU lease (XTTS) is held until the stream closes; live playback is
+    # realtime work for the broker.
     client = httpx.AsyncClient(timeout=VOICE_TIMEOUT)
+    slots = _EngineSlots(priority="realtime")
     upstream = None
     last_exc: Optional[Exception] = None
-    for name, base in chain:
-        try:
-            upstream_req = client.build_request("POST", f"{base}/synthesise/stream", json=payload)
-            upstream = await client.send(upstream_req, stream=True)
-            break
-        except _UNREACHABLE as exc:
-            last_exc = exc
-            log.warning("voice: pcm engine=%s unreachable, trying next: %s", name, exc)
-            continue
-        except httpx.HTTPError as exc:
-            await client.aclose()
-            raise _upstream_error(exc, "TTS engine")
-        except Exception:
-            await client.aclose()
-            raise
-    if upstream is None:
+    try:
+        for idx, (name, base) in enumerate(chain):
+            slot = await slots.open(name, base, payload, last=idx == len(chain) - 1)
+            if slot is None:
+                continue
+            url, body = slot
+            try:
+                upstream_req = client.build_request("POST", f"{url}/synthesise/stream", json=body)
+                upstream = await client.send(upstream_req, stream=True)
+                break
+            except _UNREACHABLE as exc:
+                last_exc = exc
+                await slots.drop(name)
+                log.warning("voice: pcm engine=%s unreachable, trying next: %s", name, exc)
+                continue
+            except httpx.HTTPError as exc:
+                raise _upstream_error(exc, "TTS engine")
+        if upstream is None:
+            raise _no_engine_error(last_exc, slots)
+        if upstream.status_code != 200:
+            body = await upstream.aread()
+            await upstream.aclose()
+            detail = body.decode(errors="ignore") or "TTS stream error"
+            raise HTTPException(upstream.status_code, detail=detail)
+    except BaseException:
+        await slots.aclose()
         await client.aclose()
-        raise _no_engine_error(last_exc)
-
-    if upstream.status_code != 200:
-        body = await upstream.aread()
-        await upstream.aclose()
-        await client.aclose()
-        detail = body.decode(errors="ignore") or "TTS stream error"
-        raise HTTPException(upstream.status_code, detail=detail)
+        raise
 
     headers = {
         "X-Sample-Rate": upstream.headers.get("x-sample-rate", "24000"),
@@ -597,8 +716,11 @@ async def synthesise_pcm(req: SynthesiseRequest):
         if closed:
             return
         closed = True
-        await upstream.aclose()
-        await client.aclose()
+        try:
+            await upstream.aclose()
+            await client.aclose()
+        finally:
+            await slots.aclose()
         log.info("voice: synthesise/pcm streamed elapsed=%dms", int((time.monotonic() - t0) * 1000))
 
     async def body_iter():

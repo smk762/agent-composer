@@ -90,6 +90,10 @@ Priority comes from the call site (`chat`, `embed-query` and `pipeline` are `int
 | `TTS_URL` | (empty) | Legacy Qwen engine, registered as `tts` |
 | `TTS_DEFAULT_ENGINE` | auto: `miso` if set, else `xtts` | |
 | `TTS_FALLBACK_ENGINE` | auto: `xtts` when the default is something else | Used only for requests that don't name an engine |
+| `XTTS_NODE_URLS` | (empty) | With `ARGUS_GPU_COORDINATOR=broker`, XTTS synth leases the `xtts` target from argus-iris (#79). A grant on another node calls the URL given here (`node=url,…`), otherwise iris's `base_url` for it. A grant on the home node calls `XTTS_TTS_URL`. A voice clone stays on the home node |
+| `XTTS_LEASE_CPU_FALLBACK` | `1` | Lease refused or timed out on the last engine in the chain: `1` sends `device: "cpu"` to the local XTTS, `0` answers 503 with the broker's reason |
+| `XTTS_LEASE_VRAM_MB` / `XTTS_LEASE_MODEL_MB` | `2000` / `1800` | Footprint and weights each XTTS lease declares (match `gpu-tenant.yaml`'s `tts-synth`) |
+| `XTTS_CPU_FALLBACK` (xtts sidecar) | `1` | A GPU promotion that runs out of CUDA memory puts the weights back on the CPU. `1` synthesises there, `0` answers 503 with the reason (`Retry-After` = `XTTS_OOM_RETRY_AFTER_S`, default 30) |
 | `VOICE_TIMEOUT` | `30` | Proxy timeout (seconds) |
 | `VOICE_MAX_CLIPS` / `VOICE_CLIP_MAX_BYTES` | `16` / `16777216` | Clips per `/api/voice/clone` or `/api/voice/analyze` request, and bytes per clip; more is a 413 |
 | `MISO_SENTENCE_PAUSE_MS` / `MAX_SENTENCE_PAUSE_MS` | `300` / `2000` | Silence inserted between Miso sentences |

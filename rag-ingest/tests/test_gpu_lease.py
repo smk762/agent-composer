@@ -98,7 +98,7 @@ class OllamaLeaseTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(OllamaLeaseUnavailable, msg=bad):
                 async with ollama_lease("qwen3:8b", kind="chat", priority="interactive"):
                     self.fail("the body must not run against an unvetted node URL")
-            self.assertEqual(coord.exits, ["OllamaLeaseUnavailable"], bad)
+            self.assertEqual(coord.exits, ["GpuLeaseUnavailable"], bad)
         # OLLAMA_NODE_URLS is operator config and wins over the broker's URL
         self._use(_FakeCoordinator(GpuLease(via="broker", lease_id="L4", node="jarrah", base_url="http://169.254.169.254")))
         with patch.object(gpu_lease, "NODE_URLS", {"jarrah": "http://192.168.1.109:11434"}):
@@ -114,7 +114,7 @@ class OllamaLeaseTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(OllamaLeaseUnavailable, msg=bad):
                 async with ollama_lease("qwen3:8b", kind="chat", priority="interactive"):
                     self.fail("the body must not run against a cloud metadata address")
-            self.assertEqual(coord.exits, ["OllamaLeaseUnavailable"], bad)
+            self.assertEqual(coord.exits, ["GpuLeaseUnavailable"], bad)
         # other unique-local and LAN nodes stay usable
         for ok in ("http://[fd00:ec2::253]:11434", "http://100.100.100.201:11434"):
             self._use(_FakeCoordinator(GpuLease(via="broker", lease_id="L7", node="jarrah", base_url=ok)))
@@ -126,7 +126,7 @@ class OllamaLeaseTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(OllamaLeaseUnavailable, "without a URL"):
             async with ollama_lease("qwen3:8b", kind="chat", priority="interactive"):
                 self.fail("the body must not run on local Ollama for a lease on another node")
-        self.assertEqual(coord.exits, ["OllamaLeaseUnavailable"])
+        self.assertEqual(coord.exits, ["GpuLeaseUnavailable"])
 
     async def test_fallback_handle_means_local(self) -> None:
         self._use(_FakeCoordinator(GpuLease(via="fallback")))

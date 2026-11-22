@@ -214,6 +214,25 @@ elif not _requested_fallback and TTS_DEFAULT_ENGINE != "xtts" and "xtts" in TTS_
 else:
     TTS_FALLBACK_ENGINE = ""
 
+# argus-iris leases for the local XTTS engine (#79). With ARGUS_GPU_COORDINATOR=broker
+# every XTTS synth runs inside a lease on the `xtts` service target, so XTTS no longer
+# loads onto a card iris has promised to someone else. A grant on ARGUS_GPU_HOME_NODE
+# calls XTTS_TTS_URL; one on another node calls XTTS_NODE_URLS[node] (`node=url,...`),
+# else the broker's base_url for it. A request naming a voice clone stays home (the
+# clone is stored for this XTTS). When the lease is refused or times out, a default-path
+# request moves to the next engine in the chain; on the last engine,
+# XTTS_LEASE_CPU_FALLBACK=1 (default) asks the local XTTS to run on its CPU, 0 answers
+# 503 with the broker's reason.
+XTTS_LEASE_KIND = "tts-synth"
+XTTS_LEASE_VRAM_MB = _env_int("XTTS_LEASE_VRAM_MB", 2000)
+XTTS_LEASE_MODEL_MB = _env_int("XTTS_LEASE_MODEL_MB", 1800)
+XTTS_NODE_URLS: dict[str, str] = {}
+for _item in os.getenv("XTTS_NODE_URLS", "").split(","):
+    _node, _sep, _url = _item.strip().partition("=")
+    if _sep and _node.strip() and _clean_url(_url):
+        XTTS_NODE_URLS[_node.strip()] = _clean_url(_url)
+XTTS_LEASE_CPU_FALLBACK = os.getenv("XTTS_LEASE_CPU_FALLBACK", "1").strip().lower() not in ("0", "false", "no", "off")
+
 # Rendered-audio re-hosting. Some engines (e.g. a remote Miso host) return an
 # ``audio_url`` on their *own* host, which LAN browsers on a different subnet may
 # not be able to reach. When the shared "voice" MinIO bucket is configured here,

@@ -335,12 +335,12 @@ def test_import_failure_while_building_meta_uploads_nothing(importer, monkeypatc
 class _InferenceMgr:
     state = xs.TTSState.GPU
 
-    def lease(self):
+    def lease(self, device=None):
         import contextlib
 
         @contextlib.asynccontextmanager
         async def cm():
-            yield self
+            yield "cuda:0"
 
         return cm()
 
@@ -364,3 +364,56 @@ def test_synthesise_runtime_errors(monkeypatch, msg, code):
     r = c.post("/synthesise", json={"text": "hi", "language": "en"})
     assert r.status_code == code, r.text
     assert ("GPU OOM" in r.text) == (code == 503)
+
+
+# ── #79: no room on the GPU is a 503 with the reason, never a bare 500 ───────
+
+
+class _NoGpuMgr:
+    state = xs.TTSState.CPU
+
+    def lease(self, device=None):
+        import contextlib
+
+        @contextlib.asynccontextmanager
+        async def cm():
+            raise xs.GpuUnavailable("CUDA out of memory moving XTTS onto cuda:0 (1 MiB free)")
+            yield  # pragma: no cover
+
+        return cm()
+
+
+def test_synthesise_without_gpu_room_is_a_503_with_the_reason(monkeypatch):
+    monkeypatch.setattr(xs, "_mgr", _NoGpuMgr())
+    c = TestClient(xs.app, raise_server_exceptions=False)
+    r = c.post("/synthesise", json={"text": "hi", "language": "en"})
+    assert r.status_code == 503, r.text
+    assert "CUDA out of memory moving XTTS onto cuda:0" in r.json()["error"]
+    assert r.headers["retry-after"] == str(xs.OOM_RETRY_AFTER_S)
+
+
+def test_synthesise_passes_the_device_and_reports_where_it_ran(monkeypatch):
+    seen = []
+
+    class _Mgr(_InferenceMgr):
+        def lease(self, device=None):
+            import contextlib
+
+            seen.append(device)
+
+            @contextlib.asynccontextmanager
+            async def cm():
+                yield "cpu"
+
+            return cm()
+
+    monkeypatch.setattr(xs, "_mgr", _Mgr())
+    monkeypatch.setattr(xs, "_resolve_latents", lambda req: (None, None))
+    monkeypatch.setattr(xs, "_run_inference", lambda *a: [0.0] * 240)
+    monkeypatch.setattr(xs, "_upload_to_s3", lambda data, key: f"http://s3/{key}")
+    c = TestClient(xs.app)
+    r = c.post("/synthesise", json={"text": "hi", "language": "en", "device": "cpu"})
+    assert r.status_code == 200, r.text
+    assert seen == ["cpu"]
+    assert r.json()["device"] == "cpu"
+    assert c.post("/synthesise", json={"text": "hi", "device": "cuda:7"}).status_code == 422
