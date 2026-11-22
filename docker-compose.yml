@@ -424,6 +424,7 @@ services:
       context: https://github.com/smk762/argus-echo.git#v${ECHO_TAG:-0.2.0}:engines/qwen
       args:
         TTS_MODEL_SIZE: "${TTS_MODEL_SIZE:-0.6b}"
+        ECHO_VERSION: "${ECHO_TAG:-0.2.0}"   # /health `image.version`, as echo's release images carry
     image: argus-echo-qwen:${ECHO_TAG:-0.2.0}-${TTS_MODEL_SIZE:-0.6b}
     container_name: tts
     restart: unless-stopped
