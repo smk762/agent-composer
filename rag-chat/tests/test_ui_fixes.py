@@ -82,5 +82,21 @@ class ChatConversationIdTests(unittest.TestCase):
         self.assertLess(page.index("CONV_ID_RE.test(convId)", fn), page.index("fetch(", fn))
 
 
+class GenerateCheckImageTests(unittest.TestCase):
+    def setUp(self):
+        page = _page("generate_ui")
+        self.check = page[page.index("async function checkOutputImage"):page.index('fetch("/api/guard/check"')]
+        self.render = page[page.index("function renderMedia"):page.index("async function checkOutputImage")]
+
+    def test_check_image_uses_the_sanitised_url(self):
+        self.assertIn("checkOutputImage(url,", self.render)
+        self.assertNotIn("checkOutputImage(m.url", self.render)
+
+    def test_api_key_is_sent_only_to_this_origin(self):
+        self.assertNotIn("fetch(url, { headers: authHeaders() })", self.check)
+        self.assertIn("=== window.location.origin", self.check)
+        self.assertIn('sameOrigin ? { headers: authHeaders() } : { credentials: "omit" }', self.check)
+
+
 if __name__ == "__main__":
     unittest.main()
