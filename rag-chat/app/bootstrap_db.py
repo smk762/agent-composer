@@ -23,7 +23,8 @@ async def _can_connect(db_url: str) -> bool:
         async with engine.connect() as conn:
             await conn.scalar(text("SELECT 1"))
         return True
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - any failure means "try to create it"; the reason is logged
+        log.info("db bootstrap: target database not reachable (%s: %s)", type(exc).__name__, exc)
         return False
     finally:
         await engine.dispose()

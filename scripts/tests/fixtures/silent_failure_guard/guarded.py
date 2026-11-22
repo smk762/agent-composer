@@ -1,5 +1,6 @@
 """Silent-failure guard fixture: code the rule must accept (scripts/tests/test_silent_failure_guard.py). Never imported."""
 
+import json
 import logging
 
 log = logging.getLogger(__name__)
@@ -36,3 +37,34 @@ def narrow(fn):
         return fn()
     except KeyError:
         pass  # a specific, expected exception is not this rule's concern
+
+
+def load_state(path) -> dict:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        log.exception("state file %s is unreadable; starting empty", path)  # the reset is logged
+        return {}
+
+
+def load_cache(path) -> dict:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}  # narrow: a missing or corrupt cache is expected, and only costs a refetch
+
+
+def probe(fn) -> bool:
+    try:
+        return bool(fn())
+    except Exception:  # noqa: S110 a readiness probe: False is the answer, the caller retries
+        return False
+
+
+def failed(fn) -> dict:
+    try:
+        return fn()
+    except Exception as exc:
+        return {"ok": False, "error": type(exc).__name__}  # not empty: the failure is the result

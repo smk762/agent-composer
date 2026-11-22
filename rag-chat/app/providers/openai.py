@@ -41,7 +41,8 @@ class OpenAIProvider(ImageProvider, VideoProvider):
                     headers={"Authorization": f"Bearer {self.api_key}"},
                 )
             return r.status_code == 200
-        except Exception:
+        except httpx.HTTPError as exc:  # unreachable or timed out, not a rejected key: say which in the log
+            log.warning("OpenAI config check failed: %s: %s", type(exc).__name__, exc)
             return False
 
     def available_models(self, capability: Capability) -> List[str]:

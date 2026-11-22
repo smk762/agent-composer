@@ -83,7 +83,7 @@ async def _is_ready() -> bool:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.get(f"{UPSTREAM}/health") as response:
                 return response.status == 200
-    except Exception:
+    except (aiohttp.ClientError, asyncio.TimeoutError):  # not up yet: the caller polls until its deadline
         return False
 
 
