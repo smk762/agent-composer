@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 # A git revision name: no leading '-' (git would parse it as an option such as --output=),
 # no whitespace/control characters, no '..' (range syntax) or '@{', none of git's ref
 # metacharacters. Branches, tags, remote refs (origin/dev) and SHAs all fit.
-_REF_RE = re.compile(r"^(?!-)(?!.*\.\.)(?!.*@\{)(?!.*//)[A-Za-z0-9._/@+-]{1,255}$")
+_REF_RE = re.compile(r"^(?!-)(?!.*\.\.)(?!.*@\{)(?!.*//)[A-Za-z0-9._/@+-]{1,255}\Z")
 
 
 def _check_ref(value: str) -> str:

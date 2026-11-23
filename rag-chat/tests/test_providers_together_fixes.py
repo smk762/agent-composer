@@ -1,6 +1,7 @@
 """Together: an item without b64_json is an error, never an empty image."""
 
 import asyncio
+import base64
 import unittest
 from unittest import mock
 
@@ -56,6 +57,22 @@ class TogetherFixTests(unittest.TestCase):
         _Resp.payload = {"data": [{"b64_json": "cG5n"}]}
         result = asyncio.run(self.provider.generate_image("a cat"))
         self.assertEqual(result.media[0].data, b"png")
+
+    def test_png_is_requested(self):
+        _Resp.payload = {"data": [{"b64_json": base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()}]}
+        asyncio.run(self.provider.generate_image("a cat"))
+        self.assertEqual(_Client.calls[0]["output_format"], "png")
+
+    def test_media_is_labelled_by_its_bytes(self):
+        cases = {
+            b"\x89PNG\r\n\x1a\n....": ("image/png", ".png"),
+            b"\xff\xd8\xff\xe0\x00\x10JFIF": ("image/jpeg", ".jpg"),
+            b"RIFF\x10\x00\x00\x00WEBPVP8 ": ("image/webp", ".webp"),
+        }
+        for raw, (mime, ext) in cases.items():
+            _Resp.payload = {"data": [{"b64_json": base64.b64encode(raw).decode()}]}
+            media = asyncio.run(self.provider.generate_image("a cat")).media[0]
+            self.assertEqual((media.mime_type, media.filename[-len(ext):]), (mime, ext), raw)
 
 
 if __name__ == "__main__":

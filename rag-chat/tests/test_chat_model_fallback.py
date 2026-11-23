@@ -117,7 +117,7 @@ class ModelFallbackTests(unittest.IsolatedAsyncioTestCase):
             patch.object(chat, "OLLAMA_URL", HOME),
             patch.object(chat, "_resolve_model", resolve),
             patch.object(chat, "rag_context_for", no_ctx),
-            patch.object(chat, "_save_stream_turn", no_save),
+            patch.object(chat, "_save_stream_turn_detached", no_save),
             patch("httpx.AsyncClient", client),
             patch.object(chat, "CHAT_HISTORY_MAX_MSGS", 0),
         ):

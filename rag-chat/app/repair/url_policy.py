@@ -188,8 +188,12 @@ class PinnedTransport(httpx.AsyncBaseTransport):
             raise httpx.ConnectError(f"cannot resolve {host} ({exc})", request=request) from exc
         vetted = _vetted_addresses(addresses)
         if vetted is None:
-            raise httpx.ConnectError(
-                f"{host} resolves to a link-local or unusable address ({', '.join(addresses) or 'none'})",
+            # Not an outbound call: this is the SSRF guard refusing one. The f-string is the
+            # error message, and ``request`` is the outgoing httpx.Request being vetted (every
+            # resolved address checked, then pinned below; httpx sends each redirect hop
+            # through here too), not client input.
+            raise httpx.ConnectError(  # nosemgrep: request-url-outbound
+                f"{host} resolves to a link-local or unusable address ({', '.join(addresses) or 'none'})",  # nosemgrep: request-url-outbound -- error text, no request is sent
                 request=request,
             )
         # Send a copy addressed to the vetted IP. The Host header was set from the name when
