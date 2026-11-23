@@ -14,9 +14,9 @@ import json
 import logging
 import secrets
 import threading
-from datetime import datetime, timezone
 from typing import Any
 
+from argus_cortex.timestamps import utc_now_iso
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,10 +52,6 @@ _jobs_lock = threading.Lock()
 _MAX_JOBS = 200
 _FINISHED = ("completed", "failed")
 _tasks: set[asyncio.Task] = set()  # strong refs so running jobs aren't garbage-collected
-
-
-def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _store_job(result: RepairResult) -> bool:
@@ -142,7 +138,7 @@ async def run_repair(
         repo=request.repo,
         status="pending",
         mode=request.mode,
-        created_at=_now_iso(),
+        created_at=utc_now_iso("auto"),
     )
     if not _store_job(result):
         raise HTTPException(status_code=503, detail="Too many repair jobs are running; try again later.")
@@ -184,7 +180,7 @@ async def run_repair(
                     repo, repo_warning, repo_error = resolve_repo(request.repo, pack_ctx.repo, write_ops=write_ops)
                     if repo_error:
                         await emit("error", {"job_id": job_id, "message": repo_error})
-                        _update_job(job_id, status="failed", error=repo_error, completed_at=_now_iso())
+                        _update_job(job_id, status="failed", error=repo_error, completed_at=utc_now_iso("auto"))
                         return
                     if repo_warning:
                         await emit("warning", {"job_id": job_id, "pack_id": request.pack_id, "message": repo_warning})
@@ -202,7 +198,7 @@ async def run_repair(
                     if request.pack_id else "No repo given."
                 )
                 await emit("error", {"job_id": job_id, "message": msg})
-                _update_job(job_id, status="failed", error=msg, completed_at=_now_iso())
+                _update_job(job_id, status="failed", error=msg, completed_at=utc_now_iso("auto"))
                 return
 
             # If compare_branch given, fetch raw diff via the audit API
@@ -213,7 +209,7 @@ async def run_repair(
                 )
                 if diff_error:
                     await emit("error", {"job_id": job_id, "message": diff_error})
-                    _update_job(job_id, status="failed", error=diff_error, completed_at=_now_iso())
+                    _update_job(job_id, status="failed", error=diff_error, completed_at=utc_now_iso("auto"))
                     return
 
             # Run the multi-model repair loop
@@ -330,7 +326,7 @@ async def run_repair(
                 push_url=push_url,
                 git_error=git_error,
                 error=error_msg,
-                completed_at=_now_iso(),
+                completed_at=utc_now_iso("auto"),
             )
             await emit("complete", {
                 "job_id":      job_id,
@@ -347,11 +343,11 @@ async def run_repair(
             })
 
         except asyncio.CancelledError:  # server shutdown
-            _update_job(job_id, status="failed", error="cancelled", completed_at=_now_iso())
+            _update_job(job_id, status="failed", error="cancelled", completed_at=utc_now_iso("auto"))
             raise
         except Exception as exc:
             log.exception("Repair job %s failed: %s", job_id, exc)
-            _update_job(job_id, status="failed", error=str(exc), completed_at=_now_iso())
+            _update_job(job_id, status="failed", error=str(exc), completed_at=utc_now_iso("auto"))
             await emit("error", {"job_id": job_id, "message": str(exc)})
         finally:
             queue.put_nowait(None)  # end of stream
