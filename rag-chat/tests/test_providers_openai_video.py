@@ -64,6 +64,46 @@ class OpenAIVideoJobTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             _run_with(handler)
 
+    def test_job_completing_on_the_last_poll_is_downloaded(self) -> None:
+        polls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                return httpx.Response(200, json={"id": "video_1", "status": "queued"})
+            if request.url.path.endswith("/content"):
+                return httpx.Response(200, content=b"MP4")
+            polls.append(request.url.path)
+            status = "completed" if len(polls) == 3 else "in_progress"
+            return httpx.Response(200, json={"id": "video_1", "status": status})
+
+        with mock.patch.object(openai, "_VIDEO_MAX_POLLS", 3):
+            result = _run_with(handler)
+        self.assertEqual(len(polls), 3)
+        self.assertEqual(result.media[0].data, b"MP4")
+
+    def test_job_failing_on_the_last_poll_is_a_failure_not_a_timeout(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                return httpx.Response(200, json={"id": "video_1", "status": "queued"})
+            return httpx.Response(200, json={"id": "video_1", "status": "failed", "error": "nope"})
+
+        with mock.patch.object(openai, "_VIDEO_MAX_POLLS", 1), self.assertRaises(RuntimeError) as cm:
+            _run_with(handler)
+        self.assertNotIsInstance(cm.exception, TimeoutError)
+
+    def test_job_never_finishing_times_out_after_max_polls(self) -> None:
+        polls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.method == "POST":
+                return httpx.Response(200, json={"id": "video_1", "status": "queued"})
+            polls.append(request.url.path)
+            return httpx.Response(200, json={"id": "video_1", "status": "in_progress"})
+
+        with mock.patch.object(openai, "_VIDEO_MAX_POLLS", 2), self.assertRaises(TimeoutError):
+            _run_with(handler)
+        self.assertEqual(len(polls), 2)
+
     def test_unsupported_duration_or_aspect_is_refused_before_any_call(self) -> None:
         def handler(request):
             raise AssertionError("no request expected")

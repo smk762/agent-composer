@@ -230,18 +230,22 @@ class OpenAIProvider(ImageProvider, VideoProvider):
             video_id = job.get("id")
             if not video_id:
                 raise RuntimeError("OpenAI video job was created without an id")
-            for _ in range(_VIDEO_MAX_POLLS):
+            polls = 0
+            while True:
+                # Checked after every fetch, the last poll's included: a job that finishes (or
+                # fails) on the final poll is reported as such, not as a timeout.
                 status = job.get("status")
                 if status == "completed":
                     break
                 if status == "failed":
                     raise RuntimeError(f"OpenAI video job {video_id} failed: {job.get('error')}")
+                if polls >= _VIDEO_MAX_POLLS:
+                    raise TimeoutError(f"OpenAI video job {video_id} did not finish in time")
+                polls += 1
                 await asyncio.sleep(_VIDEO_POLL_INTERVAL)
                 r = await c.get(f"{_API_BASE}/videos/{video_id}", headers=headers)
                 r.raise_for_status()
                 job = r.json()
-            else:
-                raise TimeoutError(f"OpenAI video job {video_id} did not finish in time")
 
             vr = await c.get(f"{_API_BASE}/videos/{video_id}/content", headers=headers, timeout=300)
             vr.raise_for_status()

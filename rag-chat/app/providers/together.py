@@ -19,6 +19,19 @@ _API_BASE = "https://api.together.xyz/v1"
 _IMAGE_MODELS = ["black-forest-labs/FLUX.1-schnell-Free", "black-forest-labs/FLUX.1-schnell", "black-forest-labs/FLUX.1.1-pro"]
 
 
+def _image_type(data: bytes) -> tuple[str, str]:
+    """(MIME type, extension) of the image bytes Together returned, from their magic number.
+
+    The request asks for PNG, but a model that ignores ``output_format`` still gets the
+    Content-Type and extension of what it actually sent. Unrecognised bytes stay PNG.
+    """
+    if data.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg", "jpg"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp", "webp"
+    return "image/png", "png"
+
+
 class TogetherAIProvider(ImageProvider):
     name = "together"
     capabilities = [Capability.IMAGE_GENERATE]
@@ -65,6 +78,8 @@ class TogetherAIProvider(ImageProvider):
             "height": h,
             "n": min(n, 4),
             "response_format": "b64_json",
+            # FLUX models default to JPEG; ask for PNG, and label by the bytes anyway (below).
+            "output_format": "png",
             "steps": 4 if "schnell" in model.lower() else 28,
         }
         if negative_prompt:
@@ -89,10 +104,11 @@ class TogetherAIProvider(ImageProvider):
                 # e.g. a url item or a partial/error result: an error, never an empty "PNG".
                 raise RuntimeError("Together returned an image without b64_json data")
             img_bytes = base64.b64decode(b64)
+            mime_type, ext = _image_type(img_bytes)
             media.append(GeneratedMedia(
                 data=img_bytes,
-                mime_type="image/png",
-                filename=f"together_{i}_{uuid4().hex[:8]}.png",
+                mime_type=mime_type,
+                filename=f"together_{i}_{uuid4().hex[:8]}.{ext}",
                 width=w, height=h,
             ))
 

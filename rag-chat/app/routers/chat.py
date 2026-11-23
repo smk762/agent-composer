@@ -25,7 +25,7 @@ from app.config import (
 )
 from app import retrieval
 from app.gpu_lease import OllamaLeaseUnavailable, ollama_lease
-from app.db import get_db
+from app.db import SessionLocal, get_db
 from app.auth import require_user
 from app.models.orm import Conversation, Message
 from app.models.schemas import (
@@ -348,6 +348,22 @@ async def _save_stream_turn(db: AsyncSession, conv: Conversation, user_msg: str,
             log.error("chat: rollback after stream persist error failed: %s", rb)
 
 
+async def _save_stream_turn_detached(conv: Conversation, user_msg: str,
+                                     content: str, tool_calls: List[Any]) -> None:
+    """``_save_stream_turn`` on a session of its own.
+
+    The save runs as a task that can outlive the request (a client disconnect cancels the
+    generator, then FastAPI closes the request's ``get_db`` session), so it must not use
+    that session. ``merge`` loads the conversation into the new session and carries over
+    the fields this request changed on it (``model``).
+    """
+    try:
+        async with SessionLocal() as db:
+            await _save_stream_turn(db, await db.merge(conv), user_msg, content, tool_calls)
+    except Exception as e:  # opening the session or the merge: logged like any persist error
+        log.error("chat: stream persist error: %s", e, exc_info=True)
+
+
 async def _store_new_conversation(db: AsyncSession, conv: Conversation) -> None:
     """Insert a conversation this request created (no id yet); an existing one is left alone."""
     if conv.id is None:
@@ -546,7 +562,7 @@ async def chat(
                 nonlocal save
                 if save is None:
                     save = asyncio.ensure_future(
-                        _save_stream_turn(db, conv, last_user_msg, acc_content, list(acc_tools)))
+                        _save_stream_turn_detached(conv, last_user_msg, acc_content, list(acc_tools)))
                     _persist_tasks.add(save)
                     save.add_done_callback(_persist_tasks.discard)
                 return save

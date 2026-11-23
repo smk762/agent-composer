@@ -73,6 +73,15 @@ class FakeDB:
     async def refresh(self, obj):
         pass
 
+    async def merge(self, obj):
+        return obj
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        self.closed = True
+
     def messages(self):
         return [m for m in self.added if isinstance(m, Message)]
 
@@ -86,6 +95,7 @@ def _chunk(text):
 class StreamingChatTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.payloads = []
+        self.save_db = FakeDB()  # the session the detached save opens (SessionLocal)
 
         async def fake_stream(base_url, payload, model, conv_id):
             self.payloads.append(payload)
@@ -113,6 +123,7 @@ class StreamingChatTests(unittest.IsolatedAsyncioTestCase):
             patch.object(chat, "rag_context_for", no_ctx),
             patch("httpx.AsyncClient", client),
             patch.object(chat, "CHAT_HISTORY_MAX_MSGS", 0),
+            patch.object(chat, "SessionLocal", lambda: self.save_db),
         ):
             p.start()
             self.addCleanup(p.stop)
@@ -134,7 +145,10 @@ class StreamingChatTests(unittest.IsolatedAsyncioTestCase):
                 break  # an SSE client closes here
         await body.aclose()
         await self._settle()
-        self.assertEqual([(m.role, m.content) for m in db.messages()], [("user", "hi"), ("assistant", "Hello")])
+        self.assertEqual([(m.role, m.content) for m in self.save_db.messages()], [("user", "hi"), ("assistant", "Hello")])
+        # Saved on a session of its own: the request's session is closed once the response ends.
+        self.assertEqual(db.messages(), [])
+        self.assertTrue(self.save_db.closed)
 
     async def test_partial_turn_is_saved_on_disconnect_mid_stream(self) -> None:
         db = FakeDB()
@@ -143,7 +157,10 @@ class StreamingChatTests(unittest.IsolatedAsyncioTestCase):
         await body.__anext__()  # first chunk, then the client goes away
         await body.aclose()
         await self._settle()
-        self.assertEqual([(m.role, m.content) for m in db.messages()], [("user", "hi"), ("assistant", "Hel")])
+        self.assertEqual([(m.role, m.content) for m in self.save_db.messages()], [("user", "hi"), ("assistant", "Hel")])
+        # Saved on a session of its own: the request's session is closed once the response ends.
+        self.assertEqual(db.messages(), [])
+        self.assertTrue(self.save_db.closed)
 
     async def test_unknown_conversation_is_a_404_before_streaming(self) -> None:
         with self.assertRaises(HTTPException) as cm:

@@ -36,11 +36,17 @@ class ProxyEncodingTests(unittest.IsolatedAsyncioTestCase):
         upstream.router.add_post("/embeddings", embeddings)
         upstream.router.add_get("/echo", echo_query)
 
-        async def upstream_admin(request: web.Request) -> web.Response:
-            return web.json_response({"reached": request.path})
+        # Everything else the upstream receives is recorded and answered 200, so a request the
+        # manager forwards shows up here whatever its spelling: a 404 alone can't tell "the
+        # manager refused it" from "the upstream had no such route" (aiohttp doesn't merge
+        # slashes, so a forwarded //admin/status would 404 upstream too).
+        self.upstream_seen: list[str] = []
 
-        upstream.router.add_get("/admin", upstream_admin)
-        upstream.router.add_get("/admin/{tail:.*}", upstream_admin)
+        async def upstream_catch_all(request: web.Request) -> web.Response:
+            self.upstream_seen.append(request.raw_path)
+            return web.json_response({"reached": request.raw_path})
+
+        upstream.router.add_route("*", "/{tail:.*}", upstream_catch_all)
         self.server = TestServer(upstream)
         await self.server.start_server()
 
@@ -96,7 +102,13 @@ class ProxyEncodingTests(unittest.IsolatedAsyncioTestCase):
     async def test_upstream_admin_routes_are_not_proxied_in_any_spelling(self):
         spellings = (b"/admin", b"//admin/status", b"/./admin/status", b"/x/../admin/status", b"/admin/")
         statuses = {raw: await self._raw_get(raw) for raw in spellings}
+        self.assertEqual(self.upstream_seen, [])
         self.assertEqual(statuses, {raw: 404 for raw in spellings})
+
+    async def test_catch_all_upstream_records_forwarded_requests(self):
+        # The check above is only as good as the recorder: a proxied path must land in it.
+        self.assertEqual(await self._raw_get(b"/models"), 200)
+        self.assertEqual(self.upstream_seen, ["/models"])
 
 
 if __name__ == "__main__":
