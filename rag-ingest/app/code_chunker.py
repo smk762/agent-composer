@@ -126,7 +126,7 @@ def _node_symbol(node, source: bytes) -> Optional[str]:
     """Best-effort extraction of a function/class name from a tree-sitter node."""
     try:
         name = node.child_by_field_name("name")
-    except Exception:
+    except Exception:  # noqa: S110 falls back to scanning the children below
         name = None
     if name is not None:
         return _safe_decode(source, name.start_byte, name.end_byte)

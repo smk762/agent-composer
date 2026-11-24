@@ -137,7 +137,7 @@ async def test_provider(
     from app.providers._crypto import decrypt_value
     try:
         api_key = decrypt_value(pc.encrypted_api_key)
-    except Exception:
+    except Exception:  # noqa: S110 logged and returned as an error just below
         api_key = None
     if not api_key:
         log.warning("provider %s: stored API key could not be decrypted", provider_name)

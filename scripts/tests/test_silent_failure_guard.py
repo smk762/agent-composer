@@ -14,6 +14,9 @@ thing ruff doesn't check: a ``noqa`` for it must give a reason.
   ``{}``, ``[]``, ``()``, ``""``, ``set()``, ``dict()``, ``list()``, ``0``, ``False`` or ``None``.
   A corrupt state file read as ``{}`` looks like an empty state, not a failure. Ruff has no rule
   for it, so it is reported as ``S110`` and takes the same reasoned ``# noqa: S110 <reason>``.
+* The same swallow rewritten (ai-code-auditor#155) is the same failure: a body of only ``...``, a
+  constant or ``_ = exc``; one that only assigns an empty value (``state = {}``) for the code after it;
+  and ``contextlib.suppress(Exception)``. Ruff sees none of them, so they are ``S110`` here.
 
 It fires on ``fixtures/silent_failure_guard/unguarded.py``, stays quiet on ``guarded.py``, and
 finds nothing in the repo's own code.
@@ -66,6 +69,40 @@ def _empty_return(stmt: ast.stmt) -> bool:
             and not v.args and not v.keywords)
 
 
+def _inert(stmt: ast.stmt) -> bool:
+    """A statement that does nothing: ``pass``, ``...``, a bare constant, or a name or constant put in ``_``."""
+    if isinstance(stmt, ast.Pass):
+        return True
+    if isinstance(stmt, ast.Expr):
+        return isinstance(stmt.value, ast.Constant)
+    return (isinstance(stmt, ast.Assign) and isinstance(stmt.value, (ast.Name, ast.Constant))
+            and all(isinstance(t, ast.Name) and t.id == "_" for t in stmt.targets))
+
+
+def _empty_reset(stmt: ast.stmt) -> bool:
+    """An assignment of an empty value: ``state = {}``, for the code after the ``try`` to use."""
+    return isinstance(stmt, (ast.Assign, ast.AnnAssign)) and stmt.value is not None and _empty_return(ast.Return(value=stmt.value))
+
+
+def _swallows(body: list[ast.stmt]) -> str:
+    """The code for a broad handler's body that loses the error, else ``""``."""
+    rest = [s for s in body if not _inert(s)]
+    if not rest:
+        return "S110"
+    if len(rest) > 1:
+        return ""
+    if isinstance(rest[0], ast.Continue):
+        return "S112"
+    empty_return = _empty_return(rest[0])
+    return "S110" if empty_return or _empty_reset(rest[0]) else ""
+
+
+def _broad_suppress(call: ast.Call) -> bool:
+    """``suppress(Exception)``: an except-pass spelled as a context manager."""
+    name = call.func.attr if isinstance(call.func, ast.Attribute) else getattr(call.func, "id", "")
+    return name == "suppress" and any(isinstance(a, ast.Name) and a.id in _BROAD for a in call.args)
+
+
 def findings(path: Path) -> list[str]:
     """``file:line code`` for each silent-failure pattern in *path* without a reasoned noqa."""
     source = path.read_text(encoding="utf-8")
@@ -80,14 +117,11 @@ def findings(path: Path) -> list[str]:
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "zip"
                 and node.args and not any(k.arg == "strict" for k in node.keywords)):
             hit(node.lineno, "B905")
-        elif isinstance(node, ast.ExceptHandler) and len(node.body) == 1:
-            broad = _broad(node)
-            if broad and isinstance(node.body[0], ast.Pass):
-                hit(node.lineno, "S110")
-            elif broad and isinstance(node.body[0], ast.Continue):
-                hit(node.lineno, "S112")
-            elif broad and _empty_return(node.body[0]):
-                hit(node.lineno, "S110")
+        elif isinstance(node, ast.Call) and _broad_suppress(node):
+            hit(node.lineno, "S110")
+        elif isinstance(node, ast.ExceptHandler) and _broad(node):
+            if code := _swallows(node.body):
+                hit(node.lineno, code)
     return out
 
 
@@ -99,8 +133,8 @@ def repo_files() -> list[Path]:
 class SilentFailureGuardTests(unittest.TestCase):
     def test_fires_on_the_positive_fixture(self) -> None:
         codes = sorted(h.rsplit(" ", 1)[1] for h in findings(FIXTURES / "unguarded.py"))
-        # zip, except-continue, bare except-pass, a noqa that gives no reason, return {} and a bare return
-        self.assertEqual(codes, ["B905", "S110", "S110", "S110", "S110", "S112"], findings(FIXTURES / "unguarded.py"))
+        # zip, except-continue, bare except-pass, a noqa that gives no reason, return {} and a bare return, then the rewrites
+        self.assertEqual(codes, ["B905", *["S110"] * 9, "S112"], findings(FIXTURES / "unguarded.py"))
 
     def test_empty_returns(self) -> None:
         empty = ("return", "return {}", "return []", "return ()", 'return ""', "return set()", "return dict()",
