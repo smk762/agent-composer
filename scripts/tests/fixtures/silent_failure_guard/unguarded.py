@@ -44,3 +44,38 @@ def notify(send, msg) -> None:
         send(msg)
     except BaseException:
         return  # a bare return swallows it like pass
+
+
+def ellipsis(fn):
+    try:
+        return fn()
+    except Exception:
+        ...
+
+
+def dead_store(fn):
+    try:
+        return fn()
+    except Exception as exc:
+        _ = exc
+
+
+def explained_to_nobody(fn):
+    try:
+        return fn()
+    except Exception:
+        "best effort"
+        pass
+
+
+def reset_then_use(path, read_json):
+    try:
+        state = read_json(path)
+    except Exception:
+        state = {}
+    return state
+
+
+def suppressed(fn, contextlib):
+    with contextlib.suppress(Exception):
+        fn()

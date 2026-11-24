@@ -17,7 +17,7 @@ _MIN_RETRY_INTERVAL_S = 0.5
 
 try:
     import torch
-except Exception:  # pragma: no cover - torch is optional
+except Exception:  # noqa: S110 torch is optional, None means CPU only  # pragma: no cover
     torch = None  # type: ignore[assignment]
 
 
